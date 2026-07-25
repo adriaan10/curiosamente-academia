@@ -1,0 +1,19 @@
+name: Mantener Supabase activo
+
+# Supabase pausa los proyectos gratuitos tras un tiempo sin actividad.
+# Esta tarea hace una consulta mínima cada 3 días para que el proyecto
+# de Curiosamente nunca llegue a pausarse, aunque nadie abra la app.
+on:
+  schedule:
+    - cron: '0 6 */3 * *'
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Consulta mínima a la base de datos
+        run: |
+          curl -sf "https://rwwszlyktvpszcdgwyyu.supabase.co/rest/v1/asignaturas?select=id&limit=1" \
+            -H "apikey: sb_publishable_1rEGTYk5JAM3JKTKaF7bxQ__DR2tngn" \
+            -H "Authorization: Bearer sb_publishable_1rEGTYk5JAM3JKTKaF7bxQ__DR2tngn"

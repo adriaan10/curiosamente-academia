@@ -7,7 +7,8 @@
     "build": "esbuild src/app.js --bundle --outfile=app/bundle.js --format=iife --platform=browser",
     "start": "npm run build && electron .",
     "test": "node test/test-pdf.mjs",
-    "dist": "npm run build && electron-builder --win"
+    "dist": "npm run build && electron-builder --win",
+    "release": "npm run build && electron-builder --win --publish always"
   },
   "author": "Academia Curiosamente",
   "license": "UNLICENSED",
@@ -17,12 +18,27 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
+    "electron-updater": "^6.8.9",
     "pdf-lib": "^1.17.1"
   },
   "build": {
     "appId": "com.curiosamente.gestion",
     "productName": "Curiosamente",
-    "win": { "target": "nsis", "icon": "assets/icon.ico" },
-    "files": ["main.js", "preload.js", "config.defaults.json", "app/**/*", "assets/**/*"]
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "config.defaults.json",
+      "app/**/*",
+      "assets/**/*"
+    ],
+    "publish": {
+      "provider": "github",
+      "owner": "adriaan10",
+      "repo": "curiosamente-academia"
+    }
   }
 }
