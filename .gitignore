@@ -1,0 +1,5 @@
+node_modules/
+dist/
+app/bundle.js
+test/salida/
+*.log

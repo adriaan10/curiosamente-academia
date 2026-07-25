@@ -1,0 +1,28 @@
+{
+  "name": "curiosamente-app",
+  "version": "1.0.0",
+  "description": "App de escritorio de gestión de alumnos y recibos para Academia Curiosamente",
+  "main": "main.js",
+  "scripts": {
+    "build": "esbuild src/app.js --bundle --outfile=app/bundle.js --format=iife --platform=browser",
+    "start": "npm run build && electron .",
+    "test": "node test/test-pdf.mjs",
+    "dist": "npm run build && electron-builder --win"
+  },
+  "author": "Academia Curiosamente",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "esbuild": "^0.24.0"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "pdf-lib": "^1.17.1"
+  },
+  "build": {
+    "appId": "com.curiosamente.gestion",
+    "productName": "Curiosamente",
+    "win": { "target": "nsis", "icon": "assets/icon.ico" },
+    "files": ["main.js", "preload.js", "config.defaults.json", "app/**/*", "assets/**/*"]
+  }
+}
