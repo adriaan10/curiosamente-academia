@@ -49,7 +49,43 @@ La conexión viene ya configurada en `config.defaults.json` (incluido en la carp
 así que la app va directa a la pantalla de login. Solo si algún día cambia el proyecto
 Supabase habrá que actualizar ese archivo (o usar Ajustes → Cambiar datos de conexión).
 
-Para generar un instalador de Windows (`.exe`): `npm run dist`.
+Para generar un instalador de Windows sin publicarlo: `npm run dist` (queda en `dist/`).
+
+## Repositorio y actualizaciones automáticas
+
+El código vive en un repositorio **público** de GitHub:
+**[github.com/adriaan10/curiosamente-academia](https://github.com/adriaan10/curiosamente-academia)**.
+Es público para que la auto-actualización funcione en los ordenadores de la academia
+sin guardar ninguna contraseña dentro del programa — no hay secretos reales en el
+código (la clave de Supabase incluida es la "publicable", pensada para ir en apps
+cliente; la seguridad real la aplican las reglas RLS del servidor).
+
+La app trae integrado `electron-updater`: al abrirse comprueba en segundo plano si
+hay una versión más nueva publicada en GitHub, la descarga sola si la hay, y se
+actualiza en el siguiente cierre normal — nadie tiene que hacer nada.
+
+### Publicar una versión nueva
+
+1. Sube la versión en `package.json` (`"version": "1.0.1"`, por ejemplo).
+2. Ejecuta:
+   ```bash
+   npm run release
+   ```
+   Esto compila, genera el instalador y sube un borrador de "release" a GitHub.
+3. Publica el borrador (quitarle "Draft"), desde la web de GitHub o con:
+   ```bash
+   gh release edit vX.Y.Z --repo adriaan10/curiosamente-academia --draft=false
+   ```
+4. En cuanto está publicado, todos los ordenadores de la academia lo detectan solos
+   la próxima vez que abran la app.
+
+### Mantener Supabase activo
+
+Un flujo de GitHub Actions (`.github/workflows/mantener-supabase-activo.yml`) hace
+una consulta mínima a la base de datos cada 3 días, para que el proyecto gratuito de
+Supabase nunca llegue a pausarse por inactividad, aunque nadie abra la app durante
+semanas (vacaciones, por ejemplo). Si alguna vez se pausara de todos modos, no se
+pierde nada: basta con entrar al panel de Supabase y pulsar "Restore".
 
 ### 3. Logo real (opcional)
 
