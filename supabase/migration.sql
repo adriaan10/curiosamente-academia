@@ -373,6 +373,24 @@ revoke execute on function public.nombre_normalizado(text) from anon;
 --   * función dar_baja_alumno(uuid): estado 'baja' + fuera de todas las clases
 -- ============================================================
 
+-- ---------- Endurecimiento del acceso anónimo (sin sesión) ----------
+-- Por defecto Supabase concede a "anon" acceso base a todas las tablas
+-- (luego se filtra con RLS). Como esta app no tiene ningún uso sin sesión,
+-- se le retira el acceso de raíz: así nadie sin usuario/contraseña puede
+-- ni leer, ni escribir, ni "tantear" nombres de tablas/columnas probando.
+revoke all on all tables in schema public from anon;
+alter default privileges in schema public revoke all on tables from anon;
+revoke all on all functions in schema public from anon;
+alter default privileges in schema public revoke all on functions from anon;
+notify pgrst, 'reload schema';
+
+-- check_recibo_duplicado es un disparador interno: nunca se llama a mano.
+revoke execute on function public.check_recibo_duplicado() from public, anon, authenticated;
+
+-- search_path fijo en las funciones auxiliares del anti-duplicados de alumnos.
+alter function public.nombre_normalizado(text) set search_path = public, extensions;
+alter function public.quitar_acentos(text) set search_path = public, extensions;
+
 -- ---------- Endurecimiento: las funciones internas no son invocables por la API ----------
 revoke execute on function public.handle_new_user() from public, anon, authenticated;
 grant execute on function public.handle_new_user() to supabase_auth_admin;
