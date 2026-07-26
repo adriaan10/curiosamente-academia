@@ -277,6 +277,13 @@ td small { color: var(--gris); }
 .dia-num { color: var(--naranja); margin-left: 4px; }
 .dia-col.dia-hoy { border-color: var(--naranja); box-shadow: 0 0 0 1px var(--naranja); }
 
+/* ---- huecos libres ---- */
+.hueco-card {
+  border-left: 4px solid var(--verde); background: #e6f4ec;
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 8px;
+  font-weight: 600; font-size: 13.5px; color: #1e6b40;
+}
+
 /* ---- anulaciones y alternativas ---- */
 .clase-card.anulada { opacity: .6; }
 .clase-card.anulada .clase-hora, .clase-card.anulada .clase-nombre { text-decoration: line-through; }
@@ -336,7 +343,8 @@ td small { color: var(--gris); }
 .posit-fecha { font-size: 10.5px; color: rgba(0,0,0,.35); text-align: right; margin-top: 6px; }
 
 /* ---- ajustes ---- */
-.tarjeta.ajustes { max-width: 620px; }
+.tarjeta.ajustes { max-width: 720px; }
+.tarjeta.ajustes table { margin-top: 8px; }
 .tarjeta.ajustes h3 { margin: 22px 0 4px; font-size: 14px; }
 
 /* ---- toast ---- */

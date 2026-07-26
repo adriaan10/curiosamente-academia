@@ -452,6 +452,13 @@ function modalAlumno(alumno) {
   const nuevaMatricula = () => ({ id: null, asignatura_id: misAsignaturas()[0]?.id, tarifa: '', tipo_tarifa: 'mes', horas_semana: '' });
   if (!alumno) ms.push(nuevaMatricula());
 
+  // Historial de recibos de este alumno (ya filtrado por lo que el usuario
+  // puede ver, según las reglas de seguridad del servidor).
+  const historialRecibos = alumno
+    ? S.recibos.filter(r => r.alumno_id === alumno.id)
+      .sort((x, y) => (y.fecha_emision || '').localeCompare(x.fecha_emision || ''))
+    : [];
+
   abrirModal(`
   <h2>${alumno ? 'Ficha de ' + e(a.nombre) : 'Nuevo alumno'}</h2>
   ${alumno && a.estado === 'baja' ? '<p class="ayuda">⚠ Este alumno está <strong>de baja</strong>.</p>' : ''}
@@ -471,6 +478,21 @@ function modalAlumno(alumno) {
   </div>` : ''}
   <div id="a-matriculas"></div>
   <button class="btn chico" id="a-add-mat">+ Añadir asignatura</button>
+  ${alumno ? `
+  <h3 class="seccion">Historial de recibos</h3>
+  ${historialRecibos.length === 0 ? '<p class="ayuda">Todavía no tiene recibos.</p>' : `
+  <div class="tabla-wrap"><table>
+    <thead><tr><th>Fecha</th><th>Concepto</th><th>Importe</th><th>Estado</th><th></th></tr></thead>
+    <tbody>
+    ${historialRecibos.map(r => `<tr>
+      <td>${e(fmtFecha(r.fecha_emision))}</td>
+      <td>${e(r.concepto)}</td>
+      <td><strong>${formatoImporte(r.importe)}€</strong></td>
+      <td><span class="chip ${r.estado}">${r.estado}</span></td>
+      <td class="acciones"><button class="btn chico liso" data-pdf-hist="${r.id}">PDF</button></td>
+    </tr>`).join('')}
+    </tbody>
+  </table></div>`}` : ''}
   <label>Notas / observaciones<textarea id="a-notas" rows="3">${e(a.notas || '')}</textarea></label>
   <div class="pie-modal">
     ${alumno ? (a.estado === 'baja'
@@ -526,6 +548,14 @@ function modalAlumno(alumno) {
       renderAlumnos();
       avisar(`${a.nombre} reactivado.`);
     };
+    document.querySelectorAll('[data-pdf-hist]').forEach(b => b.onclick = async () => {
+      const r = S.recibos.find(x => x.id === b.dataset.pdfHist);
+      const abierto = await window.api.openPdf(r.pdf_path);
+      if (!abierto) {
+        const ruta = await regenerarPdf(r);
+        window.api.openPdf(ruta);
+      }
+    });
   }
 
   document.getElementById('m-cancelar').onclick = cerrarModal;
@@ -1090,6 +1120,7 @@ function renderHorario() {
     <div class="segmentos">
       <button class="seg ${modo === 'semana' ? 'activo' : ''}" data-modo="semana">Semana</button>
       <button class="seg ${modo === 'mes' ? 'activo' : ''}" data-modo="mes">Mes</button>
+      <button class="seg ${modo === 'huecos' ? 'activo' : ''}" data-modo="huecos">Huecos libres</button>
     </div>
     ${modo === 'mes' ? `
     <div class="mes-nav">
@@ -1097,16 +1128,20 @@ function renderHorario() {
       <strong>${MESES[S.mesVisto.mes]} ${S.mesVisto.anio}</strong>
       <button class="btn chico liso" id="mes-sig">›</button>
     </div>` : ''}
+    ${modo === 'huecos' ? `
+    <label class="inline">Desde <input type="time" id="hu-desde" value="${e(S.huecosDesde || '16:00')}"></label>
+    <label class="inline">hasta <input type="time" id="hu-hasta" value="${e(S.huecosHasta || '21:00')}"></label>` : ''}
     <span class="flex1"></span>
     ${esAdmin ? `<select id="fh-prof">
       <option value="">Todos los profesores</option>
       ${profesoresActivos().map(p => `<option value="${p.id}" ${p.id === S.filtros.profesor ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
     </select>` : ''}
-    <button class="btn" id="btn-alternativa">+ Clase alternativa</button>
+    ${modo !== 'huecos' ? '<button class="btn" id="btn-alternativa">+ Clase alternativa</button>' : ''}
   </div>
-  ${sesiones.length === 0 ? `<div class="vacio">No hay clases con horario todavía.<br>
-    <small>Crea grupos en la pestaña Clases y asígnales días y horas.</small></div>`
-    : (modo === 'semana' ? htmlSemana(sesiones, esAdmin) : htmlMes(sesiones))}`;
+  ${modo === 'huecos' ? htmlHuecos(clases)
+    : (sesiones.length === 0 ? `<div class="vacio">No hay clases con horario todavía.<br>
+      <small>Crea grupos en la pestaña Clases y asígnales días y horas.</small></div>`
+      : (modo === 'semana' ? htmlSemana(sesiones, esAdmin) : htmlMes(sesiones)))}`;
 
   document.querySelectorAll('[data-modo]').forEach(b => b.onclick = () => {
     S.horarioModo = b.dataset.modo;
@@ -1126,11 +1161,77 @@ function renderHorario() {
     if (S.mesVisto.mes > 11) { S.mesVisto.mes = 0; S.mesVisto.anio++; }
     renderHorario();
   };
-  document.getElementById('btn-alternativa').onclick = () => modalClaseAlternativa();
+  const huDesde = document.getElementById('hu-desde');
+  const huHasta = document.getElementById('hu-hasta');
+  if (huDesde) huDesde.onchange = (ev) => { S.huecosDesde = ev.target.value; renderHorario(); };
+  if (huHasta) huHasta.onchange = (ev) => { S.huecosHasta = ev.target.value; renderHorario(); };
+  const btnAlt = document.getElementById('btn-alternativa');
+  if (btnAlt) btnAlt.onclick = () => modalClaseAlternativa();
   document.querySelectorAll('[data-ver-clase]').forEach(el => el.onclick = () =>
     modalDetalleClase(S.clases.find(c => c.id === el.dataset.verClase), el.dataset.fecha || undefined));
   document.querySelectorAll('[data-ver-alt]').forEach(el => el.onclick = () =>
     modalDetalleAlternativa(S.excepciones.find(x => x.id === el.dataset.verAlt)));
+}
+
+// ---- Huecos libres: tramos sin clase en el horario fijo de cada día ----
+
+function minutosDeHora(hhmm) {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  return h * 60 + (m || 0);
+}
+
+function minutosAHora(min) {
+  const h = Math.floor(min / 60), m = min % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+// Resta los tramos ocupados (horarios de clase) al rango [desde, hasta] de un día.
+function huecosLibresDia(sesionesDia, desdeMin, hastaMin) {
+  const ocupados = sesionesDia
+    .map(s => {
+      const ini = minutosDeHora(horaCorta(s.hora));
+      return [ini, ini + (s.duracion_min || 60)];
+    })
+    .sort((a, b) => a[0] - b[0]);
+  const libres = [];
+  let cursor = desdeMin;
+  for (const [ini, fin] of ocupados) {
+    if (ini > cursor) libres.push([cursor, Math.min(ini, hastaMin)]);
+    cursor = Math.max(cursor, fin);
+    if (cursor >= hastaMin) break;
+  }
+  if (cursor < hastaMin) libres.push([cursor, hastaMin]);
+  return libres.filter(([a, b]) => b > a);
+}
+
+function htmlHuecos(clases) {
+  const desde = minutosDeHora(S.huecosDesde || '16:00');
+  const hasta = minutosDeHora(S.huecosHasta || '21:00');
+  if (hasta <= desde) {
+    return '<div class="vacio">La hora "hasta" debe ser posterior a "desde".</div>';
+  }
+
+  const porDia = Array.from({ length: 7 }, () => []);
+  for (const c of clases) {
+    for (const h of c.clase_horarios || []) porDia[h.dia_semana - 1].push(h);
+  }
+  const diasConClase = new Set();
+  porDia.forEach((lista, i) => { if (lista.length) diasConClase.add(i); });
+  const dias = [0, 1, 2, 3, 4, ...(diasConClase.has(5) ? [5] : []), ...(diasConClase.has(6) ? [6] : [])];
+
+  return `<div class="horario-grid" style="grid-template-columns: repeat(${dias.length}, 1fr)">
+    ${dias.map(d => {
+      const libres = huecosLibresDia(porDia[d], desde, hasta);
+      return `<div class="dia-col">
+        <div class="dia-titulo">${DIAS[d]}</div>
+        ${libres.length === 0
+          ? '<div class="dia-libre">Sin huecos</div>'
+          : libres.map(([a, b]) => `<div class="hueco-card">${minutosAHora(a)}–${minutosAHora(b)}</div>`).join('')}
+      </div>`;
+    }).join('')}
+  </div>
+  <p class="ayuda" style="margin-top:14px">Huecos entre ${e(S.huecosDesde || '16:00')} y ${e(S.huecosHasta || '21:00')}
+  según el horario fijo de las clases (no descuenta anulaciones puntuales ni sesiones alternativas).</p>`;
 }
 
 // Semana actual: columnas por día (con su fecha) con las clases ordenadas por
@@ -2091,6 +2192,95 @@ function modalEditarProfesor(prof) {
 
 // ---------------------------------------------------------------- ajustes
 
+// Agrupa todas las matrículas de la academia por asignatura + tipo de tarifa,
+// para poder cambiar el precio de todos los alumnos matriculados de una vez
+// en lugar de editarlos uno a uno.
+function gruposDeTarifa() {
+  const mapa = new Map();
+  for (const a of S.alumnos) {
+    for (const m of a.matriculas || []) {
+      const clave = m.asignatura_id + '|' + m.tipo_tarifa;
+      if (!mapa.has(clave)) {
+        mapa.set(clave, {
+          asignatura_id: m.asignatura_id,
+          asignatura: m.asignaturas?.nombre || S.asignaturas.find(x => x.id === m.asignatura_id)?.nombre || '',
+          tipo_tarifa: m.tipo_tarifa,
+          tarifas: []
+        });
+      }
+      mapa.get(clave).tarifas.push(Number(m.tarifa));
+    }
+  }
+  return [...mapa.values()].sort((a, b) =>
+    a.asignatura.localeCompare(b.asignatura) || a.tipo_tarifa.localeCompare(b.tipo_tarifa));
+}
+
+function renderGruposTarifa() {
+  const grupos = gruposDeTarifa();
+  if (!grupos.length) return '<p class="ayuda">Todavía no hay alumnos matriculados.</p>';
+  return `<div class="tabla-wrap"><table>
+    <thead><tr><th>Asignatura</th><th>Tarifa</th><th>Alumnos</th><th>Precio actual</th><th></th></tr></thead>
+    <tbody>
+    ${grupos.map(g => {
+      const min = Math.min(...g.tarifas), max = Math.max(...g.tarifas);
+      const precio = min === max ? `${formatoImporte(min)}€` : `${formatoImporte(min)}–${formatoImporte(max)}€`;
+      return `<tr>
+        <td>${e(g.asignatura)}</td>
+        <td>${g.tipo_tarifa === 'clase' ? '€/clase' : '€/mes'}</td>
+        <td>${g.tarifas.length}</td>
+        <td>${precio}</td>
+        <td class="acciones"><button class="btn chico" data-cambiar-tarifa="${g.asignatura_id}|${g.tipo_tarifa}">Cambiar precio</button></td>
+      </tr>`;
+    }).join('')}
+    </tbody>
+  </table></div>`;
+}
+
+function modalCambiarTarifaAsignatura(asignaturaId, tipoTarifa) {
+  const g = gruposDeTarifa().find(x => x.asignatura_id === asignaturaId && x.tipo_tarifa === tipoTarifa);
+  if (!g) return;
+  const n = g.tarifas.length;
+  const min = Math.min(...g.tarifas), max = Math.max(...g.tarifas);
+  const precioActual = min === max ? `${formatoImporte(min)}€` : `${formatoImporte(min)}–${formatoImporte(max)}€`;
+
+  abrirModal(`
+  <h2>Cambiar precio — ${e(g.asignatura)}</h2>
+  <p class="ayuda">Afecta a los <strong>${n}</strong> alumno${n === 1 ? '' : 's'} matriculados en esta
+  asignatura con tarifa ${g.tipo_tarifa === 'clase' ? 'por clase' : 'mensual'}.
+  Precio actual: ${precioActual}.</p>
+  <label>Nuevo precio (€)<input id="ct-precio" type="number" min="0" step="0.01"></label>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+    <button class="btn primario" id="ct-guardar">Aplicar a los ${n} alumnos</button>
+  </div>
+  <p id="m-msg" class="error"></p>`);
+
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('ct-guardar').onclick = async () => {
+    const nuevo = Number(document.getElementById('ct-precio').value);
+    if (!nuevo || nuevo <= 0) {
+      document.getElementById('m-msg').textContent = 'Introduce un precio válido.';
+      return;
+    }
+    if (!confirm(`¿Cambiar el precio de "${g.asignatura}" (${g.tipo_tarifa === 'clase' ? '€/clase' : '€/mes'}) a ${formatoImporte(nuevo)}€ para los ${n} alumnos matriculados? Los recibos ya generados no cambian, solo los que se generen a partir de ahora.`)) return;
+    const btn = document.getElementById('ct-guardar');
+    btn.disabled = true; btn.textContent = 'Aplicando…';
+    const { error } = await S.sb.from('matriculas')
+      .update({ tarifa: nuevo })
+      .eq('asignatura_id', asignaturaId)
+      .eq('tipo_tarifa', tipoTarifa);
+    if (error) {
+      btn.disabled = false; btn.textContent = `Aplicar a los ${n} alumnos`;
+      document.getElementById('m-msg').textContent = 'Error: ' + error.message;
+      return;
+    }
+    cerrarModal();
+    await cargarAlumnos();
+    renderAjustes();
+    avisar(`Precio actualizado para ${n} alumno${n === 1 ? '' : 's'}.`);
+  };
+}
+
 async function renderAjustes() {
   const dir = await window.api.getRecibosDir();
   document.getElementById('contenido').innerHTML = `
@@ -2107,6 +2297,11 @@ async function renderAjustes() {
     un CSV cuando quieras desde las pestañas Alumnos y Recibos.</p>
 
     ${S.profesor?.es_admin ? `
+    <h3>Tarifas por asignatura (solo administrador)</h3>
+    <p class="ayuda">Cambia el precio de todos los alumnos matriculados en una asignatura de una vez,
+    en lugar de editarlos uno a uno.</p>
+    ${renderGruposTarifa()}
+
     <h3>Conexión (solo administrador)</h3>
     <p class="ayuda">Proyecto: <code>${e(S.cfg.supabaseUrl || '')}</code></p>
     <button class="btn liso" id="aj-reconf">Cambiar datos de conexión…</button>` : ''}
@@ -2117,6 +2312,10 @@ async function renderAjustes() {
   };
   const reconf = document.getElementById('aj-reconf');
   if (reconf) reconf.onclick = () => renderSetup();
+  document.querySelectorAll('[data-cambiar-tarifa]').forEach(b => b.onclick = () => {
+    const [asigId, tipo] = b.dataset.cambiarTarifa.split('|');
+    modalCambiarTarifaAsignatura(Number(asigId), tipo);
+  });
 }
 
 // ---------------------------------------------------------------- modal y toast
