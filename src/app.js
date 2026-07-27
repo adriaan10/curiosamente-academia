@@ -21,6 +21,7 @@ const S = {
   clases: [],
   excepciones: [],
   notas: [],
+  profesorHorario: [],
   vista: 'inicio',
   vistaRecibos: 'pendientes',
   mesPagados: '',
@@ -71,9 +72,15 @@ async function cargarTodo() {
   S.profesores = profs.data || [];
   S.asignaturas = asigs.data || [];
   S.profAsig = profAsig.data || [];
-  await Promise.all([cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas()]);
+  await Promise.all([cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(), cargarHorarioTrabajo()]);
   backupAutomatico();
   window.api.getRecibosDir(); // crea la carpeta de recibos de este equipo si no existía aún
+}
+
+async function cargarHorarioTrabajo() {
+  const { data, error } = await S.sb.from('profesor_horario').select('*');
+  if (error) return avisar('Error cargando horario de trabajo: ' + error.message, true);
+  S.profesorHorario = data || [];
 }
 
 async function cargarNotas() {
@@ -425,7 +432,7 @@ function renderAlumnos() {
   </table>`}`;
 
   const rerender = () => renderAlumnos();
-  document.getElementById('f-texto').oninput = (ev) => { S.filtros.texto = ev.target.value; rerender(); };
+  document.getElementById('f-texto').oninput = (ev) => { S.filtros.texto = ev.target.value; conFocoPreservado(rerender); };
   document.getElementById('f-asig').onchange = (ev) => { S.filtros.asignatura = ev.target.value; rerender(); };
   document.getElementById('f-estado').onchange = (ev) => { S.filtros.estado = ev.target.value; rerender(); };
   const fp = document.getElementById('f-prof');
@@ -711,13 +718,14 @@ function renderClases() {
   <div class="clases-grid">
     ${lista.map(c => {
       const n = (c.clase_alumnos || []).length;
+      const cap = c.capacidad || 6;
       const col = colorClase(c);
       return `<div class="clase-tile" data-abrir-clase="${c.id}"
         style="background:${col.fondo}; border-top-color:${col.borde}">
         <div class="tile-nombre">${e(c.nombre)}</div>
         <div class="tile-asig">${e(c.asignaturas?.nombre || '')}</div>
         <div class="tile-horario">${e(textoHorarios(c))}</div>
-        <div class="tile-pie">${n} alumno${n === 1 ? '' : 's'}${esAdmin ? ' · ' + e(c.profesores?.nombre || '') : ''}</div>
+        <div class="tile-pie">${n}/${cap} alumnos${n >= cap ? ' · lleno' : ''}${esAdmin ? ' · ' + e(c.profesores?.nombre || '') : ''}</div>
       </div>`;
     }).join('')}
   </div>`}`;
@@ -773,7 +781,7 @@ function modalDetalleClase(clase, fechaCtx) {
       ${fmtFecha(x.fecha)} · ${horaCorta(x.hora)}${x.nombre ? ' · ' + e(x.nombre) : ''}
       <button class="quitar-exc" data-quitar-exc="${x.id}" title="Eliminar la clase alternativa">✕</button></span>`).join('')}
   </div>` : ''}
-  <h3 class="seccion">Alumnos (${alumnos.length})</h3>
+  <h3 class="seccion">Alumnos (${alumnos.length}/${clase.capacidad || 6})${alumnos.length >= (clase.capacidad || 6) ? ' — grupo lleno' : ''}</h3>
   ${alumnos.length === 0 ? '<p class="ayuda">Todavía no hay alumnos apuntados.</p>' : `
   <ul class="detalle-alumnos">
     ${alumnos.map(a => `<li>${e(a.nombre)}${a.telefono ? ` <small>· ${e(a.telefono)}</small>` : ''}</li>`).join('')}
@@ -964,8 +972,12 @@ function modalClase(clase) {
     ${esAdmin ? `<label>Profesor<select id="c-prof">
       ${profesoresActivos().map(p => `<option value="${p.id}" ${p.id === (c.profesor_id || S.profesor.id) ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
     </select></label>` : ''}
+    <label>Aforo (máx. alumnos)<select id="c-aforo">
+      ${[1, 2, 3, 4, 5, 6, 7, 8].map(n => `<option value="${n}" ${(c.capacidad || 6) === n ? 'selected' : ''}>${n}</option>`).join('')}
+    </select></label>
     <label>Notas<input id="c-notas" value="${e(c.notas || '')}"></label>
   </div>
+  <p class="ayuda">Cuando el grupo llegue a su aforo, esa hora deja de salir como "hueco libre" en el horario.</p>
   <h3 class="seccion">Color de la clase</h3>
   <div class="colores" id="c-colores">
     ${COLORES_CLASE.map(col => `<button type="button" class="color-swatch ${c.color === col ? 'elegido' : ''}"
@@ -1061,6 +1073,7 @@ function modalClase(clase) {
       asignatura_id: Number(document.getElementById('c-asig').value),
       profesor_id: profesorActual(),
       color: colorSel,
+      capacidad: Number(document.getElementById('c-aforo').value),
       notas: document.getElementById('c-notas').value.trim() || null
     };
     let claseId = clase?.id;
@@ -1128,17 +1141,23 @@ function renderHorario() {
       <strong>${MESES[S.mesVisto.mes]} ${S.mesVisto.anio}</strong>
       <button class="btn chico liso" id="mes-sig">›</button>
     </div>` : ''}
-    ${modo === 'huecos' ? `
-    <label class="inline">Desde <input type="time" id="hu-desde" value="${e(S.huecosDesde || '16:00')}"></label>
-    <label class="inline">hasta <input type="time" id="hu-hasta" value="${e(S.huecosHasta || '21:00')}"></label>` : ''}
+    ${(() => {
+      if (modo !== 'huecos') return '';
+      const idObjetivo = esAdmin ? S.filtros.profesor : S.profesor.id;
+      const tramos = idObjetivo ? S.profesorHorario.filter(h => h.profesor_id === idObjetivo) : [];
+      if (idObjetivo && !tramos.length) return `
+      <label class="inline">Desde <input type="time" id="hu-desde" value="${e(S.huecosDesde || '16:00')}"></label>
+      <label class="inline">hasta <input type="time" id="hu-hasta" value="${e(S.huecosHasta || '21:00')}"></label>`;
+      return '';
+    })()}
     <span class="flex1"></span>
     ${esAdmin ? `<select id="fh-prof">
-      <option value="">Todos los profesores</option>
+      <option value="">${modo === 'huecos' ? 'Elige un profesor…' : 'Todos los profesores'}</option>
       ${profesoresActivos().map(p => `<option value="${p.id}" ${p.id === S.filtros.profesor ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
     </select>` : ''}
     ${modo !== 'huecos' ? '<button class="btn" id="btn-alternativa">+ Clase alternativa</button>' : ''}
   </div>
-  ${modo === 'huecos' ? htmlHuecos(clases)
+  ${modo === 'huecos' ? htmlHuecos(esAdmin ? S.filtros.profesor : S.profesor.id, esAdmin)
     : (sesiones.length === 0 ? `<div class="vacio">No hay clases con horario todavía.<br>
       <small>Crea grupos en la pestaña Clases y asígnales días y horas.</small></div>`
       : (modo === 'semana' ? htmlSemana(sesiones, esAdmin) : htmlMes(sesiones)))}`;
@@ -1204,34 +1223,81 @@ function huecosLibresDia(sesionesDia, desdeMin, hastaMin) {
   return libres.filter(([a, b]) => b > a);
 }
 
-function htmlHuecos(clases) {
-  const desde = minutosDeHora(S.huecosDesde || '16:00');
-  const hasta = minutosDeHora(S.huecosHasta || '21:00');
-  if (hasta <= desde) {
-    return '<div class="vacio">La hora "hasta" debe ser posterior a "desde".</div>';
+// Huecos libres de un profesor concreto. Usa su horario de trabajo (Ajustes)
+// si lo tiene configurado; si no, el horario genérico ajustable Desde/Hasta.
+// Un grupo con plazas libres (no lleno) no bloquea su hora: se muestra aparte
+// como "hay sitio", no como ocupado.
+function htmlHuecos(profesorId, esAdmin) {
+  if (esAdmin && !profesorId) {
+    return '<div class="vacio">Elige un profesor arriba para ver sus huecos libres.</div>';
   }
 
+  const clasesDelProfesor = S.clases.filter(c => c.profesor_id === profesorId);
   const porDia = Array.from({ length: 7 }, () => []);
-  for (const c of clases) {
-    for (const h of c.clase_horarios || []) porDia[h.dia_semana - 1].push(h);
+  for (const c of clasesDelProfesor) {
+    for (const h of c.clase_horarios || []) porDia[h.dia_semana - 1].push({ ...h, clase: c });
   }
-  const diasConClase = new Set();
-  porDia.forEach((lista, i) => { if (lista.length) diasConClase.add(i); });
-  const dias = [0, 1, 2, 3, 4, ...(diasConClase.has(5) ? [5] : []), ...(diasConClase.has(6) ? [6] : [])];
 
-  return `<div class="horario-grid" style="grid-template-columns: repeat(${dias.length}, 1fr)">
-    ${dias.map(d => {
-      const libres = huecosLibresDia(porDia[d], desde, hasta);
+  const tramosProfesor = S.profesorHorario.filter(h => h.profesor_id === profesorId);
+  const tramosPorDia = new Map();
+  for (const t of tramosProfesor) {
+    if (!tramosPorDia.has(t.dia_semana)) tramosPorDia.set(t.dia_semana, []);
+    tramosPorDia.get(t.dia_semana).push(t);
+  }
+  const configurado = tramosProfesor.length > 0;
+
+  let diasBloques; // [{ dia: 0-6, rangos: [[desdeMin, hastaMin], ...] }]
+  if (configurado) {
+    diasBloques = [...tramosPorDia.keys()].sort((a, b) => a - b).map(diaSemana => ({
+      dia: diaSemana - 1,
+      rangos: tramosPorDia.get(diaSemana)
+        .map(t => [minutosDeHora(horaCorta(t.hora_inicio)), minutosDeHora(horaCorta(t.hora_fin))])
+        .sort((a, b) => a[0] - b[0])
+    }));
+  } else {
+    const desde = minutosDeHora(S.huecosDesde || '16:00');
+    const hasta = minutosDeHora(S.huecosHasta || '21:00');
+    if (hasta <= desde) return '<div class="vacio">La hora "hasta" debe ser posterior a "desde".</div>';
+    const diasConClase = new Set();
+    porDia.forEach((lista, i) => { if (lista.length) diasConClase.add(i); });
+    const dias = [0, 1, 2, 3, 4, ...(diasConClase.has(5) ? [5] : []), ...(diasConClase.has(6) ? [6] : [])];
+    diasBloques = dias.map(d => ({ dia: d, rangos: [[desde, hasta]] }));
+  }
+
+  const avisoConfig = configurado ? '' : `<p class="ayuda" style="margin-bottom:14px">
+    ⚠ Este profesor no ha configurado su horario de trabajo (Ajustes → Mi horario de trabajo);
+    se está usando un horario genérico de ${e(S.huecosDesde || '16:00')} a ${e(S.huecosHasta || '21:00')}.</p>`;
+
+  return avisoConfig + `<div class="horario-grid" style="grid-template-columns: repeat(${diasBloques.length}, 1fr)">
+    ${diasBloques.map(({ dia, rangos }) => {
+      const entradasDia = porDia[dia];
+      const bloques = rangos.map(([desdeMin, hastaMin]) => {
+        const llenas = entradasDia.filter(s => (s.clase.clase_alumnos || []).length >= (s.clase.capacidad || 6));
+        const conSitio = entradasDia.filter(s => {
+          const dentro = (s.clase.clase_alumnos || []).length < (s.clase.capacidad || 6);
+          const ini = minutosDeHora(horaCorta(s.hora));
+          return dentro && ini >= desdeMin && ini < hastaMin;
+        });
+        const libres = huecosLibresDia(llenas, desdeMin, hastaMin);
+        const cartasLibres = libres.map(([a, b]) => `<div class="hueco-card">${minutosAHora(a)}–${minutosAHora(b)}</div>`).join('');
+        const cartasGrupo = conSitio.map(s => {
+          const n = (s.clase.clase_alumnos || []).length;
+          const cap = s.clase.capacidad || 6;
+          const restantes = cap - n;
+          return `<div class="hueco-grupo-card" data-ver-clase="${s.clase.id}">
+            ${horaCorta(s.hora)}–${horaFin(s.hora, s.duracion_min)} · ${e(s.clase.nombre)}
+            <small>quedan ${restantes} plaza${restantes === 1 ? '' : 's'}</small></div>`;
+        }).join('');
+        return cartasLibres + cartasGrupo;
+      }).join('');
       return `<div class="dia-col">
-        <div class="dia-titulo">${DIAS[d]}</div>
-        ${libres.length === 0
-          ? '<div class="dia-libre">Sin huecos</div>'
-          : libres.map(([a, b]) => `<div class="hueco-card">${minutosAHora(a)}–${minutosAHora(b)}</div>`).join('')}
+        <div class="dia-titulo">${DIAS[dia]}</div>
+        ${bloques || '<div class="dia-libre">Sin huecos</div>'}
       </div>`;
     }).join('')}
   </div>
-  <p class="ayuda" style="margin-top:14px">Huecos entre ${e(S.huecosDesde || '16:00')} y ${e(S.huecosHasta || '21:00')}
-  según el horario fijo de las clases (no descuenta anulaciones puntuales ni sesiones alternativas).</p>`;
+  <p class="ayuda" style="margin-top:14px">En verde, tiempo totalmente libre. En azul, grupos que aún tienen
+  plazas (no bloquean la hora hasta llegar a su aforo). No descuenta anulaciones puntuales ni sesiones alternativas.</p>`;
 }
 
 // Semana actual: columnas por día (con su fecha) con las clases ordenadas por
@@ -1701,7 +1767,7 @@ function renderRecibos() {
   });
   const fm = document.getElementById('fr-mes');
   if (fm) fm.onchange = (ev) => { S.mesPagados = ev.target.value; renderRecibos(); };
-  document.getElementById('fr-texto').oninput = (ev) => { S.filtros.textoRecibo = ev.target.value; renderRecibos(); };
+  document.getElementById('fr-texto').oninput = (ev) => { S.filtros.textoRecibo = ev.target.value; conFocoPreservado(renderRecibos); };
   const fp = document.getElementById('fr-prof');
   if (fp) fp.onchange = (ev) => { S.filtros.profesor = ev.target.value; renderRecibos(); };
   document.getElementById('fr-csv').onclick = exportarRecibosCsv;
@@ -2296,6 +2362,14 @@ async function renderAjustes() {
     <code>Documentos\\Curiosamente\\Backups</code> (se conservan las 30 últimas), y puedes exportar
     un CSV cuando quieras desde las pestañas Alumnos y Recibos.</p>
 
+    <h3>Mi horario de trabajo</h3>
+    <p class="ayuda">Indica qué días y horas trabajas. Con esto, "Huecos libres" en la pestaña
+    Horario calculará tus huecos dentro de tu horario real, en vez de un horario genérico.
+    Si no configuras nada, se usará un horario por defecto (16:00–21:00).</p>
+    <div id="aj-horario-trabajo"></div>
+    <button class="btn chico" id="aj-add-horario">+ Añadir tramo</button>
+    <button class="btn primario chico" id="aj-guardar-horario" style="margin-left:8px">Guardar horario</button>
+
     ${S.profesor?.es_admin ? `
     <h3>Tarifas por asignatura (solo administrador)</h3>
     <p class="ayuda">Cambia el precio de todos los alumnos matriculados en una asignatura de una vez,
@@ -2310,12 +2384,75 @@ async function renderAjustes() {
     const nuevo = await window.api.chooseRecibosDir();
     if (nuevo) { avisar('Carpeta cambiada.'); renderAjustes(); }
   };
+
+  // Tramos de horario de trabajo en edición local (día + hora inicio + hora fin).
+  const tramos = S.profesorHorario
+    .filter(h => h.profesor_id === S.profesor.id)
+    .map(h => ({ dia_semana: h.dia_semana, hora_inicio: horaCorta(h.hora_inicio), hora_fin: horaCorta(h.hora_fin) }));
+
+  const pintarTramos = () => {
+    document.getElementById('aj-horario-trabajo').innerHTML = tramos.map((t, i) => `
+      <div class="fila-horario">
+        <select data-t-dia="${i}">
+          ${DIAS.map((d, j) => `<option value="${j + 1}" ${t.dia_semana === j + 1 ? 'selected' : ''}>${d}</option>`).join('')}
+        </select>
+        <input type="time" data-t-ini="${i}" value="${e(t.hora_inicio)}">
+        <span class="ayuda">a</span>
+        <input type="time" data-t-fin="${i}" value="${e(t.hora_fin)}">
+        <button class="btn chico liso" data-t-quitar="${i}" title="Quitar este tramo">✕</button>
+      </div>`).join('') || '<p class="ayuda">Sin horario configurado — se usará el horario por defecto.</p>';
+    const cont = document.getElementById('aj-horario-trabajo');
+    cont.querySelectorAll('[data-t-dia]').forEach(s => s.onchange = () => { tramos[+s.dataset.tDia].dia_semana = Number(s.value); });
+    cont.querySelectorAll('[data-t-ini]').forEach(s => s.onchange = () => { tramos[+s.dataset.tIni].hora_inicio = s.value; });
+    cont.querySelectorAll('[data-t-fin]').forEach(s => s.onchange = () => { tramos[+s.dataset.tFin].hora_fin = s.value; });
+    cont.querySelectorAll('[data-t-quitar]').forEach(b => b.onclick = () => { tramos.splice(+b.dataset.tQuitar, 1); pintarTramos(); });
+  };
+  pintarTramos();
+  document.getElementById('aj-add-horario').onclick = () => {
+    tramos.push({ dia_semana: 1, hora_inicio: '16:00', hora_fin: '21:00' });
+    pintarTramos();
+  };
+  document.getElementById('aj-guardar-horario').onclick = async () => {
+    if (tramos.some(t => t.hora_fin <= t.hora_inicio)) {
+      avisar('En cada tramo, la hora de fin debe ser posterior a la de inicio.', true);
+      return;
+    }
+    await S.sb.from('profesor_horario').delete().eq('profesor_id', S.profesor.id);
+    if (tramos.length) {
+      const { error } = await S.sb.from('profesor_horario')
+        .insert(tramos.map(t => ({ profesor_id: S.profesor.id, ...t })));
+      if (error) return avisar('Error al guardar: ' + error.message, true);
+    }
+    await cargarHorarioTrabajo();
+    renderAjustes();
+    avisar('Horario de trabajo guardado.');
+  };
+
   const reconf = document.getElementById('aj-reconf');
   if (reconf) reconf.onclick = () => renderSetup();
   document.querySelectorAll('[data-cambiar-tarifa]').forEach(b => b.onclick = () => {
     const [asigId, tipo] = b.dataset.cambiarTarifa.split('|');
     modalCambiarTarifaAsignatura(Number(asigId), tipo);
   });
+}
+
+// Los buscadores en vivo reconstruyen toda la pantalla en cada letra (innerHTML),
+// lo que sustituye el <input> por uno nuevo y le hace perder el foco: sin esto,
+// solo se puede escribir una letra cada vez. Guarda qué campo y qué posición del
+// cursor tenía el foco, ejecuta el re-render, y lo restaura después.
+function conFocoPreservado(fn) {
+  const activo = document.activeElement;
+  const id = activo && activo.id;
+  const inicio = activo && 'selectionStart' in activo ? activo.selectionStart : null;
+  const fin = activo && 'selectionEnd' in activo ? activo.selectionEnd : null;
+  fn();
+  if (!id) return;
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.focus();
+  if (inicio != null && 'setSelectionRange' in el) {
+    try { el.setSelectionRange(inicio, fin); } catch { /* tipo de input sin selección de texto */ }
+  }
 }
 
 // ---------------------------------------------------------------- modal y toast

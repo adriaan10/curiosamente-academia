@@ -373,6 +373,30 @@ revoke execute on function public.nombre_normalizado(text) from anon;
 --   * función dar_baja_alumno(uuid): estado 'baja' + fuera de todas las clases
 -- ============================================================
 
+-- ---------- Aforo de clases y horario de trabajo por profesor ----------
+alter table public.clases
+  add column capacidad integer not null default 6 check (capacidad between 1 and 8);
+
+create table public.profesor_horario (
+  id uuid primary key default gen_random_uuid(),
+  profesor_id uuid not null references public.profesores (id) on delete cascade,
+  dia_semana integer not null check (dia_semana between 1 and 7),
+  hora_inicio time not null,
+  hora_fin time not null,
+  check (hora_fin > hora_inicio)
+);
+
+create index profesor_horario_profesor_idx on public.profesor_horario (profesor_id);
+
+alter table public.profesor_horario enable row level security;
+
+create policy "profesor_horario_select" on public.profesor_horario
+  for select to authenticated using (true);
+create policy "profesor_horario_write" on public.profesor_horario
+  for all to authenticated
+  using (profesor_id = auth.uid() or public.is_admin())
+  with check (profesor_id = auth.uid() or public.is_admin());
+
 -- ---------- Endurecimiento del acceso anónimo (sin sesión) ----------
 -- Por defecto Supabase concede a "anon" acceso base a todas las tablas
 -- (luego se filtra con RLS). Como esta app no tiene ningún uso sin sesión,

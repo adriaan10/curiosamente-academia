@@ -283,6 +283,13 @@ td small { color: var(--gris); }
   border-radius: 8px; padding: 8px 10px; margin-bottom: 8px;
   font-weight: 600; font-size: 13.5px; color: #1e6b40;
 }
+.hueco-grupo-card {
+  border-left: 4px solid #3D7DC8; background: #e7f1fb;
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 8px;
+  font-weight: 600; font-size: 13px; color: #2a5d94; cursor: pointer;
+}
+.hueco-grupo-card:hover { filter: brightness(.97); }
+.hueco-grupo-card small { display: block; font-weight: 400; color: #5478a0; margin-top: 2px; }
 
 /* ---- anulaciones y alternativas ---- */
 .clase-card.anulada { opacity: .6; }
