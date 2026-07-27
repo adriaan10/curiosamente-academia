@@ -1,10 +1,11 @@
 // Genera el PDF del recibo replicando la plantilla de Curiosamente:
 // cabecera con logo, Fecha de Emisión, Recibí de, La cantidad de, Concepto y Total.
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
 
 const NARANJA = rgb(0.95, 0.55, 0.16); // naranja del lápiz del logo
 const GRIS = rgb(0.35, 0.35, 0.35);
 const NEGRO = rgb(0.1, 0.1, 0.1);
+const VERDE = rgb(0.16, 0.53, 0.30); // sello de pagado
 
 // Dibuja un lápiz naranja vectorial como sustituto del logo si no hay logo.png.
 function dibujarLapiz(page, x, y, escala = 1) {
@@ -103,6 +104,40 @@ export async function generarReciboPdf(datos) {
   const totalW = helvBold.widthOfTextAtSize(totalTxt, 16);
   page.drawText(totalTxt, { x: cajaX + cajaW - 14 - totalW, y: cursorY - 1, size: 16, font: helvBold, color: NARANJA });
 
+  // ---- Sello PAGADO: convierte el recibo en justificante de pago ----
+  if (datos.pagado) {
+    const ang = 14;
+    const rad = (ang * Math.PI) / 180;
+    const tamTexto = 24;
+    const anchoTexto = helvBold.widthOfTextAtSize('PAGADO', tamTexto);
+    const padX = 16, padY = 10;
+    const cajaAncho = anchoTexto + padX * 2;
+    const cajaAlto = tamTexto + padY * 2 + (datos.fechaPago ? 12 : 0);
+    const x0 = margen + 14, y0 = 50;
+    // Posición dentro del sello, girada con el mismo ángulo que la caja.
+    const enSello = (dx, dy) => ({
+      x: x0 + dx * Math.cos(rad) - dy * Math.sin(rad),
+      y: y0 + dx * Math.sin(rad) + dy * Math.cos(rad)
+    });
+
+    page.drawRectangle({
+      x: x0, y: y0, width: cajaAncho, height: cajaAlto,
+      rotate: degrees(ang), borderColor: VERDE, borderWidth: 2.5, borderOpacity: 0.85
+    });
+    const pTexto = enSello(padX, cajaAlto - padY - tamTexto + 5);
+    page.drawText('PAGADO', {
+      x: pTexto.x, y: pTexto.y, size: tamTexto, font: helvBold,
+      color: VERDE, rotate: degrees(ang), opacity: 0.85
+    });
+    if (datos.fechaPago) {
+      const pFecha = enSello(padX, padY - 2);
+      page.drawText(datos.fechaPago, {
+        x: pFecha.x, y: pFecha.y, size: 9, font: helv,
+        color: VERDE, rotate: degrees(ang), opacity: 0.85
+      });
+    }
+  }
+
   // ---- Pie: referencia interna discreta ----
   if (datos.referencia) {
     page.drawText(`Ref. ${datos.referencia}`, {
@@ -114,9 +149,10 @@ export async function generarReciboPdf(datos) {
 }
 
 // Nombre de archivo: Recibo_NombreAlumno_MesAño.pdf
-export function nombreArchivoRecibo(nombreAlumno, concepto) {
+// (con sufijo _PAGADO cuando es el justificante de pago)
+export function nombreArchivoRecibo(nombreAlumno, concepto, pagado = false) {
   const limpio = (s) => String(s).trim()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-zA-Z0-9+]+/g, '_').replace(/^_+|_+$/g, '');
-  return `Recibo_${limpio(nombreAlumno)}_${limpio(concepto)}.pdf`;
+  return `Recibo_${limpio(nombreAlumno)}_${limpio(concepto)}${pagado ? '_PAGADO' : ''}.pdf`;
 }

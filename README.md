@@ -79,6 +79,55 @@ actualiza en el siguiente cierre normal — nadie tiene que hacer nada.
 4. En cuanto está publicado, todos los ordenadores de la academia lo detectan solos
    la próxima vez que abran la app.
 
+## Envío automático por WhatsApp (pendiente de activar)
+
+La app ya está preparada para enviar los recibos **con el PDF adjunto**, tanto en
+lote como automáticamente al marcar un recibo como pagado (justificante sellado
+como PAGADO). Hasta que se completen los pasos de abajo funciona en **modo
+simulación**: todo el circuito se comporta igual, pero no sale ningún mensaje real
+(se ve el estado en Ajustes → Envío por WhatsApp).
+
+### 1. Dar de alta la academia en Meta
+
+1. Crear un *Business Portfolio* en [business.facebook.com](https://business.facebook.com).
+2. Verificar la empresa (Security Center → Start Verification): hacen falta un
+   documento legal de la academia y una prueba de dirección.
+3. Activar la verificación en dos pasos (obligatoria).
+4. Crear una *WhatsApp Business Account* y asociarle un **número de teléfono nuevo,
+   dedicado solo a esto** — ese número dejará de poder usarse en la app normal de
+   WhatsApp, así que no debe ser el de uso diario de la academia.
+
+### 2. Crear las dos plantillas de mensaje
+
+En WhatsApp Manager → Plantillas, categoría **Utilidad** (es la tarifa barata),
+idioma español. Ambas con **cabecera de tipo Documento**:
+
+| Nombre | Cuerpo |
+|---|---|
+| `envio_recibo` | Hola {{1}}, te enviamos el recibo de {{2}} de la Academia Curiosamente. Importe: {{3}}€. ¡Gracias! |
+| `pago_confirmado` | Hola {{1}}, hemos recibido tu pago de {{2}}€ correspondiente a {{3}}. Te adjuntamos el justificante. ¡Gracias! |
+
+El orden de los datos importa y debe coincidir exactamente con el de la tabla.
+
+### 3. Guardar las credenciales en Supabase
+
+En Supabase → Edge Functions → **Secrets** (nunca en el código, que es público):
+
+| Secreto | Qué es |
+|---|---|
+| `WHATSAPP_TOKEN` | Token permanente de la app de Meta |
+| `WHATSAPP_PHONE_ID` | *Phone Number ID* del número emisor |
+| `WHATSAPP_TEMPLATE_RECIBO` | `envio_recibo` (opcional, es el valor por defecto) |
+| `WHATSAPP_TEMPLATE_PAGO` | `pago_confirmado` (opcional, es el valor por defecto) |
+
+En cuanto estén guardados, el envío pasa a real sin tocar nada más: en Ajustes el
+indicador cambiará de 🟡 *En simulación* a 🟢 *Activo*.
+
+### Coste orientativo
+
+Las plantillas de utilidad cuestan en España unos 1,2 céntimos por mensaje. Para
+~50 alumnos (recibo + confirmación de pago cada mes) son unos **1,20 €/mes**.
+
 ### Mantener Supabase activo
 
 Un flujo de GitHub Actions (`.github/workflows/mantener-supabase-activo.yml`) hace

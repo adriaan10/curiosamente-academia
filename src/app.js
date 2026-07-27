@@ -1587,6 +1587,121 @@ async function enviarWhatsApp(recibo) {
   avisar('Chat de WhatsApp abierto. Arrastra el PDF al chat para enviarlo.');
 }
 
+// ---- Envío automático por la API oficial de WhatsApp ----
+
+// Convierte los bytes del PDF a texto para poder mandarlo al servidor.
+// Se hace por trozos porque un PDF entero de golpe desborda la pila.
+function bytesABase64(bytes) {
+  let binario = '';
+  const trozo = 0x8000;
+  for (let i = 0; i < bytes.length; i += trozo) {
+    binario += String.fromCharCode.apply(null, bytes.subarray(i, i + trozo));
+  }
+  return btoa(binario);
+}
+
+// Envía un recibo (o el justificante de pago) con el PDF ya adjunto.
+// Devuelve { ok, simulado, error } — nunca lanza, para poder usarlo en tandas.
+async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
+  const alumno = recibo.alumnos || {};
+  const tel = alumno.telefono || alumno.tutor_telefono;
+  if (!telefonoWa(tel)) return { ok: false, error: 'sin teléfono válido' };
+
+  const esPago = tipo === 'pago';
+  const destinatario = alumno.facturacion_nombre || alumno.tutor_nombre || alumno.nombre || '';
+
+  try {
+    const letras = recibo.importe_letras || importeALetras(recibo.importe);
+    const bytes = await generarReciboPdf({
+      fechaEmision: fmtFecha(recibo.fecha_emision),
+      recibiDe: destinatario,
+      cantidadLetras: letras,
+      concepto: recibo.concepto,
+      totalCifra: formatoImporte(recibo.importe),
+      referencia: 'R-' + String(recibo.referencia).padStart(5, '0'),
+      logoPngBase64: S.logoBase64,
+      pagado: esPago,
+      fechaPago: esPago ? fmtFecha((recibo.fecha_pago || new Date().toISOString()).slice(0, 10)) : null
+    });
+
+    const { data, error } = await S.sb.functions.invoke('enviar-whatsapp', {
+      body: {
+        tipo,
+        telefono: tel,
+        nombre: destinatario.split(' ')[0] || destinatario,
+        concepto: recibo.concepto,
+        importe: formatoImporte(recibo.importe),
+        pdfBase64: bytesABase64(bytes),
+        nombreArchivo: nombreArchivoRecibo(alumno.nombre || 'alumno', recibo.concepto, esPago)
+      }
+    });
+    if (error) return { ok: false, error: 'el servidor rechazó el envío' };
+    if (!data?.ok) return { ok: false, error: data?.error || 'error desconocido' };
+
+    if (!esPago) {
+      await S.sb.from('recibos')
+        .update({ fecha_envio_whatsapp: new Date().toISOString() })
+        .eq('id', recibo.id);
+    }
+    return { ok: true, simulado: Boolean(data.simulado) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// Envío masivo por tandas, con progreso y resumen final.
+function modalEnvioMasivo(lista) {
+  const conTelefono = lista.filter(r => telefonoWa(r.alumnos?.telefono || r.alumnos?.tutor_telefono));
+  const sinTelefono = lista.length - conTelefono.length;
+  const TANDA = 10;
+
+  abrirModal(`
+  <h2>Enviar recibos por WhatsApp</h2>
+  <p class="ayuda">Se enviarán <strong>${conTelefono.length}</strong> recibos con el PDF ya adjunto,
+  en tandas de ${TANDA} para poder seguirlo con calma.
+  ${sinTelefono ? `<br>⚠ ${sinTelefono} recibo${sinTelefono === 1 ? '' : 's'} sin teléfono válido se omitirá${sinTelefono === 1 ? '' : 'n'}.` : ''}</p>
+  <div id="em-progreso"></div>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+    <button class="btn primario" id="em-enviar" ${conTelefono.length ? '' : 'disabled'}>Enviar ${conTelefono.length}</button>
+  </div>`);
+
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('em-enviar').onclick = async () => {
+    const btn = document.getElementById('em-enviar');
+    const cancelar = document.getElementById('m-cancelar');
+    const prog = document.getElementById('em-progreso');
+    btn.disabled = true;
+    cancelar.disabled = true;
+    const fallos = [];
+    let enviados = 0, simulado = false;
+
+    for (let i = 0; i < conTelefono.length; i++) {
+      const r = conTelefono[i];
+      prog.innerHTML = `<p class="letras">Enviando ${i + 1} de ${conTelefono.length}…
+        <strong>${e(r.alumnos?.nombre || '')}</strong></p>`;
+      const res = await enviarPorWhatsAppApi(r, 'recibo');
+      if (res.ok) { enviados++; simulado = simulado || res.simulado; }
+      else fallos.push(`${r.alumnos?.nombre || 'Alumno'} — ${res.error}`);
+      // Respiro entre tandas para no saturar el envío.
+      if ((i + 1) % TANDA === 0 && i + 1 < conTelefono.length) {
+        prog.innerHTML = `<p class="ayuda">Pausa entre tandas… (${i + 1} de ${conTelefono.length})</p>`;
+        await new Promise(res2 => setTimeout(res2, 1500));
+      }
+    }
+
+    await cargarRecibos();
+    prog.innerHTML = `
+      <p class="letras"><strong>${enviados}</strong> enviado${enviados === 1 ? '' : 's'}${fallos.length ? ` · ${fallos.length} con problema` : ''}</p>
+      ${simulado ? '<p class="ayuda">⚠ WhatsApp aún no está configurado: ha sido una simulación, no se ha enviado nada real.</p>' : ''}
+      ${fallos.length ? `<ul class="detalle-alumnos">${fallos.map(f => `<li>${e(f)}</li>`).join('')}</ul>` : ''}`;
+    cancelar.disabled = false;
+    cancelar.textContent = 'Cerrar';
+    cancelar.onclick = () => { cerrarModal(); renderRecibos(); };
+    btn.remove();
+  };
+}
+
 function modalReciboBulk() {
   const candidatos = alumnosFiltrados().filter(a => a.estado === 'activo' && misMatriculas(a).length > 0);
   abrirModal(`
@@ -1725,6 +1840,7 @@ function renderRecibos() {
         const total = delMes.reduce((s, r) => s + Number(r.importe), 0);
         return `<h3 class="mes-seccion">${tituloMes(m)}
           <small>${delMes.length} pendiente${delMes.length === 1 ? '' : 's'} · ${formatoImporte(total)}€</small>
+          <button class="btn chico" data-enviar-mes="${m}">📤 Enviar todos por WhatsApp</button>
           <button class="btn chico" data-descargar-mes="${m}">⬇ Descargar todos los PDF</button></h3>
         ${filasRecibos(delMes, esAdmin, false)}`;
       }).join('');
@@ -1779,7 +1895,13 @@ function renderRecibos() {
       .eq('id', b.dataset.pagar);
     await cargarRecibos();
     renderRecibos();
-    avisar('Recibo marcado como pagado.');
+
+    // Justificante sellado como PAGADO, al momento y sin pasos extra.
+    const actualizado = S.recibos.find(x => x.id === b.dataset.pagar) || r;
+    const res = await enviarPorWhatsAppApi(actualizado, 'pago');
+    if (res.ok && res.simulado) avisar('Pagado. (WhatsApp sin configurar: justificante no enviado)');
+    else if (res.ok) avisar('Pagado. Justificante enviado por WhatsApp.');
+    else avisar(`Pagado, pero no se pudo enviar el justificante: ${res.error}`, true);
   });
   document.querySelectorAll('[data-despagar]').forEach(b => b.onclick = async () => {
     const r = S.recibos.find(x => x.id === b.dataset.despagar);
@@ -1804,6 +1926,12 @@ function renderRecibos() {
     const lista = recibosFiltrados().filter(r => claveMes(r.fecha_emision) === m
       && (S.vistaRecibos === 'pagados' ? r.estado === 'pagado' : r.estado !== 'pagado'));
     descargarPdfsMes(m, lista, b);
+  });
+  document.querySelectorAll('[data-enviar-mes]').forEach(b => b.onclick = () => {
+    const m = b.dataset.enviarMes;
+    const lista = recibosFiltrados().filter(r => claveMes(r.fecha_emision) === m && r.estado !== 'pagado');
+    if (!lista.length) return avisar('No hay recibos pendientes en ese mes.', true);
+    modalEnvioMasivo(lista);
   });
   document.querySelectorAll('[data-editar-recibo]').forEach(b => b.onclick = () =>
     modalEditarRecibo(S.recibos.find(x => x.id === b.dataset.editarRecibo)));
@@ -2362,6 +2490,10 @@ async function renderAjustes() {
     <code>Documentos\\Curiosamente\\Backups</code> (se conservan las 30 últimas), y puedes exportar
     un CSV cuando quieras desde las pestañas Alumnos y Recibos.</p>
 
+    <h3>Envío por WhatsApp</h3>
+    <p class="ayuda" id="aj-wa-estado">Comprobando…</p>
+    <button class="btn chico" id="aj-wa-probar">Comprobar de nuevo</button>
+
     <h3>Mi horario de trabajo</h3>
     <p class="ayuda">Indica qué días y horas trabajas. Con esto, "Huecos libres" en la pestaña
     Horario calculará tus huecos dentro de tu horario real, en vez de un horario genérico.
@@ -2384,6 +2516,24 @@ async function renderAjustes() {
     const nuevo = await window.api.chooseRecibosDir();
     if (nuevo) { avisar('Carpeta cambiada.'); renderAjustes(); }
   };
+
+  // Estado del envío por WhatsApp: pregunta al servidor sin enviar nada real.
+  const comprobarWhatsApp = async () => {
+    const el = document.getElementById('aj-wa-estado');
+    if (!el) return;
+    el.textContent = 'Comprobando…';
+    const { data, error } = await S.sb.functions.invoke('enviar-whatsapp', {
+      body: { tipo: 'recibo', telefono: '600000000', nombre: 'Prueba', concepto: 'Prueba', importe: '0' }
+    });
+    if (error) el.innerHTML = '⚠ No se pudo comprobar el estado del envío.';
+    else if (data?.simulado) {
+      el.innerHTML = '🟡 <strong>En simulación.</strong> Todo está preparado, pero aún faltan las credenciales de Meta: los envíos no salen de verdad.';
+    } else {
+      el.innerHTML = '🟢 <strong>Activo.</strong> Los recibos se envían por WhatsApp con el PDF adjunto.';
+    }
+  };
+  comprobarWhatsApp();
+  document.getElementById('aj-wa-probar').onclick = comprobarWhatsApp;
 
   // Tramos de horario de trabajo en edición local (día + hora inicio + hora fin).
   const tramos = S.profesorHorario
