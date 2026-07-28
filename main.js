@@ -48,7 +48,7 @@ function createWindow() {
     height: 820,
     minWidth: 900,
     minHeight: 600,
-    title: 'Curiosamente — Gestión de la academia',
+    title: `Curiosamente — Gestión de la academia (v${app.getVersion()})`,
     icon: path.join(__dirname, 'assets', 'icon.ico'),
     autoHideMenuBar: true,
     webPreferences: {
@@ -57,6 +57,9 @@ function createWindow() {
       nodeIntegration: false
     }
   });
+  // Sin esto, el <title> de index.html sobrescribe el título de la ventana
+  // en cuanto carga la página, y la versión desaparece de la barra.
+  win.on('page-title-updated', (event) => event.preventDefault());
   win.loadFile(path.join(__dirname, 'app', 'index.html'));
 }
 
