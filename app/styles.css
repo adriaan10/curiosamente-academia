@@ -201,6 +201,10 @@ td small { color: var(--gris); }
 .fila-horario select, .fila-horario input { width: auto; margin: 0; }
 .lista-alumnos { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; max-height: 220px; overflow-y: auto; }
 
+/* ---- modificaciones de horas ---- */
+.md-alumno { border: 1px solid var(--borde); border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
+.md-asig { min-width: 150px; font-size: 13px; }
+
 /* ---- portada ---- */
 .portada { max-width: 860px; margin: 0 auto; padding-top: 7vh; text-align: center; }
 .marca.grande { font-size: 52px; justify-content: center; }

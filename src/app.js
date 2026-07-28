@@ -22,6 +22,8 @@ const S = {
   excepciones: [],
   notas: [],
   profesorHorario: [],
+  cambiosHorario: [],
+  finanzas: [],
   vista: 'inicio',
   vistaRecibos: 'pendientes',
   mesPagados: '',
@@ -72,9 +74,28 @@ async function cargarTodo() {
   S.profesores = profs.data || [];
   S.asignaturas = asigs.data || [];
   S.profAsig = profAsig.data || [];
-  await Promise.all([cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(), cargarHorarioTrabajo()]);
+  await Promise.all([
+    cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
+    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarFinanzas()
+  ]);
   backupAutomatico();
   window.api.getRecibosDir(); // crea la carpeta de recibos de este equipo si no existía aún
+}
+
+async function cargarCambiosHorario() {
+  const { data, error } = await S.sb.from('cambios_horario')
+    .select('*, alumnos(nombre), profesores(nombre)')
+    .order('fecha', { ascending: false });
+  if (error) return avisar('Error cargando modificaciones: ' + error.message, true);
+  S.cambiosHorario = data || [];
+}
+
+// Solo el administrador ve/gestiona finanzas (RLS ya lo restringe también).
+async function cargarFinanzas() {
+  if (!S.profesor?.es_admin) { S.finanzas = []; return; }
+  const { data, error } = await S.sb.from('finanzas_movimientos').select('*').order('fecha', { ascending: false });
+  if (error) return avisar('Error cargando finanzas: ' + error.message, true);
+  S.finanzas = data || [];
 }
 
 async function cargarHorarioTrabajo() {
@@ -235,6 +256,7 @@ function renderMain() {
       <button data-v="recibos" class="tab ${S.vista === 'recibos' ? 'activa' : ''}">Recibos</button>
       <button data-v="notas" class="tab ${S.vista === 'notas' ? 'activa' : ''}">Notas</button>
       ${esAdmin ? `<button data-v="profesores" class="tab ${S.vista === 'profesores' ? 'activa' : ''}">Profesores</button>` : ''}
+      ${esAdmin ? `<button data-v="finanzas" class="tab ${S.vista === 'finanzas' ? 'activa' : ''}">Ingresos y gastos</button>` : ''}
       <button data-v="ajustes" class="tab ${S.vista === 'ajustes' ? 'activa' : ''}">Ajustes</button>
     </nav>
     <div class="usuario">
@@ -258,6 +280,7 @@ function renderMain() {
   else if (S.vista === 'recibos') renderRecibos();
   else if (S.vista === 'notas') renderNotas();
   else if (S.vista === 'profesores') renderProfesores();
+  else if (S.vista === 'finanzas') renderFinanzas();
   else renderAjustes();
 }
 
@@ -281,6 +304,17 @@ function renderInicio() {
     }
   }
   clasesHoy.sort((a, b) => String(a.hora).localeCompare(String(b.hora)));
+
+  // Avisos solo para el administrador: fichas sin precio, modificaciones de
+  // horas sin revisar, y altas tardías con recibo pendiente de generar a mano.
+  const esAdmin = S.profesor?.es_admin;
+  const fichasIncompletas = esAdmin
+    ? S.alumnos.flatMap(al => (al.matriculas || [])
+        .filter(m => m.tarifa == null)
+        .map(m => ({ alumno: al, matricula: m })))
+    : [];
+  const modificacionesSinVer = esAdmin ? S.cambiosHorario.filter(c => !c.visto) : [];
+  const altasFueraDeFecha = esAdmin ? recibosPendientesFueraDeFecha() : [];
 
   document.getElementById('contenido').innerHTML = `
   <div class="portada">
@@ -315,11 +349,96 @@ function renderInicio() {
         <div class="pc-detalle">Tus pósits</div>
       </div>
     </div>
+    ${esAdmin && (fichasIncompletas.length || modificacionesSinVer.length || altasFueraDeFecha.length) ? `
+    <h3 class="seccion" style="margin-top:28px">Pendiente de revisar</h3>
+    <div class="portada-cards">
+      ${fichasIncompletas.length ? `
+      <div class="portada-card alerta" id="pc-fichas">
+        <div class="pc-num">${fichasIncompletas.length}</div>
+        <div class="pc-titulo">ficha${fichasIncompletas.length === 1 ? '' : 's'} sin precio</div>
+        <div class="pc-detalle">Completar para que se generen sus recibos</div>
+      </div>` : ''}
+      ${modificacionesSinVer.length ? `
+      <div class="portada-card alerta" id="pc-modificaciones">
+        <div class="pc-num">${modificacionesSinVer.length}</div>
+        <div class="pc-titulo">modificación${modificacionesSinVer.length === 1 ? '' : 'es'} de horas</div>
+        <div class="pc-detalle">Un profesor ha cambiado las horas de un alumno</div>
+      </div>` : ''}
+      ${altasFueraDeFecha.length ? `
+      <div class="portada-card alerta" id="pc-fuera-fecha">
+        <div class="pc-num">${altasFueraDeFecha.length}</div>
+        <div class="pc-titulo">recibo${altasFueraDeFecha.length === 1 ? '' : 's'} para generar a mano</div>
+        <div class="pc-detalle">Alta posterior al día 3, fuera del envío automático</div>
+      </div>` : ''}
+    </div>` : ''}
   </div>`;
 
   document.querySelectorAll('[data-ir]').forEach(c => c.onclick = () => {
     S.vista = c.dataset.ir;
     renderMain();
+  });
+  const pcFichas = document.getElementById('pc-fichas');
+  if (pcFichas) pcFichas.onclick = () => modalFichasIncompletas(fichasIncompletas);
+  const pcMod = document.getElementById('pc-modificaciones');
+  if (pcMod) pcMod.onclick = () => modalModificacionesSinVer(modificacionesSinVer);
+  const pcFuera = document.getElementById('pc-fuera-fecha');
+  if (pcFuera) pcFuera.onclick = () => modalRecibosFueraDeFecha(altasFueraDeFecha);
+}
+
+// Alumnos dados de alta este mes DESPUÉS del día 3 (fuera de la generación
+// automática) que ya tienen precio fijado pero todavía no tienen recibo de
+// este mes: hay que generárselo a mano una vez.
+function recibosPendientesFueraDeFecha() {
+  const hoy = new Date();
+  const periodoActual = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}`;
+  return S.alumnos.filter(a => {
+    if (a.estado !== 'activo' || !a.fecha_alta) return false;
+    const alta = new Date(a.fecha_alta + 'T00:00:00');
+    if (alta.getFullYear() !== hoy.getFullYear() || alta.getMonth() !== hoy.getMonth()) return false;
+    if (alta.getDate() <= 3) return false;
+    const tienePrecio = (a.matriculas || []).some(m => m.tipo_tarifa === 'mes' && m.tarifa != null);
+    if (!tienePrecio) return false;
+    const yaTieneRecibo = S.recibos.some(r => r.alumno_id === a.id && (r.periodos || []).includes(periodoActual));
+    return !yaTieneRecibo;
+  });
+}
+
+function modalRecibosFueraDeFecha(lista) {
+  abrirModal(`
+  <h2>Recibos para generar a mano</h2>
+  <p class="ayuda">Se dieron de alta después del día 3, así que el envío automático de este mes
+  ya no los recogió. Genera su recibo con el botón y listo.</p>
+  <ul class="detalle-alumnos">
+    ${lista.map(a => `<li>
+      <button class="btn chico" data-generar="${a.id}">Generar recibo</button>
+      &nbsp;${e(a.nombre)} <small>· alta ${fmtFecha(a.fecha_alta)}</small>
+    </li>`).join('')}
+  </ul>
+  <div class="pie-modal"><button class="btn liso" id="m-cancelar">Cerrar</button></div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.querySelectorAll('[data-generar]').forEach(b => b.onclick = () => {
+    cerrarModal();
+    modalRecibo(S.alumnos.find(a => a.id === b.dataset.generar));
+  });
+}
+
+// Alumnos con matrícula sin precio: no se generan recibos hasta completarla.
+function modalFichasIncompletas(lista) {
+  abrirModal(`
+  <h2>Fichas sin precio</h2>
+  <p class="ayuda">Estos alumnos tienen alguna asignatura sin tarifa fijada — no se les generará
+  recibo hasta que se complete.</p>
+  <ul class="detalle-alumnos">
+    ${lista.map(({ alumno, matricula }) => `<li>
+      <button class="btn chico" data-completar="${alumno.id}">Completar</button>
+      &nbsp;${e(alumno.nombre)} <small>· ${e(matricula.asignaturas?.nombre || '')}</small>
+    </li>`).join('')}
+  </ul>
+  <div class="pie-modal"><button class="btn liso" id="m-cancelar">Cerrar</button></div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.querySelectorAll('[data-completar]').forEach(b => b.onclick = () => {
+    cerrarModal();
+    modalAlumno(S.alumnos.find(a => a.id === b.dataset.completar));
   });
 }
 
@@ -407,6 +526,7 @@ function renderAlumnos() {
     </select>` : `<label class="check-inline"><input type="checkbox" id="f-todos" ${S.filtros.verTodos ? 'checked' : ''}> Toda la academia</label>`}
     <span class="flex1"></span>
     <button class="btn" id="btn-csv">Exportar CSV</button>
+    <button class="btn" id="btn-modificaciones">🔧 Modificaciones</button>
     <button class="btn" id="btn-bulk">Recibos del mes</button>
     <button class="btn primario" id="btn-nuevo">+ Nuevo alumno</button>
   </div>
@@ -440,6 +560,7 @@ function renderAlumnos() {
   const ft = document.getElementById('f-todos');
   if (ft) ft.onchange = (ev) => { S.filtros.verTodos = ev.target.checked; rerender(); };
   document.getElementById('btn-nuevo').onclick = () => modalAlumno(null);
+  document.getElementById('btn-modificaciones').onclick = () => modalModificaciones();
   document.getElementById('btn-bulk').onclick = () => modalReciboBulk();
   document.getElementById('btn-csv').onclick = exportarAlumnosCsv;
   document.querySelectorAll('[data-editar]').forEach(b =>
@@ -471,6 +592,8 @@ function modalAlumno(alumno) {
   ${alumno && a.estado === 'baja' ? '<p class="ayuda">⚠ Este alumno está <strong>de baja</strong>.</p>' : ''}
   <div class="grid2">
     <label>Nombre y apellidos *<input id="a-nombre" value="${e(a.nombre || '')}"></label>
+    <label>Apellidos <small>(para detectar hermanos automáticamente)</small>
+      <input id="a-apellidos" value="${e(a.apellidos || '')}" placeholder="ej. García López"></label>
     <label>Teléfono / WhatsApp (si es menor, el del padre/madre)
       <input id="a-tel" value="${e(a.telefono || a.tutor_telefono || '')}"></label>
     <label>Padre / madre / tutor (nombre y apellidos)
@@ -478,6 +601,8 @@ function modalAlumno(alumno) {
     <label>Fecha de alta<input id="a-alta" type="date" value="${e(a.fecha_alta || new Date().toISOString().slice(0, 10))}"></label>
     <label>Facturar a (si difiere)<input id="a-fact-nombre" value="${e(a.facturacion_nombre || '')}"></label>
     <label>Dirección de facturación<input id="a-fact-dir" value="${e(a.facturacion_direccion || '')}"></label>
+    <label>Descuento especial (€/mes)${esAdmin ? '' : ' <small>(solo admin)</small>'}
+      <input id="a-descuento" type="number" min="0" step="0.01" value="${a.descuento_extra || ''}" placeholder="0" ${esAdmin ? '' : 'disabled'}></label>
   </div>
   <h3 class="seccion">Asignaturas apuntadas</h3>
   ${soloLectura.length ? `<div class="detalle-horarios">
@@ -485,6 +610,8 @@ function modalAlumno(alumno) {
   </div>` : ''}
   <div id="a-matriculas"></div>
   <button class="btn chico" id="a-add-mat">+ Añadir asignatura</button>
+  ${!esAdmin ? '<p class="ayuda">El precio lo fija la administradora; deja ese campo en blanco.</p>' : ''}
+  <div id="a-descuentos-resumen"></div>
   ${alumno ? `
   <h3 class="seccion">Historial de recibos</h3>
   ${historialRecibos.length === 0 ? '<p class="ayuda">Todavía no tiene recibos.</p>' : `
@@ -515,7 +642,8 @@ function modalAlumno(alumno) {
     document.getElementById('a-matriculas').innerHTML = ms.map((m, i) => `
       <div class="fila-horario">
         <select data-m-asig="${i}">${opcionesAsignaturas(esAdmin ? null : S.profesor.id, m.asignatura_id)}</select>
-        <input type="number" data-m-tarifa="${i}" min="0" step="0.01" placeholder="€" value="${m.tarifa ?? ''}" class="ancho-tarifa">
+        <input type="number" data-m-tarifa="${i}" min="0" step="0.01" placeholder="${esAdmin ? '€' : 'lo pone el admin'}"
+          value="${m.tarifa ?? ''}" class="ancho-tarifa" ${esAdmin ? '' : 'disabled'}>
         <select data-m-tipo="${i}">
           <option value="mes" ${m.tipo_tarifa !== 'clase' ? 'selected' : ''}>€/mes</option>
           <option value="clase" ${m.tipo_tarifa === 'clase' ? 'selected' : ''}>€/clase</option>
@@ -532,6 +660,25 @@ function modalAlumno(alumno) {
   };
   pintarMatriculas();
   document.getElementById('a-add-mat').onclick = () => { ms.push(nuevaMatricula()); pintarMatriculas(); };
+
+  // Resumen de descuentos ya aplicados (solo tiene sentido con datos guardados).
+  if (alumno) {
+    S.sb.rpc('calcular_descuentos_alumno', { p_alumno_id: alumno.id }).then(({ data }) => {
+      const cont = document.getElementById('a-descuentos-resumen');
+      if (!cont) return; // el modal ya se cerró antes de que respondiera
+      const d = data?.[0];
+      if (!d || d.base == null) {
+        cont.innerHTML = '<p class="ayuda">Sin precio fijado todavía: no se puede calcular el importe con descuentos.</p>';
+        return;
+      }
+      const partes = [];
+      if (d.descuento_multi > 0) partes.push(`−${formatoImporte(d.descuento_multi)}€ por varias asignaturas`);
+      if (d.descuento_hermano > 0) partes.push(`−${formatoImporte(d.descuento_hermano)}€ por hermano/a matriculado/a`);
+      if (d.descuento_extra > 0) partes.push(`−${formatoImporte(d.descuento_extra)}€ descuento especial`);
+      cont.innerHTML = `<p class="letras">Precio base: ${formatoImporte(d.base)}€${partes.length ? '<br>' + partes.join('<br>') : ''}<br>
+        <strong>Total mensual: ${formatoImporte(d.total)}€</strong></p>`;
+    });
+  }
 
   const msg = (t) => { document.getElementById('m-msg').textContent = t; };
 
@@ -570,15 +717,21 @@ function modalAlumno(alumno) {
     const v = (id) => document.getElementById(id)?.value.trim();
     const fila = {
       nombre: v('a-nombre'),
+      apellidos: v('a-apellidos') || null,
       telefono: v('a-tel') || null,
       tutor_nombre: v('a-tutor') || null,
       fecha_alta: v('a-alta') || null,
       facturacion_nombre: v('a-fact-nombre') || null,
       facturacion_direccion: v('a-fact-dir') || null,
-      notas: v('a-notas') || null
+      notas: v('a-notas') || null,
+      descuento_extra: esAdmin ? (Number(v('a-descuento')) || 0) : undefined
     };
+    if (!esAdmin) delete fila.descuento_extra; // el profesor no lo toca, no se envía
     if (!fila.nombre) return msg('El nombre es obligatorio.');
-    if (ms.some(m => !m.asignatura_id || !Number(m.tarifa))) return msg('Cada asignatura necesita su tarifa.');
+    if (ms.some(m => !m.asignatura_id)) return msg('Elige la asignatura en cada fila.');
+    if (esAdmin && ms.some(m => m.tarifa !== '' && m.tarifa != null && Number(m.tarifa) <= 0)) {
+      return msg('Si pones un precio, tiene que ser mayor que 0.');
+    }
 
     let alumnoId = alumno?.id;
     if (alumno) {
@@ -596,7 +749,7 @@ function modalAlumno(alumno) {
       const datos = {
         alumno_id: alumnoId,
         asignatura_id: Number(m.asignatura_id),
-        tarifa: Number(m.tarifa),
+        tarifa: (m.tarifa === '' || m.tarifa == null) ? null : Number(m.tarifa),
         tipo_tarifa: m.tipo_tarifa,
         horas_semana: m.horas_semana ? Number(m.horas_semana) : null
       };
@@ -624,6 +777,87 @@ function errorMatricula(error) {
     return '⚠ Ese alumno ya está apuntado a esa asignatura.';
   }
   return 'Error al guardar la matrícula: ' + error.message;
+}
+
+// ---------------------------------------------------------------- modificaciones de horas
+
+// Busca un alumno y cambia las horas semanales de una asignatura suya,
+// dejando constancia del cambio (avisa al administrador en Inicio).
+function modalModificaciones() {
+  const esAdmin = S.profesor?.es_admin;
+  abrirModal(`
+  <h2>Modificaciones de horas</h2>
+  <p class="ayuda">Busca al alumno y cambia las horas semanales de la asignatura que quieras.
+  El cambio queda registrado y avisa al administrador.</p>
+  <label>Buscar alumno<input id="md-buscar" type="search" placeholder="Nombre del alumno…"></label>
+  <div id="md-resultados"></div>
+  <div class="pie-modal"><button class="btn liso" id="m-cancelar">Cerrar</button></div>`);
+
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  const $buscar = document.getElementById('md-buscar');
+
+  const pintarResultados = () => {
+    const texto = $buscar.value.trim().toLowerCase();
+    const candidatos = !texto ? [] : S.alumnos.filter(a => {
+      if (a.estado !== 'activo' || !a.nombre.toLowerCase().includes(texto)) return false;
+      return (esAdmin ? (a.matriculas || []) : misMatriculas(a)).length > 0;
+    }).slice(0, 8);
+
+    document.getElementById('md-resultados').innerHTML = candidatos.length === 0
+      ? (texto ? '<p class="ayuda">Sin resultados.</p>' : '')
+      : candidatos.map(a => `
+      <div class="md-alumno">
+        <strong>${e(a.nombre)}</strong>
+        ${(esAdmin ? (a.matriculas || []) : misMatriculas(a)).map(m => `
+        <div class="fila-horario">
+          <span class="md-asig">${e(m.asignaturas?.nombre || '')}</span>
+          <span class="ayuda">ahora: ${m.horas_semana ?? '—'} h/sem</span>
+          <input type="number" min="0" step="0.5" placeholder="horas nuevas" data-nueva-hora="${m.id}" class="ancho-horas">
+          <button class="btn chico" data-guardar-hora="${m.id}" data-alumno="${a.id}" data-antes="${m.horas_semana ?? ''}">Guardar</button>
+        </div>`).join('')}
+      </div>`).join('');
+
+    document.querySelectorAll('[data-guardar-hora]').forEach(b => b.onclick = async () => {
+      const input = document.querySelector(`[data-nueva-hora="${b.dataset.guardarHora}"]`);
+      const nueva = Number(input.value);
+      if (input.value === '' || nueva < 0) return avisar('Introduce las horas nuevas.', true);
+      const antes = b.dataset.antes ? Number(b.dataset.antes) : null;
+      const { error: e1 } = await S.sb.from('matriculas').update({ horas_semana: nueva }).eq('id', b.dataset.guardarHora);
+      if (e1) return avisar('Error: ' + e1.message, true);
+      await S.sb.from('cambios_horario').insert({
+        matricula_id: b.dataset.guardarHora, alumno_id: b.dataset.alumno,
+        profesor_id: S.profesor.id, horas_antes: antes, horas_despues: nueva
+      });
+      await Promise.all([cargarAlumnos(), cargarCambiosHorario()]);
+      avisar('Horas actualizadas.');
+      pintarResultados();
+    });
+  };
+  $buscar.oninput = () => conFocoPreservado(pintarResultados);
+}
+
+// Vista para el administrador de los cambios de horas que no ha revisado aún.
+function modalModificacionesSinVer(lista) {
+  abrirModal(`
+  <h2>Modificaciones de horas sin revisar</h2>
+  <ul class="detalle-alumnos">
+    ${lista.map(c => `<li>
+      <strong>${e(c.alumnos?.nombre || '')}</strong> — ${c.horas_antes ?? '—'} → ${c.horas_despues} h/sem
+      <br><small>${e(c.profesores?.nombre || '')} · ${fmtFecha(String(c.fecha).slice(0, 10))}</small>
+    </li>`).join('')}
+  </ul>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cerrar sin marcar</button>
+    <button class="btn primario" id="md-marcar-vistas">Marcar todas como vistas</button>
+  </div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('md-marcar-vistas').onclick = async () => {
+    await S.sb.from('cambios_horario').update({ visto: true }).in('id', lista.map(c => c.id));
+    await cargarCambiosHorario();
+    cerrarModal();
+    if (S.vista === 'inicio') renderInicio();
+    avisar('Modificaciones marcadas como vistas.');
+  };
 }
 
 async function exportarAlumnosCsv() {
@@ -1434,14 +1668,18 @@ function modalRecibo(alumno) {
   const todasMats = alumno.matriculas || [];
   const idsMias = new Set(misMatriculas(alumno).map(m => m.id));
   if (!todasMats.length) return avisar('Este alumno no tiene ninguna asignatura apuntada.', true);
+  const nMesTotal = todasMats.filter(m => m.tipo_tarifa === 'mes' && m.tarifa != null).length;
+
   abrirModal(`
   <h2>Recibo — ${e(alumno.nombre)}</h2>
   <p class="ayuda">Marca las asignaturas a cobrar y los meses. El concepto y el importe se calculan
-  solos y puedes ajustarlos. Si este mes ha hecho horas de más, apúntalas en "Extra".</p>
+  solos con los descuentos que le correspondan, y puedes ajustarlos.
+  Si este mes ha hecho horas de más, apúntalas en "Extra".</p>
   <div class="detalle-horarios">
     ${todasMats.map(m => `<label class="mes"><input type="checkbox" data-mat="${m.id}" ${idsMias.has(m.id) ? 'checked' : ''}>
       ${e(m.asignaturas?.nombre || '')} · ${formatoImporte(m.tarifa)}€/${m.tipo_tarifa === 'clase' ? 'clase' : 'mes'}</label>`).join('')}
   </div>
+  <p class="ayuda" id="r-descuentos"></p>
   ${selectorMeses('r')}
   <div class="grid2">
     <label>Extra (€) — horas sueltas, material…
@@ -1453,6 +1691,10 @@ function modalRecibo(alumno) {
     <label>Recibí de<input id="r-recibide" value="${e(alumno.facturacion_nombre || alumno.tutor_nombre || alumno.nombre)}"></label>
     <label>Fecha de emisión<input id="r-fecha" value="${hoyDDMMAAAA()}"></label>
   </div>
+  <label class="check-inline" style="margin-top:10px">
+    <input type="checkbox" id="r-matricula"> Añadir matrícula (aparte, va a Ingresos &gt; Matrícula)
+  </label>
+  <input id="r-importe-matricula" type="number" min="0" step="0.01" placeholder="Importe de la matrícula (€)" style="display:none; margin-top:6px">
   <p class="letras">La cantidad de: <strong id="r-letras"></strong>€</p>
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cancelar</button>
@@ -1466,18 +1708,59 @@ function modalRecibo(alumno) {
   const $letras = document.getElementById('r-letras');
   const $extra = document.getElementById('r-extra');
   const $extraDesc = document.getElementById('r-extra-desc');
+  const $matriculaChk = document.getElementById('r-matricula');
+  const $matriculaImporte = document.getElementById('r-importe-matricula');
+
+  $matriculaChk.onchange = () => {
+    $matriculaImporte.style.display = $matriculaChk.checked ? '' : 'none';
+    recalcular();
+  };
+  $matriculaImporte.oninput = recalcular;
+
+  // Descuentos del alumno (hermanos, varias asignaturas, especial), consultados
+  // una vez al abrir el recibo — misma fuente que usa la generación automática.
+  let descuentos = { descuento_multi: 0, descuento_hermano: 0, descuento_extra: 0 };
+  S.sb.rpc('calcular_descuentos_alumno', { p_alumno_id: alumno.id }).then(({ data }) => {
+    const $descuentos = document.getElementById('r-descuentos');
+    if (!$descuentos) return; // el modal ya se cerró antes de que respondiera
+    const d = data?.[0];
+    if (d) {
+      descuentos = d;
+      const partes = [];
+      if (d.descuento_multi > 0) partes.push(`−${formatoImporte(d.descuento_multi)}€/mes por varias asignaturas`);
+      if (d.descuento_hermano > 0) partes.push(`−${formatoImporte(d.descuento_hermano)}€/mes por hermano/a`);
+      if (d.descuento_extra > 0) partes.push(`−${formatoImporte(d.descuento_extra)}€/mes descuento especial`);
+      $descuentos.textContent = partes.length ? 'Descuentos: ' + partes.join(' · ') : '';
+    }
+    recalcular();
+  });
 
   const recalcular = () => {
     const meses = mesesMarcados(cont);
     const extra = Number($extra.value) || 0;
     const desc = $extraDesc.value.trim();
-    $concepto.value = conceptoDesdeMeses(meses) + (extra && desc ? ' + ' + desc : '');
-    // Base = suma de las matrículas marcadas (las de €/mes multiplican por meses)
+    const conMatricula = $matriculaChk.checked;
+    const importeMatricula = conMatricula ? (Number($matriculaImporte.value) || 0) : 0;
+
+    let concepto = conceptoDesdeMeses(meses) + (extra && desc ? ' + ' + desc : '');
+    if (conMatricula) concepto += ' + Matrícula';
+    $concepto.value = concepto;
+
     const marcadas = [...cont.querySelectorAll('[data-mat]:checked')]
       .map(ch => todasMats.find(m => m.id === ch.dataset.mat)).filter(Boolean);
-    const base = marcadas.reduce((s, m) =>
-      s + (m.tipo_tarifa === 'mes' ? Number(m.tarifa) * meses.length : Number(m.tarifa)), 0);
-    $importe.value = base + extra || '';
+    const marcadasMes = marcadas.filter(m => m.tipo_tarifa === 'mes');
+    const marcadasClase = marcadas.filter(m => m.tipo_tarifa === 'clase');
+
+    const baseMes = marcadasMes.reduce((s, m) => s + Number(m.tarifa), 0) * meses.length;
+    const baseClase = marcadasClase.reduce((s, m) => s + Number(m.tarifa), 0);
+    // Los descuentos son mensuales: el de "varias asignaturas" solo cuenta las
+    // que se cobran en este recibo; los otros dos son un importe fijo al mes.
+    const descMulti = nMesTotal >= 2 ? 5 * marcadasMes.length * meses.length : 0;
+    const descHermano = (descuentos.descuento_hermano > 0 && marcadasMes.length) ? descuentos.descuento_hermano * meses.length : 0;
+    const descExtra = (descuentos.descuento_extra > 0 && marcadasMes.length) ? descuentos.descuento_extra * meses.length : 0;
+
+    const total = Math.max(0, baseMes - descMulti - descHermano - descExtra) + baseClase + extra + importeMatricula;
+    $importe.value = total || '';
     $letras.textContent = importeALetras($importe.value || 0);
   };
   cont.querySelectorAll('[data-mes]').forEach(c => c.onchange = recalcular);
@@ -1502,7 +1785,8 @@ function modalRecibo(alumno) {
         concepto, importe,
         recibiDe: document.getElementById('r-recibide').value.trim() || alumno.nombre,
         fechaEmision: document.getElementById('r-fecha').value.trim() || hoyDDMMAAAA(),
-        periodos: periodosMarcados(cont, 'r')
+        periodos: periodosMarcados(cont, 'r'),
+        importeMatricula: $matriculaChk.checked ? (Number($matriculaImporte.value) || 0) : 0
       });
       cerrarModal();
       await cargarRecibos();
@@ -1515,7 +1799,7 @@ function modalRecibo(alumno) {
 }
 
 // Crea el recibo: fila en BD + PDF en disco. Devuelve la fila con datos del alumno.
-async function crearRecibo(alumno, { concepto, importe, recibiDe, fechaEmision, periodos }) {
+async function crearRecibo(alumno, { concepto, importe, recibiDe, fechaEmision, periodos, importeMatricula }) {
   const letras = importeALetras(importe);
   // La fecha del PDF (DD/MM/AAAA, editable) y la de la BD deben coincidir.
   const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(fechaEmision || '');
@@ -1528,7 +1812,9 @@ async function crearRecibo(alumno, { concepto, importe, recibiDe, fechaEmision, 
     importe,
     importe_letras: letras,
     estado: 'pendiente',
-    periodos: periodos && periodos.length ? periodos : null
+    periodos: periodos && periodos.length ? periodos : null,
+    incluye_matricula: Boolean(importeMatricula),
+    importe_matricula: importeMatricula || 0
   }).select('*').single();
   if (error) throw new Error(error.message);
 
@@ -1702,8 +1988,17 @@ function modalEnvioMasivo(lista) {
   };
 }
 
+// Mismo criterio que usa el servidor para el descuento de hermanos, pero en
+// local (evita una llamada por alumno dentro de un bucle de generación).
+function tieneHermano(alumno) {
+  if (!alumno.apellidos || !alumno.apellidos.trim()) return false;
+  const norm = (s) => s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
+  const miApellido = norm(alumno.apellidos);
+  return S.alumnos.some(a2 => a2.id !== alumno.id && a2.estado === 'activo' && a2.apellidos && norm(a2.apellidos) === miApellido);
+}
+
 function modalReciboBulk() {
-  const candidatos = alumnosFiltrados().filter(a => a.estado === 'activo' && misMatriculas(a).length > 0);
+  const candidatos = alumnosFiltrados().filter(a => a.estado === 'activo' && misMatriculas(a).some(m => m.tarifa != null));
   abrirModal(`
   <h2>Recibos del mes (en lote)</h2>
   <p class="ayuda">Genera el recibo de los meses marcados para los <strong>${candidatos.length}</strong> alumnos
@@ -1730,8 +2025,17 @@ function modalReciboBulk() {
     for (const a of candidatos) {
       btn.textContent = `Generando ${ok + mal + 1}/${candidatos.length}…`;
       try {
-        const importe = misMatriculas(a).reduce((s, m) =>
-          s + (m.tipo_tarifa === 'mes' ? Number(m.tarifa) * meses.length : Number(m.tarifa)), 0);
+        const misMats = misMatriculas(a);
+        const misMesMats = misMats.filter(m => m.tipo_tarifa === 'mes' && m.tarifa != null);
+        const misClaseMats = misMats.filter(m => m.tipo_tarifa === 'clase' && m.tarifa != null);
+        const nMesTotalAlumno = (a.matriculas || []).filter(m => m.tipo_tarifa === 'mes' && m.tarifa != null).length;
+        const baseMes = misMesMats.reduce((s, m) => s + Number(m.tarifa), 0) * meses.length;
+        const baseClase = misClaseMats.reduce((s, m) => s + Number(m.tarifa), 0);
+        const descMulti = nMesTotalAlumno >= 2 ? 5 * misMesMats.length * meses.length : 0;
+        const descHermano = (misMesMats.length && tieneHermano(a)) ? 5 * meses.length : 0;
+        const descExtra = (misMesMats.length && a.descuento_extra > 0) ? a.descuento_extra * meses.length : 0;
+        const importe = Math.max(0, baseMes - descMulti - descHermano - descExtra) + baseClase;
+        if (importe <= 0) { mal++; continue; }
         await crearRecibo(a, {
           concepto, importe,
           recibiDe: a.facturacion_nombre || a.tutor_nombre || a.nombre,
@@ -1807,9 +2111,9 @@ function filasRecibos(lista, esAdmin, pagados) {
         <span class="chip ${r.fecha_envio_whatsapp ? 'envio-si' : 'envio-no'}">${r.fecha_envio_whatsapp ? 'enviado' : 'por enviar'}</span></td>
       <td class="acciones">
         ${pagados
-          ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>`
-          : `<button class="btn chico pagar" data-pagar="${r.id}">✓ Pagado</button>
-             <button class="btn chico liso" data-wa="${r.id}">WhatsApp</button>
+          ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>` : '')
+          : `${esAdmin ? `<button class="btn chico pagar" data-pagar="${r.id}">✓ Pagado</button>
+             <button class="btn chico liso" data-wa="${r.id}">WhatsApp</button>` : ''}
              <button class="btn chico liso" data-editar-recibo="${r.id}" title="Editar recibo">✏️</button>`}
         <button class="btn chico liso" data-pdf="${r.id}">PDF</button>
         <button class="btn chico liso peligro" data-borrar-recibo="${r.id}" title="Eliminar recibo">✕</button>
@@ -1840,7 +2144,7 @@ function renderRecibos() {
         const total = delMes.reduce((s, r) => s + Number(r.importe), 0);
         return `<h3 class="mes-seccion">${tituloMes(m)}
           <small>${delMes.length} pendiente${delMes.length === 1 ? '' : 's'} · ${formatoImporte(total)}€</small>
-          <button class="btn chico" data-enviar-mes="${m}">📤 Enviar todos por WhatsApp</button>
+          ${esAdmin ? `<button class="btn chico" data-enviar-mes="${m}">📤 Enviar todos por WhatsApp</button>` : ''}
           <button class="btn chico" data-descargar-mes="${m}">⬇ Descargar todos los PDF</button></h3>
         ${filasRecibos(delMes, esAdmin, false)}`;
       }).join('');
@@ -2472,6 +2776,159 @@ function modalCambiarTarifaAsignatura(asignaturaId, tipoTarifa) {
     await cargarAlumnos();
     renderAjustes();
     avisar(`Precio actualizado para ${n} alumno${n === 1 ? '' : 's'}.`);
+  };
+}
+
+// ---------------------------------------------------------------- ingresos y gastos (solo admin)
+
+const CATEGORIAS_INGRESO = ['Matrícula', 'Mensualidad', 'Tasas', 'Cursos', 'Talleres', 'Impuestos'];
+const CATEGORIAS_GASTO = ['Luz', 'Internet', 'Fotocopiadora', 'Alquiler', 'Autónomo', 'Nóminas banco',
+  'Seguridad Social', 'Nóminas efectivo', 'Seguro', 'Otros', 'Limpieza', 'Agua', 'Impuestos',
+  'Requerimientos legales', 'Asesoría', 'IA', 'Material', 'Nómina nuestra', 'Gasto efectivo', 'Gasto banco'];
+
+function claveMesFecha(fechaIso) {
+  return String(fechaIso || '').slice(0, 7);
+}
+
+function renderFinanzas() {
+  if (!S.profesor?.es_admin) return renderAjustes();
+  const meses = [...new Set(S.finanzas.map(m => claveMesFecha(m.fecha)))].sort().reverse();
+  if (!S.mesFinanzas || !meses.includes(S.mesFinanzas)) S.mesFinanzas = meses[0] || claveMesFecha(new Date().toISOString());
+
+  const delMes = S.finanzas.filter(m => claveMesFecha(m.fecha) === S.mesFinanzas);
+  const ingresos = delMes.filter(m => m.tipo === 'ingreso');
+  const gastos = delMes.filter(m => m.tipo === 'gasto');
+  const totalIngresos = ingresos.reduce((s, m) => s + Number(m.importe), 0);
+  const totalGastos = gastos.reduce((s, m) => s + Number(m.importe), 0);
+
+  const filaTabla = (m) => `<tr>
+    <td>${e(fmtFecha(m.fecha))}</td>
+    <td>${e(m.categoria)}${m.origen === 'automatico' ? ' <span class="chip envio-si">auto</span>' : ''}</td>
+    <td><strong>${formatoImporte(m.importe)}€</strong></td>
+    <td><small>${e(m.descripcion || '')}</small></td>
+    <td class="acciones">${m.origen === 'automatico'
+      ? '<small class="ayuda" title="Viene de un recibo pagado; para quitarlo, deshaz el pago en Recibos">ligado a un recibo</small>'
+      : `<button class="btn chico liso peligro" data-borrar-fin="${m.id}">✕</button>`}</td>
+  </tr>`;
+
+  document.getElementById('contenido').innerHTML = `
+  <div class="barra">
+    <div class="mes-nav">
+      <button class="btn chico liso" id="fin-mes-ant">‹</button>
+      <select id="fin-mes">
+        ${meses.length ? meses.map(m => `<option value="${m}" ${m === S.mesFinanzas ? 'selected' : ''}>${tituloMes(m)}</option>`).join('')
+          : `<option value="${S.mesFinanzas}">${tituloMes(S.mesFinanzas)}</option>`}
+      </select>
+      <button class="btn chico liso" id="fin-mes-sig">›</button>
+    </div>
+    <span class="flex1"></span>
+    <button class="btn primario" id="fin-nuevo">+ Añadir movimiento</button>
+  </div>
+  <div class="portada-cards" style="margin-bottom:22px">
+    <div class="portada-card">
+      <div class="pc-num" style="color:var(--verde)">${formatoImporte(totalIngresos)}€</div>
+      <div class="pc-titulo">ingresos</div>
+      <div class="pc-detalle">${ingresos.length} movimiento${ingresos.length === 1 ? '' : 's'}</div>
+    </div>
+    <div class="portada-card">
+      <div class="pc-num" style="color:var(--rojo)">${formatoImporte(totalGastos)}€</div>
+      <div class="pc-titulo">gastos</div>
+      <div class="pc-detalle">${gastos.length} movimiento${gastos.length === 1 ? '' : 's'}</div>
+    </div>
+    <div class="portada-card">
+      <div class="pc-num">${formatoImporte(totalIngresos - totalGastos)}€</div>
+      <div class="pc-titulo">balance</div>
+      <div class="pc-detalle">${tituloMes(S.mesFinanzas)}</div>
+    </div>
+  </div>
+
+  <h3 class="seccion">Ingresos</h3>
+  ${ingresos.length === 0 ? '<p class="ayuda">Sin ingresos este mes.</p>' : `
+  <div class="tabla-wrap"><table>
+    <thead><tr><th>Fecha</th><th>Categoría</th><th>Importe</th><th>Descripción</th><th></th></tr></thead>
+    <tbody>${ingresos.map(filaTabla).join('')}</tbody>
+  </table></div>`}
+
+  <h3 class="seccion">Gastos</h3>
+  ${gastos.length === 0 ? '<p class="ayuda">Sin gastos este mes.</p>' : `
+  <div class="tabla-wrap"><table>
+    <thead><tr><th>Fecha</th><th>Categoría</th><th>Importe</th><th>Descripción</th><th></th></tr></thead>
+    <tbody>${gastos.map(filaTabla).join('')}</tbody>
+  </table></div>`}`;
+
+  const $sel = document.getElementById('fin-mes');
+  if ($sel) $sel.onchange = (ev) => { S.mesFinanzas = ev.target.value; renderFinanzas(); };
+  document.getElementById('fin-mes-ant').onclick = () => {
+    const [a, m] = S.mesFinanzas.split('-').map(Number);
+    const d = new Date(a, m - 2, 1);
+    S.mesFinanzas = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    renderFinanzas();
+  };
+  document.getElementById('fin-mes-sig').onclick = () => {
+    const [a, m] = S.mesFinanzas.split('-').map(Number);
+    const d = new Date(a, m, 1);
+    S.mesFinanzas = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    renderFinanzas();
+  };
+  document.getElementById('fin-nuevo').onclick = () => modalNuevoMovimiento();
+  document.querySelectorAll('[data-borrar-fin]').forEach(b => b.onclick = async () => {
+    if (!confirm('¿Eliminar este movimiento?')) return;
+    await S.sb.from('finanzas_movimientos').delete().eq('id', b.dataset.borrarFin);
+    await cargarFinanzas();
+    renderFinanzas();
+  });
+}
+
+function modalNuevoMovimiento() {
+  abrirModal(`
+  <h2>Añadir movimiento</h2>
+  <div class="grid2">
+    <label>Tipo<select id="fm-tipo">
+      <option value="ingreso">Ingreso</option>
+      <option value="gasto">Gasto</option>
+    </select></label>
+    <label>Fecha<input id="fm-fecha" type="date" value="${e(new Date().toISOString().slice(0, 10))}"></label>
+    <label>Categoría<select id="fm-categoria"></select></label>
+    <label>Categoría nueva <small>(si no está en la lista)</small><input id="fm-categoria-nueva" placeholder="Escribe una categoría nueva…"></label>
+    <label>Importe (€)<input id="fm-importe" type="number" min="0" step="0.01"></label>
+    <label>Descripción<input id="fm-descripcion"></label>
+  </div>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+    <button class="btn primario" id="fm-guardar">Guardar</button>
+  </div>
+  <p id="m-msg" class="error"></p>`);
+
+  const $tipo = document.getElementById('fm-tipo');
+  const $cat = document.getElementById('fm-categoria');
+  const pintarCategorias = () => {
+    const lista = $tipo.value === 'gasto' ? CATEGORIAS_GASTO : CATEGORIAS_INGRESO;
+    $cat.innerHTML = lista.map(c => `<option value="${e(c)}">${e(c)}</option>`).join('');
+  };
+  $tipo.onchange = pintarCategorias;
+  pintarCategorias();
+
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('fm-guardar').onclick = async () => {
+    const categoria = document.getElementById('fm-categoria-nueva').value.trim() || $cat.value;
+    const importe = Number(document.getElementById('fm-importe').value);
+    const fecha = document.getElementById('fm-fecha').value;
+    if (!importe || importe <= 0) return avisar('El importe tiene que ser mayor que 0.', true);
+    if (!fecha) return avisar('Elige una fecha.', true);
+    const { error } = await S.sb.from('finanzas_movimientos').insert({
+      tipo: $tipo.value,
+      categoria,
+      importe,
+      fecha,
+      descripcion: document.getElementById('fm-descripcion').value.trim() || null,
+      origen: 'manual',
+      creado_por: S.profesor.id
+    });
+    if (error) return avisar('Error: ' + error.message, true);
+    cerrarModal();
+    await cargarFinanzas();
+    renderFinanzas();
+    avisar('Movimiento guardado.');
   };
 }
 

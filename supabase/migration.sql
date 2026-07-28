@@ -420,3 +420,188 @@ revoke execute on function public.handle_new_user() from public, anon, authentic
 grant execute on function public.handle_new_user() to supabase_auth_admin;
 revoke execute on function public.is_admin() from public, anon;
 grant execute on function public.is_admin() to authenticated;
+
+-- ============================================================
+-- SEGUNDA REUNIÓN CON LA ACADEMIA: contabilidad, descuentos automáticos,
+-- modificaciones de horas, precio solo-admin y matrícula en el recibo
+-- ============================================================
+
+-- ---------- Apellidos (para hermanos), descuento especial, precio opcional ----------
+alter table public.alumnos add column apellidos text;
+alter table public.alumnos add column descuento_extra numeric not null default 0;
+alter table public.matriculas alter column tarifa drop not null;
+alter table public.recibos add column incluye_matricula boolean not null default false;
+alter table public.recibos add column importe_matricula numeric not null default 0;
+
+-- ---------- Historial de cambios de horas semanales ("modificaciones") ----------
+create table public.cambios_horario (
+  id uuid primary key default gen_random_uuid(),
+  matricula_id uuid references public.matriculas (id) on delete cascade,
+  alumno_id uuid not null references public.alumnos (id) on delete cascade,
+  profesor_id uuid not null references public.profesores (id),
+  horas_antes numeric,
+  horas_despues numeric not null,
+  nota text,
+  fecha timestamptz not null default now(),
+  visto boolean not null default false
+);
+
+create index cambios_horario_alumno_idx on public.cambios_horario (alumno_id);
+create index cambios_horario_visto_idx on public.cambios_horario (visto) where not visto;
+
+alter table public.cambios_horario enable row level security;
+
+create policy "cambios_horario_select" on public.cambios_horario
+  for select to authenticated using (true);
+create policy "cambios_horario_insert" on public.cambios_horario
+  for insert to authenticated with check (profesor_id = auth.uid() or public.is_admin());
+create policy "cambios_horario_update" on public.cambios_horario
+  for update to authenticated using (public.is_admin()) with check (public.is_admin());
+
+-- ---------- Ingresos y gastos de la academia (solo administrador) ----------
+create table public.finanzas_movimientos (
+  id uuid primary key default gen_random_uuid(),
+  tipo text not null check (tipo in ('ingreso', 'gasto')),
+  categoria text not null,
+  importe numeric not null check (importe > 0),
+  fecha date not null default current_date,
+  descripcion text,
+  origen text not null default 'manual' check (origen in ('manual', 'automatico')),
+  recibo_id uuid references public.recibos (id) on delete cascade,
+  creado_por uuid references public.profesores (id),
+  created_at timestamptz not null default now()
+);
+
+create index finanzas_fecha_idx on public.finanzas_movimientos (fecha);
+create index finanzas_recibo_idx on public.finanzas_movimientos (recibo_id);
+
+alter table public.finanzas_movimientos enable row level security;
+create policy "finanzas_solo_admin" on public.finanzas_movimientos
+  for all to authenticated using (public.is_admin()) with check (public.is_admin());
+
+-- ---------- Motor de descuentos: base de asignaturas de tipo mes, -5€ por
+-- cada asignatura si hay 2+, -5€ si tiene hermano activo (mismos apellidos),
+-- -descuento_extra individual. Fuente única para la app y la generación automática.
+create or replace function public.calcular_descuentos_alumno(p_alumno_id uuid)
+returns table (
+  base numeric, n_asignaturas integer, descuento_multi numeric,
+  descuento_hermano numeric, descuento_extra numeric, total numeric
+)
+language plpgsql stable security definer set search_path = public
+as $$
+declare
+  v_base numeric; v_n integer; v_apellidos text;
+  v_tiene_hermano boolean := false; v_descuento_extra numeric;
+begin
+  select count(*), sum(m.tarifa) into v_n, v_base
+  from public.matriculas m where m.alumno_id = p_alumno_id and m.tipo_tarifa = 'mes';
+
+  select a.apellidos, a.descuento_extra into v_apellidos, v_descuento_extra
+  from public.alumnos a where a.id = p_alumno_id;
+
+  if v_apellidos is not null and trim(v_apellidos) <> '' then
+    select exists (
+      select 1 from public.alumnos a2
+      where a2.id <> p_alumno_id and a2.estado = 'activo' and a2.apellidos is not null
+        and public.nombre_normalizado(a2.apellidos) = public.nombre_normalizado(v_apellidos)
+    ) into v_tiene_hermano;
+  end if;
+
+  return query select
+    v_base, coalesce(v_n, 0),
+    case when coalesce(v_n, 0) >= 2 then 5::numeric * v_n else 0::numeric end,
+    case when v_tiene_hermano then 5::numeric else 0::numeric end,
+    coalesce(v_descuento_extra, 0),
+    case when v_base is null then null
+      else greatest(0, v_base
+        - (case when coalesce(v_n, 0) >= 2 then 5::numeric * v_n else 0::numeric end)
+        - (case when v_tiene_hermano then 5::numeric else 0::numeric end)
+        - coalesce(v_descuento_extra, 0))
+    end;
+end;
+$$;
+
+revoke execute on function public.calcular_descuentos_alumno(uuid) from public, anon;
+grant execute on function public.calcular_descuentos_alumno(uuid) to authenticated;
+
+-- ---------- Recibos automáticos el día 3 (antes 25), con descuentos ----------
+create or replace function public.generar_recibos_mensuales()
+returns integer
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_periodo text := to_char(now(), 'YYYY-MM');
+  v_mes text := (array['Enero','Febrero','Marzo','Abril','Mayo','Junio',
+    'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'])[extract(month from now())::int];
+  v_admin uuid; v_creados integer := 0; fila record; v_desc record;
+begin
+  select id into v_admin from public.profesores where es_admin and estado = 'activo' order by created_at limit 1;
+  if v_admin is null then raise exception 'No hay administrador activo'; end if;
+
+  for fila in
+    select a.id as alumno_id from public.alumnos a
+    where a.estado = 'activo'
+      and exists (select 1 from public.matriculas m where m.alumno_id = a.id and m.tipo_tarifa = 'mes' and m.tarifa is not null)
+  loop
+    select * into v_desc from public.calcular_descuentos_alumno(fila.alumno_id);
+    if v_desc.total is null or v_desc.total <= 0 then continue; end if;
+    begin
+      insert into public.recibos (alumno_id, profesor_id, fecha_emision, concepto, importe, importe_letras, estado, periodos)
+      values (fila.alumno_id, v_admin, current_date, v_mes, v_desc.total, '', 'pendiente', array[v_periodo]);
+      v_creados := v_creados + 1;
+    exception when others then null; end;
+  end loop;
+  return v_creados;
+end;
+$$;
+
+select cron.unschedule('recibos-mensuales');
+select cron.schedule('recibos-mensuales', '0 6 3 * *', 'select public.generar_recibos_mensuales()');
+
+-- ---------- Solo el administrador marca pagado; Ingresos se sincroniza solo ----------
+create or replace function public.restringir_pago_a_admin()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if (new.estado is distinct from old.estado or new.fecha_pago is distinct from old.fecha_pago)
+     and not public.is_admin() then
+    raise exception 'Solo el administrador puede marcar un recibo como pagado';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger recibos_pago_solo_admin
+  before update on public.recibos
+  for each row execute function public.restringir_pago_a_admin();
+
+create or replace function public.sincronizar_finanzas_recibo()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if new.estado = 'pagado' and old.estado is distinct from 'pagado' then
+    if (new.importe - new.importe_matricula) > 0 then
+      insert into public.finanzas_movimientos (tipo, categoria, importe, fecha, descripcion, origen, recibo_id)
+      values ('ingreso', 'Mensualidad', new.importe - new.importe_matricula,
+        coalesce(new.fecha_pago::date, current_date), 'Recibo R-' || lpad(new.referencia::text, 5, '0'), 'automatico', new.id);
+    end if;
+    if new.incluye_matricula and new.importe_matricula > 0 then
+      insert into public.finanzas_movimientos (tipo, categoria, importe, fecha, descripcion, origen, recibo_id)
+      values ('ingreso', 'Matrícula', new.importe_matricula,
+        coalesce(new.fecha_pago::date, current_date), 'Recibo R-' || lpad(new.referencia::text, 5, '0'), 'automatico', new.id);
+    end if;
+  elsif old.estado = 'pagado' and new.estado is distinct from 'pagado' then
+    delete from public.finanzas_movimientos where recibo_id = new.id and origen = 'automatico';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger recibos_sync_finanzas
+  after update on public.recibos
+  for each row execute function public.sincronizar_finanzas_recibo();
+
+-- La función de WhatsApp (supabase/functions/enviar-whatsapp) pasó a exigir
+-- es_admin=true además de sesión activa: solo la administradora envía.

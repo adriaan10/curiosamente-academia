@@ -37,9 +37,10 @@ function respuesta(cuerpo: unknown, status = 200) {
   return new Response(JSON.stringify(cuerpo), { status, headers: cabeceras });
 }
 
-// Comprueba que quien llama es un profesor con sesión iniciada y en activo.
-// Sin esto bastaría la clave pública de la app (que es visible en el código)
-// para provocar envíos reales, que cuestan dinero.
+// Comprueba que quien llama es el ADMINISTRADOR con sesión iniciada y activo.
+// La academia lleva los envíos ella misma: los profesores pueden ver y editar
+// recibos, pero no enviarlos. Sin esto bastaría la clave pública de la app
+// (que es visible en el código) para provocar envíos reales, que cuestan dinero.
 async function profesorQueLlama(req: Request): Promise<{ id: string } | null> {
   const auth = req.headers.get('Authorization') || '';
   const token = auth.replace(/^Bearer\s+/i, '').trim();
@@ -51,7 +52,7 @@ async function profesorQueLlama(req: Request): Promise<{ id: string } | null> {
 
   // La clave pública también es un "token" válido para la pasarela, pero no
   // corresponde a ningún usuario: esta llamada solo devuelve datos si hay
-  // detrás una sesión real de profesor.
+  // detrás una sesión real.
   const r = await fetch(`${url}/auth/v1/user`, {
     headers: { Authorization: `Bearer ${token}`, apikey: anon }
   });
@@ -59,14 +60,16 @@ async function profesorQueLlama(req: Request): Promise<{ id: string } | null> {
   const usuario = await r.json();
   if (!usuario?.id) return null;
 
-  // Un profesor dado de baja no puede enviar nada.
+  // Solo el administrador activo puede enviar. Un profesor de baja, o
+  // cualquier profesor normal, no pasa de aquí.
   const p = await fetch(
-    `${url}/rest/v1/profesores?id=eq.${usuario.id}&select=estado`,
+    `${url}/rest/v1/profesores?id=eq.${usuario.id}&select=estado,es_admin`,
     { headers: { Authorization: `Bearer ${token}`, apikey: anon } }
   );
   if (!p.ok) return null;
   const filas = await p.json();
-  if (!Array.isArray(filas) || !filas.length || filas[0].estado === 'baja') return null;
+  if (!Array.isArray(filas) || !filas.length) return null;
+  if (filas[0].estado === 'baja' || !filas[0].es_admin) return null;
 
   return { id: usuario.id };
 }
@@ -102,7 +105,7 @@ Deno.serve(async (req) => {
 
   const quien = await profesorQueLlama(req);
   if (!quien) {
-    return respuesta({ ok: false, error: 'Necesitas iniciar sesión como profesor activo' }, 401);
+    return respuesta({ ok: false, error: 'Solo el administrador puede enviar recibos por WhatsApp' }, 401);
   }
 
   let p: Peticion;
