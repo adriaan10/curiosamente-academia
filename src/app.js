@@ -1711,12 +1711,6 @@ function modalRecibo(alumno) {
   const $matriculaChk = document.getElementById('r-matricula');
   const $matriculaImporte = document.getElementById('r-importe-matricula');
 
-  $matriculaChk.onchange = () => {
-    $matriculaImporte.style.display = $matriculaChk.checked ? '' : 'none';
-    recalcular();
-  };
-  $matriculaImporte.oninput = recalcular;
-
   // Descuentos del alumno (hermanos, varias asignaturas, especial), consultados
   // una vez al abrir el recibo — misma fuente que usa la generación automática.
   let descuentos = { descuento_multi: 0, descuento_hermano: 0, descuento_extra: 0 };
@@ -1768,6 +1762,11 @@ function modalRecibo(alumno) {
   $extra.oninput = recalcular;
   $extraDesc.oninput = recalcular;
   $importe.oninput = () => { $letras.textContent = importeALetras($importe.value || 0); };
+  $matriculaChk.onchange = () => {
+    $matriculaImporte.style.display = $matriculaChk.checked ? '' : 'none';
+    recalcular();
+  };
+  $matriculaImporte.oninput = recalcular;
   recalcular();
 
   document.getElementById('m-cancelar').onclick = cerrarModal;
