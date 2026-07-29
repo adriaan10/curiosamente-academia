@@ -2950,10 +2950,15 @@ async function renderAjustes() {
     <p class="ayuda" id="aj-wa-estado">Comprobando…</p>
     <button class="btn chico" id="aj-wa-probar">Comprobar de nuevo</button>
 
-    <h3>Mi horario de trabajo</h3>
-    <p class="ayuda">Indica qué días y horas trabajas. Con esto, "Huecos libres" en la pestaña
-    Horario calculará tus huecos dentro de tu horario real, en vez de un horario genérico.
-    Si no configuras nada, se usará un horario por defecto (16:00–21:00).</p>
+    <h3>${S.profesor?.es_admin ? 'Horario de trabajo' : 'Mi horario de trabajo'}</h3>
+    <p class="ayuda">Indica qué días y horas ${S.profesor?.es_admin ? 'trabaja cada profesor' : 'trabajas'}.
+    Con esto, "Huecos libres" en la pestaña Horario calculará los huecos dentro del horario real,
+    en vez de un horario genérico. Si no se configura nada, se usará un horario por defecto (16:00–21:00).</p>
+    ${S.profesor?.es_admin ? `<label>Profesor
+      <select id="aj-horario-profesor">
+        ${S.profesores.filter(p => p.estado !== 'baja').map(p =>
+          `<option value="${p.id}" ${p.id === S.profesor.id ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
+      </select></label>` : ''}
     <div id="aj-horario-trabajo"></div>
     <button class="btn chico" id="aj-add-horario">+ Añadir tramo</button>
     <button class="btn primario chico" id="aj-guardar-horario" style="margin-left:8px">Guardar horario</button>
@@ -2992,9 +2997,12 @@ async function renderAjustes() {
   document.getElementById('aj-wa-probar').onclick = comprobarWhatsApp;
 
   // Tramos de horario de trabajo en edición local (día + hora inicio + hora fin).
-  const tramos = S.profesorHorario
-    .filter(h => h.profesor_id === S.profesor.id)
+  // El admin puede elegir de quién los edita; un profesor normal solo ve los suyos.
+  let profesorHorarioId = S.profesor.id;
+  const tramosDe = (profesorId) => S.profesorHorario
+    .filter(h => h.profesor_id === profesorId)
     .map(h => ({ dia_semana: h.dia_semana, hora_inicio: horaCorta(h.hora_inicio), hora_fin: horaCorta(h.hora_fin) }));
+  let tramos = tramosDe(profesorHorarioId);
 
   const pintarTramos = () => {
     document.getElementById('aj-horario-trabajo').innerHTML = tramos.map((t, i) => `
@@ -3014,6 +3022,12 @@ async function renderAjustes() {
     cont.querySelectorAll('[data-t-quitar]').forEach(b => b.onclick = () => { tramos.splice(+b.dataset.tQuitar, 1); pintarTramos(); });
   };
   pintarTramos();
+  const selectorProf = document.getElementById('aj-horario-profesor');
+  if (selectorProf) selectorProf.onchange = () => {
+    profesorHorarioId = selectorProf.value;
+    tramos = tramosDe(profesorHorarioId);
+    pintarTramos();
+  };
   document.getElementById('aj-add-horario').onclick = () => {
     tramos.push({ dia_semana: 1, hora_inicio: '16:00', hora_fin: '21:00' });
     pintarTramos();
@@ -3023,10 +3037,10 @@ async function renderAjustes() {
       avisar('En cada tramo, la hora de fin debe ser posterior a la de inicio.', true);
       return;
     }
-    await S.sb.from('profesor_horario').delete().eq('profesor_id', S.profesor.id);
+    await S.sb.from('profesor_horario').delete().eq('profesor_id', profesorHorarioId);
     if (tramos.length) {
       const { error } = await S.sb.from('profesor_horario')
-        .insert(tramos.map(t => ({ profesor_id: S.profesor.id, ...t })));
+        .insert(tramos.map(t => ({ profesor_id: profesorHorarioId, ...t })));
       if (error) return avisar('Error al guardar: ' + error.message, true);
     }
     await cargarHorarioTrabajo();
