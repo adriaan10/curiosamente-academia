@@ -2842,6 +2842,31 @@ function fechaPorDefectoParaMes(claveMes) {
   return claveMes === claveMesFecha(hoy.toISOString()) ? hoy.toISOString().slice(0, 10) : `${claveMes}-01`;
 }
 
+// Exporta la rejilla categoría × mes del curso que se esté viendo (para guardar
+// el cierre del año, por ejemplo antes de "Empezar año nuevo").
+function escCsv(v) {
+  const s = v == null ? '' : String(v);
+  return /[";\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+async function exportarFinanzasAnualCsv(tipo) {
+  const categorias = categoriasConExtras(tipo);
+  const meses = mesesDelCurso(S.cursoFinanzas);
+  const cabecera = ['Categoría', ...meses.map(mc => `${nombreCortoMes(mc)} ${mc.split('-')[0]}`), 'Total'];
+  const filas = categorias.map(cat => {
+    const valores = meses.map(mc => totalCategoriaMes(tipo, cat, mc));
+    const total = valores.reduce((s, x) => s + x, 0);
+    return [cat, ...valores.map(formatoImporte), formatoImporte(total)];
+  });
+  const totalPorMes = meses.map(mc => categorias.reduce((s, c) => s + totalCategoriaMes(tipo, c, mc), 0));
+  filas.push(['Total', ...totalPorMes.map(formatoImporte), formatoImporte(totalPorMes.reduce((s, x) => s + x, 0))]);
+
+  const csv = [cabecera, ...filas].map(fila => fila.map(escCsv).join(';')).join('\r\n');
+  const nombreArchivo = `${tipo === 'gasto' ? 'gastos' : 'ingresos'}_curso_${S.cursoFinanzas}.csv`;
+  const ruta = await window.api.saveCsv(csv, nombreArchivo);
+  if (ruta) avisar('Excel guardado en ' + ruta);
+}
+
 // Todas las claves 'YYYY-MM' entre dos meses, ambos incluidos (para que no falten
 // meses "vacíos" en medio y el mes actual siempre sea el límite de avance).
 function mesesEntre(desde, hasta) {
@@ -2869,13 +2894,16 @@ function renderFinanzas() {
     const cursosConDatos = S.finanzas.map(m => cursoDeClaveMes(claveMesFecha(m.fecha)));
     const inicioActual = Number(cursoAct.split('-')[0]);
     const primerInicio = cursosConDatos.length ? Math.min(...cursosConDatos.map(c => Number(c.split('-')[0]))) : inicioActual;
-    // Rango sin huecos desde el primer curso con datos hasta el curso en el que estamos ahora.
+    // El curso siguiente al actual siempre está disponible (aunque aún no tenga
+    // datos): así se puede adelantar la vista con "Empezar año nuevo" antes de
+    // que lleguen movimientos de septiembre.
     const cursosDisponibles = [];
-    for (let i = inicioActual; i >= primerInicio; i--) cursosDisponibles.push(`${i}-${i + 1}`);
+    for (let i = inicioActual + 1; i >= primerInicio; i--) cursosDisponibles.push(`${i}-${i + 1}`);
     if (!S.cursoFinanzas || !cursosDisponibles.includes(S.cursoFinanzas)) S.cursoFinanzas = cursoAct;
     const meses = mesesDelCurso(S.cursoFinanzas);
     const esElMasReciente = S.cursoFinanzas === cursosDisponibles[0];
     const esElMasAntiguo = S.cursoFinanzas === cursosDisponibles[cursosDisponibles.length - 1];
+    const cursoSiguiente = `${inicioActual + 1}-${inicioActual + 2}`;
     periodoMeses = meses;
 
     const totalPorMes = meses.map(mc => categorias.reduce((s, c) => s + totalCategoriaMes(tipo, c, mc), 0));
@@ -2888,7 +2916,9 @@ function renderFinanzas() {
         ${cursosDisponibles.map(c => `<option value="${c}" ${c === S.cursoFinanzas ? 'selected' : ''}>Curso ${c}</option>`).join('')}
       </select>
       <button class="btn chico liso" id="fin-curso-sig" ${esElMasReciente ? 'disabled' : ''}>›</button>
-    </div>`;
+    </div>
+    <button class="btn liso" id="fin-exportar-anual">⬇ Exportar a Excel</button>
+    ${S.cursoFinanzas === cursoAct ? `<button class="btn" id="fin-nuevo-anio">Empezar año nuevo (${cursoSiguiente}) →</button>` : ''}`;
 
     cuerpoTabla = `
     <div class="tabla-wrap"><table class="tabla-finanzas">
@@ -2995,6 +3025,13 @@ function renderFinanzas() {
       renderFinanzas();
     };
     document.getElementById('fin-curso-sig').onclick = () => {
+      const inicio = Number(S.cursoFinanzas.split('-')[0]);
+      S.cursoFinanzas = `${inicio + 1}-${inicio + 2}`;
+      renderFinanzas();
+    };
+    document.getElementById('fin-exportar-anual').onclick = () => exportarFinanzasAnualCsv(tipo);
+    const $nuevoAnio = document.getElementById('fin-nuevo-anio');
+    if ($nuevoAnio) $nuevoAnio.onclick = () => {
       const inicio = Number(S.cursoFinanzas.split('-')[0]);
       S.cursoFinanzas = `${inicio + 1}-${inicio + 2}`;
       renderFinanzas();
