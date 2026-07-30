@@ -662,10 +662,11 @@ begin
 end;
 $$;
 
-select cron.alter_job(
-  (select jobid from cron.job where jobname = 'recibos-mensuales'),
-  schedule := '0 6 3 1-6,9-12 *'
-);
+-- unschedule + schedule (no alter_job): así no depende de que exista ya un
+-- jobid con ese nombre, que dejaría el resto de la migración a medias si el
+-- job no existiera todavía en un proyecto nuevo.
+select cron.unschedule('recibos-mensuales');
+select cron.schedule('recibos-mensuales', '0 6 3 1-6,9-12 *', 'select public.generar_recibos_mensuales()');
 
 -- Reestructuración de fin de curso: solo la administradora puede ejecutarlo.
 -- Da de baja a todos los alumnos activos de la academia (los profesores

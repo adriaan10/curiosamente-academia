@@ -2803,12 +2803,16 @@ function cursoActual() {
   return cursoDeClaveMes(`${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}`);
 }
 
-// Las 11 claves 'YYYY-MM' del curso, en orden: septiembre → julio.
+// Las 12 claves 'YYYY-MM' del curso, en orden: septiembre → agosto. Incluye
+// agosto (no solo hasta julio) porque cursoDeClaveMes() también lo cuenta
+// como parte del curso que termina — si no, el dinero de agosto (recibos de
+// julio que se cobran en agosto, gastos de agosto…) desaparecería del cierre
+// de año, del Excel exportado y de las tarjetas de totales.
 function mesesDelCurso(curso) {
   const inicio = Number(curso.split('-')[0]);
   const claves = [];
   for (let m = 9; m <= 12; m++) claves.push(`${inicio}-${String(m).padStart(2, '0')}`);
-  for (let m = 1; m <= 7; m++) claves.push(`${inicio + 1}-${String(m).padStart(2, '0')}`);
+  for (let m = 1; m <= 8; m++) claves.push(`${inicio + 1}-${String(m).padStart(2, '0')}`);
   return claves;
 }
 
@@ -2892,13 +2896,16 @@ function renderFinanzas() {
   if (modo === 'anual') {
     const cursoAct = cursoActual();
     const cursosConDatos = S.finanzas.map(m => cursoDeClaveMes(claveMesFecha(m.fecha)));
+    const iniciosConDatos = cursosConDatos.map(c => Number(c.split('-')[0]));
     const inicioActual = Number(cursoAct.split('-')[0]);
-    const primerInicio = cursosConDatos.length ? Math.min(...cursosConDatos.map(c => Number(c.split('-')[0]))) : inicioActual;
+    const primerInicio = iniciosConDatos.length ? Math.min(inicioActual, ...iniciosConDatos) : inicioActual;
     // El curso siguiente al actual siempre está disponible (aunque aún no tenga
-    // datos): así se puede adelantar la vista con "Empezar año nuevo" antes de
-    // que lleguen movimientos de septiembre.
+    // datos), para poder adelantar la vista con "Empezar año nuevo"; y si hay
+    // movimientos con fecha en un curso todavía más adelantado (p. ej. una
+    // fecha mal escrita), ese también se incluye para no perderlo de vista.
+    const inicioMax = Math.max(inicioActual + 1, ...iniciosConDatos);
     const cursosDisponibles = [];
-    for (let i = inicioActual + 1; i >= primerInicio; i--) cursosDisponibles.push(`${i}-${i + 1}`);
+    for (let i = inicioMax; i >= primerInicio; i--) cursosDisponibles.push(`${i}-${i + 1}`);
     if (!S.cursoFinanzas || !cursosDisponibles.includes(S.cursoFinanzas)) S.cursoFinanzas = cursoAct;
     const meses = mesesDelCurso(S.cursoFinanzas);
     const esElMasReciente = S.cursoFinanzas === cursosDisponibles[0];
@@ -2938,11 +2945,14 @@ function renderFinanzas() {
     </table></div>`;
   } else {
     const mesActual = claveMesFecha(new Date().toISOString());
-    const mesesConDatos = S.finanzas.map(m => claveMesFecha(m.fecha));
-    const primerMes = mesesConDatos.length ? mesesConDatos.sort()[0] : mesActual;
-    // Rango sin huecos desde el primer movimiento hasta hoy: el mes actual es
-    // siempre el límite de avance (no existen movimientos de meses futuros).
-    const meses = mesesEntre(primerMes, mesActual).reverse();
+    const mesesConDatos = S.finanzas.map(m => claveMesFecha(m.fecha)).sort();
+    const primerMes = mesesConDatos.length ? mesesConDatos[0] : mesActual;
+    // El límite de avance normal es el mes actual, pero si hay algún movimiento
+    // metido con fecha futura (p. ej. el alquiler de agosto apuntado en julio),
+    // ese mes también tiene que poder verse, tocarse y borrarse.
+    const ultimoMesConDatos = mesesConDatos.length ? mesesConDatos[mesesConDatos.length - 1] : mesActual;
+    const mesHasta = ultimoMesConDatos > mesActual ? ultimoMesConDatos : mesActual;
+    const meses = mesesEntre(primerMes, mesHasta).reverse();
     if (!S.mesFinanzas || !meses.includes(S.mesFinanzas)) S.mesFinanzas = mesActual;
     periodoMeses = [S.mesFinanzas];
 
