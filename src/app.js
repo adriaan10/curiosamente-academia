@@ -2789,145 +2789,265 @@ function claveMesFecha(fechaIso) {
   return String(fechaIso || '').slice(0, 7);
 }
 
+// Curso académico "2025-2026": empieza en septiembre de 2025, termina en julio de 2026.
+// Agosto se considera parte del curso que termina (mes de descanso, fuera de la rejilla anual).
+function cursoDeClaveMes(claveMes) {
+  const [anio, mes] = claveMes.split('-').map(Number);
+  const inicio = mes >= 9 ? anio : anio - 1;
+  return `${inicio}-${inicio + 1}`;
+}
+
+function cursoActual() {
+  const hoy = new Date();
+  return cursoDeClaveMes(`${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}`);
+}
+
+// Las 11 claves 'YYYY-MM' del curso, en orden: septiembre → julio.
+function mesesDelCurso(curso) {
+  const inicio = Number(curso.split('-')[0]);
+  const claves = [];
+  for (let m = 9; m <= 12; m++) claves.push(`${inicio}-${String(m).padStart(2, '0')}`);
+  for (let m = 1; m <= 7; m++) claves.push(`${inicio + 1}-${String(m).padStart(2, '0')}`);
+  return claves;
+}
+
+function nombreCortoMes(claveMes) {
+  return MESES[Number(claveMes.split('-')[1]) - 1].slice(0, 3);
+}
+
+function totalCategoriaMes(tipo, categoria, claveMes) {
+  return S.finanzas
+    .filter(m => m.tipo === tipo && m.categoria === categoria && claveMesFecha(m.fecha) === claveMes)
+    .reduce((s, m) => s + Number(m.importe), 0);
+}
+
+function totalTipoEnMeses(tipo, clavesMes) {
+  const set = new Set(clavesMes);
+  return S.finanzas
+    .filter(m => m.tipo === tipo && set.has(claveMesFecha(m.fecha)))
+    .reduce((s, m) => s + Number(m.importe), 0);
+}
+
+// Categorías fijas de la lista + cualquier categoría suelta que ya tenga movimientos
+// (por ejemplo, datos antiguos) para no esconder dinero que no encaje en la lista.
+function categoriasConExtras(tipo) {
+  const fijas = tipo === 'gasto' ? CATEGORIAS_GASTO : CATEGORIAS_INGRESO;
+  const usadas = [...new Set(S.finanzas.filter(m => m.tipo === tipo).map(m => m.categoria))];
+  return [...fijas, ...usadas.filter(c => !fijas.includes(c))];
+}
+
+function fechaPorDefectoParaMes(claveMes) {
+  const hoy = new Date();
+  return claveMes === claveMesFecha(hoy.toISOString()) ? hoy.toISOString().slice(0, 10) : `${claveMes}-01`;
+}
+
 function renderFinanzas() {
   if (!S.profesor?.es_admin) return renderAjustes();
-  const meses = [...new Set(S.finanzas.map(m => claveMesFecha(m.fecha)))].sort().reverse();
-  if (!S.mesFinanzas || !meses.includes(S.mesFinanzas)) S.mesFinanzas = meses[0] || claveMesFecha(new Date().toISOString());
+  const tipo = S.vistaFinanzas === 'gastos' ? 'gasto' : 'ingreso';
+  const modo = S.modoFinanzas || 'mes';
+  const categorias = categoriasConExtras(tipo);
 
-  const delMes = S.finanzas.filter(m => claveMesFecha(m.fecha) === S.mesFinanzas);
-  const ingresos = delMes.filter(m => m.tipo === 'ingreso');
-  const gastos = delMes.filter(m => m.tipo === 'gasto');
-  const totalIngresos = ingresos.reduce((s, m) => s + Number(m.importe), 0);
-  const totalGastos = gastos.reduce((s, m) => s + Number(m.importe), 0);
+  let cuerpoTabla, barraNav, periodoMeses;
 
-  const filaTabla = (m) => `<tr>
-    <td>${e(fmtFecha(m.fecha))}</td>
-    <td>${e(m.categoria)}${m.origen === 'automatico' ? ' <span class="chip envio-si">auto</span>' : ''}</td>
-    <td><strong>${formatoImporte(m.importe)}€</strong></td>
-    <td><small>${e(m.descripcion || '')}</small></td>
-    <td class="acciones">${m.origen === 'automatico'
-      ? '<small class="ayuda" title="Viene de un recibo pagado; para quitarlo, deshaz el pago en Recibos">ligado a un recibo</small>'
-      : `<button class="btn chico liso peligro" data-borrar-fin="${m.id}">✕</button>`}</td>
-  </tr>`;
+  if (modo === 'anual') {
+    const cursoAct = cursoActual();
+    const cursosConDatos = [...new Set(S.finanzas.map(m => cursoDeClaveMes(claveMesFecha(m.fecha))))];
+    const cursosDisponibles = [...new Set([cursoAct, ...cursosConDatos])].sort().reverse();
+    if (!S.cursoFinanzas || !cursosDisponibles.includes(S.cursoFinanzas)) S.cursoFinanzas = cursoAct;
+    const meses = mesesDelCurso(S.cursoFinanzas);
+    periodoMeses = meses;
 
-  document.getElementById('contenido').innerHTML = `
-  <div class="barra">
+    const totalPorMes = meses.map(mc => categorias.reduce((s, c) => s + totalCategoriaMes(tipo, c, mc), 0));
+    const totalGeneral = totalPorMes.reduce((s, x) => s + x, 0);
+
+    barraNav = `
+    <div class="mes-nav">
+      <button class="btn chico liso" id="fin-curso-ant">‹</button>
+      <select id="fin-curso">
+        ${cursosDisponibles.map(c => `<option value="${c}" ${c === S.cursoFinanzas ? 'selected' : ''}>Curso ${c}</option>`).join('')}
+      </select>
+      <button class="btn chico liso" id="fin-curso-sig">›</button>
+    </div>`;
+
+    cuerpoTabla = `
+    <div class="tabla-wrap"><table class="tabla-finanzas">
+      <thead><tr><th>Categoría</th>${meses.map(mc => `<th>${nombreCortoMes(mc)}</th>`).join('')}<th>Total</th></tr></thead>
+      <tbody>
+        ${categorias.map(cat => {
+          const valores = meses.map(mc => totalCategoriaMes(tipo, cat, mc));
+          const totalFila = valores.reduce((s, x) => s + x, 0);
+          return `<tr>
+            <td>${e(cat)}</td>
+            ${valores.map((v, i) => `<td class="celda-fin ${v ? '' : 'vacia'}" data-cat="${e(cat)}" data-mes="${meses[i]}">${v ? formatoImporte(v) + '€' : '—'}</td>`).join('')}
+            <td><strong>${formatoImporte(totalFila)}€</strong></td>
+          </tr>`;
+        }).join('')}
+        <tr class="fila-total"><td>Total</td>${totalPorMes.map(v => `<td>${formatoImporte(v)}€</td>`).join('')}<td>${formatoImporte(totalGeneral)}€</td></tr>
+      </tbody>
+    </table></div>`;
+  } else {
+    const mesActual = claveMesFecha(new Date().toISOString());
+    const mesesConDatos = [...new Set(S.finanzas.map(m => claveMesFecha(m.fecha)))];
+    const meses = [...new Set([mesActual, ...mesesConDatos])].sort().reverse();
+    if (!S.mesFinanzas || !meses.includes(S.mesFinanzas)) S.mesFinanzas = mesActual;
+    periodoMeses = [S.mesFinanzas];
+
+    const totalGeneral = categorias.reduce((s, c) => s + totalCategoriaMes(tipo, c, S.mesFinanzas), 0);
+
+    barraNav = `
     <div class="mes-nav">
       <button class="btn chico liso" id="fin-mes-ant">‹</button>
       <select id="fin-mes">
-        ${meses.length ? meses.map(m => `<option value="${m}" ${m === S.mesFinanzas ? 'selected' : ''}>${tituloMes(m)}</option>`).join('')
-          : `<option value="${S.mesFinanzas}">${tituloMes(S.mesFinanzas)}</option>`}
+        ${meses.map(m => `<option value="${m}" ${m === S.mesFinanzas ? 'selected' : ''}>${tituloMes(m)}</option>`).join('')}
       </select>
       <button class="btn chico liso" id="fin-mes-sig">›</button>
+    </div>`;
+
+    cuerpoTabla = `
+    <div class="tabla-wrap"><table class="tabla-finanzas">
+      <thead><tr><th>Categoría</th><th>Total del mes</th></tr></thead>
+      <tbody>
+        ${categorias.map(cat => {
+          const v = totalCategoriaMes(tipo, cat, S.mesFinanzas);
+          return `<tr class="celda-fin" data-cat="${e(cat)}" data-mes="${S.mesFinanzas}">
+            <td>${e(cat)}</td>
+            <td>${v ? `<strong>${formatoImporte(v)}€</strong>` : '<span class="ayuda">— (toca para añadir)</span>'}</td>
+          </tr>`;
+        }).join('')}
+        <tr class="fila-total"><td>Total</td><td>${formatoImporte(totalGeneral)}€</td></tr>
+      </tbody>
+    </table></div>`;
+  }
+
+  const totalIngresosPeriodo = totalTipoEnMeses('ingreso', periodoMeses);
+  const totalGastosPeriodo = totalTipoEnMeses('gasto', periodoMeses);
+  const etiquetaPeriodo = modo === 'anual' ? `Curso ${S.cursoFinanzas}` : tituloMes(S.mesFinanzas);
+
+  document.getElementById('contenido').innerHTML = `
+  <div class="barra">
+    <div class="segmentos">
+      <button class="seg ${tipo === 'ingreso' ? 'activo' : ''}" data-tipo-fin="ingresos">Ingresos</button>
+      <button class="seg ${tipo === 'gasto' ? 'activo' : ''}" data-tipo-fin="gastos">Gastos</button>
+    </div>
+    <div class="segmentos">
+      <button class="seg ${modo === 'mes' ? 'activo' : ''}" data-modo-fin="mes">Mes</button>
+      <button class="seg ${modo === 'anual' ? 'activo' : ''}" data-modo-fin="anual">Año completo</button>
     </div>
     <span class="flex1"></span>
-    <button class="btn primario" id="fin-nuevo">+ Añadir movimiento</button>
+    ${barraNav}
   </div>
   <div class="portada-cards" style="margin-bottom:22px">
-    <div class="portada-card">
-      <div class="pc-num" style="color:var(--verde)">${formatoImporte(totalIngresos)}€</div>
+    <div class="portada-card estatica">
+      <div class="pc-num" style="color:var(--verde)">${formatoImporte(totalIngresosPeriodo)}€</div>
       <div class="pc-titulo">ingresos</div>
-      <div class="pc-detalle">${ingresos.length} movimiento${ingresos.length === 1 ? '' : 's'}</div>
+      <div class="pc-detalle">${etiquetaPeriodo}</div>
     </div>
-    <div class="portada-card">
-      <div class="pc-num" style="color:var(--rojo)">${formatoImporte(totalGastos)}€</div>
+    <div class="portada-card estatica">
+      <div class="pc-num" style="color:var(--rojo)">${formatoImporte(totalGastosPeriodo)}€</div>
       <div class="pc-titulo">gastos</div>
-      <div class="pc-detalle">${gastos.length} movimiento${gastos.length === 1 ? '' : 's'}</div>
+      <div class="pc-detalle">${etiquetaPeriodo}</div>
     </div>
-    <div class="portada-card">
-      <div class="pc-num">${formatoImporte(totalIngresos - totalGastos)}€</div>
+    <div class="portada-card estatica">
+      <div class="pc-num">${formatoImporte(totalIngresosPeriodo - totalGastosPeriodo)}€</div>
       <div class="pc-titulo">balance</div>
-      <div class="pc-detalle">${tituloMes(S.mesFinanzas)}</div>
+      <div class="pc-detalle">${etiquetaPeriodo}</div>
     </div>
   </div>
+  <p class="ayuda">Toca cualquier categoría para ver sus movimientos de ese mes y añadir uno nuevo.</p>
+  ${cuerpoTabla}`;
 
-  <h3 class="seccion">Ingresos</h3>
-  ${ingresos.length === 0 ? '<p class="ayuda">Sin ingresos este mes.</p>' : `
+  document.querySelectorAll('[data-tipo-fin]').forEach(b => b.onclick = () => { S.vistaFinanzas = b.dataset.tipoFin; renderFinanzas(); });
+  document.querySelectorAll('[data-modo-fin]').forEach(b => b.onclick = () => { S.modoFinanzas = b.dataset.modoFin; renderFinanzas(); });
+  document.querySelectorAll('.celda-fin[data-cat]').forEach(el => el.onclick = () =>
+    modalCategoriaMovimientos(tipo, el.dataset.cat, el.dataset.mes));
+
+  if (modo === 'anual') {
+    document.getElementById('fin-curso').onchange = (ev) => { S.cursoFinanzas = ev.target.value; renderFinanzas(); };
+    document.getElementById('fin-curso-ant').onclick = () => {
+      const inicio = Number(S.cursoFinanzas.split('-')[0]);
+      S.cursoFinanzas = `${inicio - 1}-${inicio}`;
+      renderFinanzas();
+    };
+    document.getElementById('fin-curso-sig').onclick = () => {
+      const inicio = Number(S.cursoFinanzas.split('-')[0]);
+      S.cursoFinanzas = `${inicio + 1}-${inicio + 2}`;
+      renderFinanzas();
+    };
+  } else {
+    document.getElementById('fin-mes').onchange = (ev) => { S.mesFinanzas = ev.target.value; renderFinanzas(); };
+    document.getElementById('fin-mes-ant').onclick = () => {
+      const [a, m] = S.mesFinanzas.split('-').map(Number);
+      const d = new Date(a, m - 2, 1);
+      S.mesFinanzas = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      renderFinanzas();
+    };
+    document.getElementById('fin-mes-sig').onclick = () => {
+      const [a, m] = S.mesFinanzas.split('-').map(Number);
+      const d = new Date(a, m, 1);
+      S.mesFinanzas = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      renderFinanzas();
+    };
+  }
+}
+
+// Movimientos de una categoría en un mes concreto: verlos, borrarlos, y añadir uno nuevo.
+function modalCategoriaMovimientos(tipo, categoria, claveMes) {
+  const lista = S.finanzas
+    .filter(m => m.tipo === tipo && m.categoria === categoria && claveMesFecha(m.fecha) === claveMes)
+    .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+  const total = lista.reduce((s, m) => s + Number(m.importe), 0);
+
+  abrirModal(`
+  <h2>${e(categoria)} — ${tituloMes(claveMes)}</h2>
+  <p class="ayuda">Total del mes: <strong>${formatoImporte(total)}€</strong></p>
+  ${lista.length === 0 ? '<p class="ayuda">Sin movimientos todavía.</p>' : `
   <div class="tabla-wrap"><table>
-    <thead><tr><th>Fecha</th><th>Categoría</th><th>Importe</th><th>Descripción</th><th></th></tr></thead>
-    <tbody>${ingresos.map(filaTabla).join('')}</tbody>
+    <thead><tr><th>Fecha</th><th>Importe</th><th>Descripción</th><th></th></tr></thead>
+    <tbody>
+    ${lista.map(m => `<tr>
+      <td>${e(fmtFecha(m.fecha))}</td>
+      <td><strong>${formatoImporte(m.importe)}€</strong></td>
+      <td><small>${e(m.descripcion || '')}</small></td>
+      <td class="acciones">${m.origen === 'automatico'
+        ? '<small class="ayuda" title="Viene de un recibo pagado; para quitarlo, deshaz el pago en Recibos">ligado a un recibo</small>'
+        : `<button class="btn chico liso peligro" data-borrar-fin="${m.id}">✕</button>`}</td>
+    </tr>`).join('')}
+    </tbody>
   </table></div>`}
+  <h3 class="seccion">Añadir a ${e(categoria)}</h3>
+  <div class="grid2">
+    <label>Fecha<input id="fc-fecha" type="date" value="${e(fechaPorDefectoParaMes(claveMes))}"></label>
+    <label>Importe (€)<input id="fc-importe" type="number" min="0" step="0.01"></label>
+    <label>Descripción<input id="fc-descripcion"></label>
+  </div>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cerrar</button>
+    <button class="btn primario" id="fc-guardar">Añadir</button>
+  </div>
+  <p id="m-msg" class="error"></p>`);
 
-  <h3 class="seccion">Gastos</h3>
-  ${gastos.length === 0 ? '<p class="ayuda">Sin gastos este mes.</p>' : `
-  <div class="tabla-wrap"><table>
-    <thead><tr><th>Fecha</th><th>Categoría</th><th>Importe</th><th>Descripción</th><th></th></tr></thead>
-    <tbody>${gastos.map(filaTabla).join('')}</tbody>
-  </table></div>`}`;
-
-  const $sel = document.getElementById('fin-mes');
-  if ($sel) $sel.onchange = (ev) => { S.mesFinanzas = ev.target.value; renderFinanzas(); };
-  document.getElementById('fin-mes-ant').onclick = () => {
-    const [a, m] = S.mesFinanzas.split('-').map(Number);
-    const d = new Date(a, m - 2, 1);
-    S.mesFinanzas = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    renderFinanzas();
-  };
-  document.getElementById('fin-mes-sig').onclick = () => {
-    const [a, m] = S.mesFinanzas.split('-').map(Number);
-    const d = new Date(a, m, 1);
-    S.mesFinanzas = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    renderFinanzas();
-  };
-  document.getElementById('fin-nuevo').onclick = () => modalNuevoMovimiento();
+  document.getElementById('m-cancelar').onclick = () => { cerrarModal(); renderFinanzas(); };
   document.querySelectorAll('[data-borrar-fin]').forEach(b => b.onclick = async () => {
     if (!confirm('¿Eliminar este movimiento?')) return;
     await S.sb.from('finanzas_movimientos').delete().eq('id', b.dataset.borrarFin);
     await cargarFinanzas();
-    renderFinanzas();
+    modalCategoriaMovimientos(tipo, categoria, claveMes);
   });
-}
-
-function modalNuevoMovimiento() {
-  abrirModal(`
-  <h2>Añadir movimiento</h2>
-  <div class="grid2">
-    <label>Tipo<select id="fm-tipo">
-      <option value="ingreso">Ingreso</option>
-      <option value="gasto">Gasto</option>
-    </select></label>
-    <label>Fecha<input id="fm-fecha" type="date" value="${e(new Date().toISOString().slice(0, 10))}"></label>
-    <label>Categoría<select id="fm-categoria"></select></label>
-    <label>Categoría nueva <small>(si no está en la lista)</small><input id="fm-categoria-nueva" placeholder="Escribe una categoría nueva…"></label>
-    <label>Importe (€)<input id="fm-importe" type="number" min="0" step="0.01"></label>
-    <label>Descripción<input id="fm-descripcion"></label>
-  </div>
-  <div class="pie-modal">
-    <button class="btn liso" id="m-cancelar">Cancelar</button>
-    <button class="btn primario" id="fm-guardar">Guardar</button>
-  </div>
-  <p id="m-msg" class="error"></p>`);
-
-  const $tipo = document.getElementById('fm-tipo');
-  const $cat = document.getElementById('fm-categoria');
-  const pintarCategorias = () => {
-    const lista = $tipo.value === 'gasto' ? CATEGORIAS_GASTO : CATEGORIAS_INGRESO;
-    $cat.innerHTML = lista.map(c => `<option value="${e(c)}">${e(c)}</option>`).join('');
-  };
-  $tipo.onchange = pintarCategorias;
-  pintarCategorias();
-
-  document.getElementById('m-cancelar').onclick = cerrarModal;
-  document.getElementById('fm-guardar').onclick = async () => {
-    const categoria = document.getElementById('fm-categoria-nueva').value.trim() || $cat.value;
-    const importe = Number(document.getElementById('fm-importe').value);
-    const fecha = document.getElementById('fm-fecha').value;
+  document.getElementById('fc-guardar').onclick = async () => {
+    const importe = Number(document.getElementById('fc-importe').value);
+    const fecha = document.getElementById('fc-fecha').value;
     if (!importe || importe <= 0) return avisar('El importe tiene que ser mayor que 0.', true);
     if (!fecha) return avisar('Elige una fecha.', true);
     const { error } = await S.sb.from('finanzas_movimientos').insert({
-      tipo: $tipo.value,
-      categoria,
-      importe,
-      fecha,
-      descripcion: document.getElementById('fm-descripcion').value.trim() || null,
+      tipo, categoria, importe, fecha,
+      descripcion: document.getElementById('fc-descripcion').value.trim() || null,
       origen: 'manual',
       creado_por: S.profesor.id
     });
     if (error) return avisar('Error: ' + error.message, true);
-    cerrarModal();
     await cargarFinanzas();
-    renderFinanzas();
-    avisar('Movimiento guardado.');
+    avisar('Movimiento añadido.');
+    modalCategoriaMovimientos(tipo, categoria, claveMes);
   };
 }
 

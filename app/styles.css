@@ -257,6 +257,18 @@ td small { color: var(--gris); }
 .seg.activo { background: var(--granate); color: #fff; font-weight: 600; }
 .mes-nav { display: inline-flex; align-items: center; gap: 8px; }
 
+/* ---- ingresos y gastos: tablas de categoría ---- */
+.portada-card.estatica { cursor: default; }
+.portada-card.estatica:hover { transform: none; box-shadow: none; border-color: var(--borde); }
+.tabla-finanzas td, .tabla-finanzas th { text-align: center; }
+.tabla-finanzas td:first-child, .tabla-finanzas th:first-child { text-align: left; }
+tr.celda-fin { cursor: pointer; }
+tr.celda-fin:hover { background: var(--fondo); }
+td.celda-fin { cursor: pointer; }
+td.celda-fin:hover { background: var(--fondo); }
+td.celda-fin.vacia { color: var(--gris); }
+.tabla-finanzas .fila-total td { font-weight: 700; border-top: 2px solid var(--borde); background: #fafafa; }
+
 /* ---- selector de color de la clase ---- */
 .colores { display: flex; gap: 8px; flex-wrap: wrap; }
 .color-swatch {
