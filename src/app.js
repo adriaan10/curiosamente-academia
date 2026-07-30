@@ -257,6 +257,7 @@ function renderMain() {
       <button data-v="notas" class="tab ${S.vista === 'notas' ? 'activa' : ''}">Notas</button>
       ${esAdmin ? `<button data-v="profesores" class="tab ${S.vista === 'profesores' ? 'activa' : ''}">Profesores</button>` : ''}
       ${esAdmin ? `<button data-v="finanzas" class="tab ${S.vista === 'finanzas' ? 'activa' : ''}">Ingresos y gastos</button>` : ''}
+      ${esAdmin ? `<button data-v="reestructuracion" class="tab ${S.vista === 'reestructuracion' ? 'activa' : ''}">Reestructuración</button>` : ''}
       <button data-v="ajustes" class="tab ${S.vista === 'ajustes' ? 'activa' : ''}">Ajustes</button>
     </nav>
     <div class="usuario">
@@ -281,6 +282,7 @@ function renderMain() {
   else if (S.vista === 'notas') renderNotas();
   else if (S.vista === 'profesores') renderProfesores();
   else if (S.vista === 'finanzas') renderFinanzas();
+  else if (S.vista === 'reestructuracion') renderReestructuracion();
   else renderAjustes();
 }
 
@@ -589,7 +591,7 @@ function modalAlumno(alumno) {
 
   abrirModal(`
   <h2>${alumno ? 'Ficha de ' + e(a.nombre) : 'Nuevo alumno'}</h2>
-  ${alumno && a.estado === 'baja' ? '<p class="ayuda">⚠ Este alumno está <strong>de baja</strong>.</p>' : ''}
+  ${alumno && a.estado === 'baja' ? '<p class="ayuda">⚠ Este alumno está <strong>de baja</strong>. Puedes corregir sus datos (nivel, precio, horas…) y reactivarlo a la vez con el botón de abajo.</p>' : ''}
   <div class="grid2">
     <label>Nombre y apellidos *<input id="a-nombre" value="${e(a.nombre || '')}"></label>
     <label>Apellidos <small>(para detectar hermanos automáticamente)</small>
@@ -630,7 +632,7 @@ function modalAlumno(alumno) {
   <label>Notas / observaciones<textarea id="a-notas" rows="3">${e(a.notas || '')}</textarea></label>
   <div class="pie-modal">
     ${alumno ? (a.estado === 'baja'
-      ? '<button class="btn" id="a-reactivar">Reactivar alumno</button>'
+      ? '<button class="btn" id="a-reactivar">Reactivar y guardar cambios</button>'
       : '<button class="btn liso peligro" id="a-baja">Dar de baja (de todo)</button>') : ''}
     <span class="flex1"></span>
     <button class="btn liso" id="m-cancelar">Cancelar</button>
@@ -694,14 +696,7 @@ function modalAlumno(alumno) {
       avisar(`${a.nombre} dado de baja. Su ficha sigue en el filtro "Bajas".`);
     };
     const btnRe = document.getElementById('a-reactivar');
-    if (btnRe) btnRe.onclick = async () => {
-      const { error } = await S.sb.from('alumnos').update({ estado: 'activo' }).eq('id', a.id);
-      if (error) return msg('Error: ' + error.message);
-      cerrarModal();
-      await cargarAlumnos();
-      renderAlumnos();
-      avisar(`${a.nombre} reactivado.`);
-    };
+    if (btnRe) btnRe.onclick = () => guardarFicha('activo');
     document.querySelectorAll('[data-pdf-hist]').forEach(b => b.onclick = async () => {
       const r = S.recibos.find(x => x.id === b.dataset.pdfHist);
       const abierto = await window.api.openPdf(r.pdf_path);
@@ -712,8 +707,10 @@ function modalAlumno(alumno) {
     });
   }
 
-  document.getElementById('m-cancelar').onclick = cerrarModal;
-  document.getElementById('m-guardar').onclick = async () => {
+  // Guarda la ficha (alta o edición) y, si se pasa estadoNuevo, reactiva en el
+  // mismo paso: así al volver a septiembre se puede corregir nivel/precio/horas
+  // y dar de alta a la vez, sin tener que reactivar primero y editar después.
+  const guardarFicha = async (estadoNuevo) => {
     const v = (id) => document.getElementById(id)?.value.trim();
     const fila = {
       nombre: v('a-nombre'),
@@ -726,6 +723,7 @@ function modalAlumno(alumno) {
       notas: v('a-notas') || null,
       descuento_extra: esAdmin ? (Number(v('a-descuento')) || 0) : undefined
     };
+    if (estadoNuevo) fila.estado = estadoNuevo;
     if (!esAdmin) delete fila.descuento_extra; // el profesor no lo toca, no se envía
     if (!fila.nombre) return msg('El nombre es obligatorio.');
     if (ms.some(m => !m.asignatura_id)) return msg('Elige la asignatura en cada fila.');
@@ -761,8 +759,11 @@ function modalAlumno(alumno) {
     cerrarModal();
     await cargarAlumnos();
     renderAlumnos();
-    avisar(alumno ? 'Ficha actualizada.' : 'Alumno dado de alta.');
+    avisar(estadoNuevo ? `${fila.nombre} reactivado.` : (alumno ? 'Ficha actualizada.' : 'Alumno dado de alta.'));
   };
+
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('m-guardar').onclick = () => guardarFicha();
 }
 
 function errorAlumno(error) {
@@ -3073,6 +3074,54 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes) {
     await cargarFinanzas();
     avisar('Movimiento añadido.');
     modalCategoriaMovimientos(tipo, categoria, claveMes);
+  };
+}
+
+// ---------------------------------------------------------------- reestructuración de fin de curso (solo admin)
+
+const PALABRA_REESTRUCTURAR = 'REESTRUCTURAR';
+
+function renderReestructuracion() {
+  if (!S.profesor?.es_admin) return renderAjustes();
+  const nAlumnos = S.alumnos.filter(a => a.estado === 'activo').length;
+  const nClases = S.clases.length;
+
+  document.getElementById('contenido').innerHTML = `
+  <div class="tarjeta">
+    <h2>Reestructuración de fin de curso</h2>
+    <p class="ayuda">Úsalo solo cuando termine el curso (normalmente después de julio). Esta acción:</p>
+    <ul class="detalle-alumnos" style="columns:1">
+      <li>Da de baja a <strong>los ${nAlumnos} alumnos activos</strong> de toda la academia (de todos los profesores).
+      Cada profesor pasará a ver 0 alumnos hasta que se les vaya reactivando.</li>
+      <li>Borra <strong>las ${nClases} clases</strong> existentes (con sus horarios, inscripciones y excepciones).
+      Cada profesor tendrá que crear sus clases nuevas para el curso que empieza.</li>
+    </ul>
+    <p class="ayuda">Los recibos, ingresos/gastos y fichas de alumnos (nombre, precio, notas…) <strong>no se borran</strong>:
+    cuando confirmes que un alumno sigue, lo buscas en el filtro "Bajas" de Alumnos, corriges lo que haga falta
+    (nivel, precio, horas…) y lo reactivas — todo en un paso, desde su ficha.</p>
+    <p class="ayuda">⚠ Esto no se puede deshacer. Escribe <strong>${PALABRA_REESTRUCTURAR}</strong> para poder confirmar.</p>
+    <label>Palabra de confirmación<input id="re-confirmar" placeholder="${PALABRA_REESTRUCTURAR}"></label>
+    <p><button class="btn liso peligro" id="re-ejecutar" disabled style="margin-top:10px">Dar de baja a todos y borrar todas las clases</button></p>
+    <p id="re-msg" class="error"></p>
+  </div>`;
+
+  const $input = document.getElementById('re-confirmar');
+  const $btn = document.getElementById('re-ejecutar');
+  $input.oninput = () => { $btn.disabled = $input.value.trim() !== PALABRA_REESTRUCTURAR; };
+  $btn.onclick = async () => {
+    if (!confirm(`Última confirmación: se dará de baja a ${nAlumnos} alumnos y se borrarán ${nClases} clases de TODA la academia. ¿Seguro?`)) return;
+    $btn.disabled = true;
+    $btn.textContent = 'Reestructurando…';
+    const { data, error } = await S.sb.rpc('reestructurar_academia');
+    if (error) {
+      document.getElementById('re-msg').textContent = 'Error: ' + error.message;
+      $btn.disabled = false;
+      $btn.textContent = 'Dar de baja a todos y borrar todas las clases';
+      return;
+    }
+    await Promise.all([cargarAlumnos(), cargarClases()]);
+    renderReestructuracion();
+    avisar(`Reestructuración hecha: ${data.alumnos_dados_de_baja} alumnos dados de baja, ${data.clases_borradas} clases borradas.`);
   };
 }
 

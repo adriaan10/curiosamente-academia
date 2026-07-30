@@ -605,3 +605,95 @@ create trigger recibos_sync_finanzas
 
 -- La función de WhatsApp (supabase/functions/enviar-whatsapp) pasó a exigir
 -- es_admin=true además de sesión activa: solo la administradora envía.
+
+-- ============================================================
+-- Receso de verano (julio/agosto) y reestructuración de fin de curso
+-- ============================================================
+
+-- No se generan recibos automáticos en julio ni agosto: la facturación normal
+-- termina en junio; julio es intensivo con pocos alumnos (recibo manual) y
+-- agosto es descanso. Guarda de seguridad dentro de la función además de
+-- reprogramar el cron, por si algún día se llama a mano fuera de esos meses.
+create or replace function public.generar_recibos_mensuales()
+returns integer
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+  v_periodo text := to_char(now(), 'YYYY-MM');
+  v_mes text := (array['Enero','Febrero','Marzo','Abril','Mayo','Junio',
+    'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'])[extract(month from now())::int];
+  v_admin uuid;
+  v_creados integer := 0;
+  fila record;
+  v_desc record;
+begin
+  if extract(month from now())::int in (7, 8) then
+    return 0;
+  end if;
+
+  select id into v_admin from public.profesores
+  where es_admin and estado = 'activo' order by created_at limit 1;
+  if v_admin is null then
+    raise exception 'No hay administrador activo';
+  end if;
+
+  for fila in
+    select a.id as alumno_id
+    from public.alumnos a
+    where a.estado = 'activo'
+      and exists (select 1 from public.matriculas m where m.alumno_id = a.id and m.tipo_tarifa = 'mes' and m.tarifa is not null)
+  loop
+    select * into v_desc from public.calcular_descuentos_alumno(fila.alumno_id);
+    if v_desc.total is null or v_desc.total <= 0 then continue; end if;
+
+    begin
+      insert into public.recibos (alumno_id, profesor_id, fecha_emision, concepto,
+        importe, importe_letras, estado, periodos)
+      values (fila.alumno_id, v_admin, current_date, v_mes,
+        v_desc.total, '', 'pendiente', array[v_periodo]);
+      v_creados := v_creados + 1;
+    exception when others then
+      -- ya tenía recibo de este mes (u otro problema puntual): se salta
+      null;
+    end;
+  end loop;
+  return v_creados;
+end;
+$$;
+
+select cron.alter_job(
+  (select jobid from cron.job where jobname = 'recibos-mensuales'),
+  schedule := '0 6 3 1-6,9-12 *'
+);
+
+-- Reestructuración de fin de curso: solo la administradora puede ejecutarlo.
+-- Da de baja a todos los alumnos activos de la academia (los profesores
+-- pasan a ver 0 alumnos) y borra todas las clases (con sus horarios,
+-- inscripciones y excepciones, en cascada) para que cada profesor monte su
+-- horario nuevo desde cero en septiembre.
+create or replace function public.reestructurar_academia()
+returns json
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+  v_alumnos integer;
+  v_clases integer;
+begin
+  if not public.is_admin() then
+    raise exception 'Solo la administradora puede reestructurar la academia';
+  end if;
+
+  select count(*) into v_alumnos from public.alumnos where estado = 'activo';
+  select count(*) into v_clases from public.clases;
+
+  update public.alumnos set estado = 'baja' where estado = 'activo';
+  delete from public.clases;
+
+  return json_build_object('alumnos_dados_de_baja', v_alumnos, 'clases_borradas', v_clases);
+end;
+$$;
+
+grant execute on function public.reestructurar_academia() to authenticated;
+revoke execute on function public.reestructurar_academia() from public, anon;
