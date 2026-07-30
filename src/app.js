@@ -2841,6 +2841,20 @@ function fechaPorDefectoParaMes(claveMes) {
   return claveMes === claveMesFecha(hoy.toISOString()) ? hoy.toISOString().slice(0, 10) : `${claveMes}-01`;
 }
 
+// Todas las claves 'YYYY-MM' entre dos meses, ambos incluidos (para que no falten
+// meses "vacíos" en medio y el mes actual siempre sea el límite de avance).
+function mesesEntre(desde, hasta) {
+  const claves = [];
+  let [a, m] = desde.split('-').map(Number);
+  const [aFin, mFin] = hasta.split('-').map(Number);
+  while (a < aFin || (a === aFin && m <= mFin)) {
+    claves.push(`${a}-${String(m).padStart(2, '0')}`);
+    m++;
+    if (m > 12) { m = 1; a++; }
+  }
+  return claves;
+}
+
 function renderFinanzas() {
   if (!S.profesor?.es_admin) return renderAjustes();
   const tipo = S.vistaFinanzas === 'gastos' ? 'gasto' : 'ingreso';
@@ -2851,10 +2865,16 @@ function renderFinanzas() {
 
   if (modo === 'anual') {
     const cursoAct = cursoActual();
-    const cursosConDatos = [...new Set(S.finanzas.map(m => cursoDeClaveMes(claveMesFecha(m.fecha))))];
-    const cursosDisponibles = [...new Set([cursoAct, ...cursosConDatos])].sort().reverse();
+    const cursosConDatos = S.finanzas.map(m => cursoDeClaveMes(claveMesFecha(m.fecha)));
+    const inicioActual = Number(cursoAct.split('-')[0]);
+    const primerInicio = cursosConDatos.length ? Math.min(...cursosConDatos.map(c => Number(c.split('-')[0]))) : inicioActual;
+    // Rango sin huecos desde el primer curso con datos hasta el curso en el que estamos ahora.
+    const cursosDisponibles = [];
+    for (let i = inicioActual; i >= primerInicio; i--) cursosDisponibles.push(`${i}-${i + 1}`);
     if (!S.cursoFinanzas || !cursosDisponibles.includes(S.cursoFinanzas)) S.cursoFinanzas = cursoAct;
     const meses = mesesDelCurso(S.cursoFinanzas);
+    const esElMasReciente = S.cursoFinanzas === cursosDisponibles[0];
+    const esElMasAntiguo = S.cursoFinanzas === cursosDisponibles[cursosDisponibles.length - 1];
     periodoMeses = meses;
 
     const totalPorMes = meses.map(mc => categorias.reduce((s, c) => s + totalCategoriaMes(tipo, c, mc), 0));
@@ -2862,11 +2882,11 @@ function renderFinanzas() {
 
     barraNav = `
     <div class="mes-nav">
-      <button class="btn chico liso" id="fin-curso-ant">‹</button>
+      <button class="btn chico liso" id="fin-curso-ant" ${esElMasAntiguo ? 'disabled' : ''}>‹</button>
       <select id="fin-curso">
         ${cursosDisponibles.map(c => `<option value="${c}" ${c === S.cursoFinanzas ? 'selected' : ''}>Curso ${c}</option>`).join('')}
       </select>
-      <button class="btn chico liso" id="fin-curso-sig">›</button>
+      <button class="btn chico liso" id="fin-curso-sig" ${esElMasReciente ? 'disabled' : ''}>›</button>
     </div>`;
 
     cuerpoTabla = `
@@ -2887,20 +2907,25 @@ function renderFinanzas() {
     </table></div>`;
   } else {
     const mesActual = claveMesFecha(new Date().toISOString());
-    const mesesConDatos = [...new Set(S.finanzas.map(m => claveMesFecha(m.fecha)))];
-    const meses = [...new Set([mesActual, ...mesesConDatos])].sort().reverse();
+    const mesesConDatos = S.finanzas.map(m => claveMesFecha(m.fecha));
+    const primerMes = mesesConDatos.length ? mesesConDatos.sort()[0] : mesActual;
+    // Rango sin huecos desde el primer movimiento hasta hoy: el mes actual es
+    // siempre el límite de avance (no existen movimientos de meses futuros).
+    const meses = mesesEntre(primerMes, mesActual).reverse();
     if (!S.mesFinanzas || !meses.includes(S.mesFinanzas)) S.mesFinanzas = mesActual;
     periodoMeses = [S.mesFinanzas];
 
     const totalGeneral = categorias.reduce((s, c) => s + totalCategoriaMes(tipo, c, S.mesFinanzas), 0);
+    const esElMasReciente = S.mesFinanzas === meses[0];
+    const esElMasAntiguo = S.mesFinanzas === meses[meses.length - 1];
 
     barraNav = `
     <div class="mes-nav">
-      <button class="btn chico liso" id="fin-mes-ant">‹</button>
+      <button class="btn chico liso" id="fin-mes-ant" ${esElMasAntiguo ? 'disabled' : ''}>‹</button>
       <select id="fin-mes">
         ${meses.map(m => `<option value="${m}" ${m === S.mesFinanzas ? 'selected' : ''}>${tituloMes(m)}</option>`).join('')}
       </select>
-      <button class="btn chico liso" id="fin-mes-sig">›</button>
+      <button class="btn chico liso" id="fin-mes-sig" ${esElMasReciente ? 'disabled' : ''}>›</button>
     </div>`;
 
     cuerpoTabla = `
