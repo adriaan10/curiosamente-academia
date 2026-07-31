@@ -834,25 +834,43 @@ function modalModificaciones() {
         ${(esAdmin ? (a.matriculas || []) : misMatriculas(a)).map(m => `
         <div class="fila-horario">
           <span class="md-asig">${e(m.asignaturas?.nombre || '')}</span>
-          <span class="ayuda">ahora: ${m.horas_semana ?? '—'} h/sem</span>
+          <span class="ayuda">ahora: ${m.horas_semana ?? '—'} h/sem${esAdmin ? ` · ${formatoImporte(m.tarifa)}€/${m.tipo_tarifa === 'clase' ? 'clase' : 'mes'}` : ''}</span>
           <input type="number" min="0" step="0.5" placeholder="horas nuevas" data-nueva-hora="${m.id}" class="ancho-horas">
+          ${esAdmin ? `<input type="number" min="0" step="0.01" placeholder="precio nuevo" data-nuevo-precio="${m.id}" class="ancho-tarifa">` : ''}
           <button class="btn chico" data-guardar-hora="${m.id}" data-alumno="${a.id}" data-antes="${m.horas_semana ?? ''}">Guardar</button>
         </div>`).join('')}
       </div>`).join('');
 
     document.querySelectorAll('[data-guardar-hora]').forEach(b => b.onclick = async () => {
       const input = document.querySelector(`[data-nueva-hora="${b.dataset.guardarHora}"]`);
-      const nueva = Number(input.value);
-      if (input.value === '' || nueva < 0) return avisar('Introduce las horas nuevas.', true);
-      const antes = b.dataset.antes ? Number(b.dataset.antes) : null;
-      const { error: e1 } = await S.sb.from('matriculas').update({ horas_semana: nueva }).eq('id', b.dataset.guardarHora);
+      const inputPrecio = esAdmin ? document.querySelector(`[data-nuevo-precio="${b.dataset.guardarHora}"]`) : null;
+      const cambiaHoras = input.value !== '';
+      const cambiaPrecio = inputPrecio && inputPrecio.value !== '';
+      if (!cambiaHoras && !cambiaPrecio) return avisar('Introduce las horas o el precio nuevos.', true);
+
+      const datos = {};
+      let nueva = null, antes = null;
+      if (cambiaHoras) {
+        nueva = Number(input.value);
+        if (nueva < 0) return avisar('Las horas no pueden ser negativas.', true);
+        antes = b.dataset.antes ? Number(b.dataset.antes) : null;
+        datos.horas_semana = nueva;
+      }
+      if (cambiaPrecio) {
+        const nuevoPrecio = Number(inputPrecio.value);
+        if (nuevoPrecio <= 0) return avisar('Si cambias el precio, tiene que ser mayor que 0.', true);
+        datos.tarifa = nuevoPrecio;
+      }
+      const { error: e1 } = await S.sb.from('matriculas').update(datos).eq('id', b.dataset.guardarHora);
       if (e1) return avisar('Error: ' + e1.message, true);
-      await S.sb.from('cambios_horario').insert({
-        matricula_id: b.dataset.guardarHora, alumno_id: b.dataset.alumno,
-        profesor_id: S.profesor.id, horas_antes: antes, horas_despues: nueva
-      });
+      if (cambiaHoras) {
+        await S.sb.from('cambios_horario').insert({
+          matricula_id: b.dataset.guardarHora, alumno_id: b.dataset.alumno,
+          profesor_id: S.profesor.id, horas_antes: antes, horas_despues: nueva
+        });
+      }
       await Promise.all([cargarAlumnos(), cargarCambiosHorario()]);
-      avisar('Horas actualizadas.');
+      avisar('Actualizado.');
       pintarResultados();
     });
   };
@@ -863,10 +881,13 @@ function modalModificaciones() {
 function modalModificacionesSinVer(lista) {
   abrirModal(`
   <h2>Modificaciones de horas sin revisar</h2>
-  <ul class="detalle-alumnos">
+  <ul class="detalle-alumnos" style="columns:1">
     ${lista.map(c => `<li>
       <strong>${e(c.alumnos?.nombre || '')}</strong> — ${c.horas_antes ?? '—'} → ${c.horas_despues} h/sem
       <br><small>${e(c.profesores?.nombre || '')} · ${fmtFecha(String(c.fecha).slice(0, 10))}</small>
+      <br>
+      <button class="btn chico" data-editar-cambio="${c.id}" data-alumno-cambio="${c.alumno_id}">Editar ficha</button>
+      <button class="btn chico liso" data-visto-cambio="${c.id}">✓ Visto</button>
     </li>`).join('')}
   </ul>
   <div class="pie-modal">
@@ -881,6 +902,19 @@ function modalModificacionesSinVer(lista) {
     if (S.vista === 'inicio') renderInicio();
     avisar('Modificaciones marcadas como vistas.');
   };
+  document.querySelectorAll('[data-visto-cambio]').forEach(b => b.onclick = async () => {
+    await S.sb.from('cambios_horario').update({ visto: true }).eq('id', b.dataset.vistoCambio);
+    await cargarCambiosHorario();
+    cerrarModal();
+    if (S.vista === 'inicio') renderInicio();
+    avisar('Marcado como visto.');
+  });
+  document.querySelectorAll('[data-editar-cambio]').forEach(b => b.onclick = async () => {
+    await S.sb.from('cambios_horario').update({ visto: true }).eq('id', b.dataset.editarCambio);
+    await cargarCambiosHorario();
+    cerrarModal();
+    modalAlumno(S.alumnos.find(a => a.id === b.dataset.alumnoCambio));
+  });
 }
 
 // Alumnos que un profesor (no la admin) ha reactivado: ella puede entrar a
