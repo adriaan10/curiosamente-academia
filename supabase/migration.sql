@@ -698,3 +698,26 @@ $$;
 
 grant execute on function public.reestructurar_academia() to authenticated;
 revoke execute on function public.reestructurar_academia() from public, anon;
+
+-- ============================================================
+-- Aviso al admin cuando un profesor reactiva un alumno
+-- ============================================================
+create table public.reactivaciones_alumno (
+  id uuid primary key default gen_random_uuid(),
+  alumno_id uuid not null references public.alumnos (id) on delete cascade,
+  profesor_id uuid not null references public.profesores (id),
+  fecha timestamptz not null default now(),
+  visto boolean not null default false
+);
+
+create index reactivaciones_alumno_alumno_idx on public.reactivaciones_alumno (alumno_id);
+create index reactivaciones_alumno_visto_idx on public.reactivaciones_alumno (visto) where not visto;
+
+alter table public.reactivaciones_alumno enable row level security;
+
+create policy "reactivaciones_alumno_select" on public.reactivaciones_alumno
+  for select to authenticated using (true);
+create policy "reactivaciones_alumno_insert" on public.reactivaciones_alumno
+  for insert to authenticated with check (profesor_id = auth.uid() or public.is_admin());
+create policy "reactivaciones_alumno_update" on public.reactivaciones_alumno
+  for update to authenticated using (public.is_admin()) with check (public.is_admin());

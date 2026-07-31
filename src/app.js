@@ -23,6 +23,7 @@ const S = {
   notas: [],
   profesorHorario: [],
   cambiosHorario: [],
+  reactivaciones: [],
   finanzas: [],
   vista: 'inicio',
   vistaRecibos: 'pendientes',
@@ -76,7 +77,7 @@ async function cargarTodo() {
   S.profAsig = profAsig.data || [];
   await Promise.all([
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
-    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarFinanzas()
+    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarFinanzas()
   ]);
   backupAutomatico();
   window.api.getRecibosDir(); // crea la carpeta de recibos de este equipo si no existía aún
@@ -88,6 +89,14 @@ async function cargarCambiosHorario() {
     .order('fecha', { ascending: false });
   if (error) return avisar('Error cargando modificaciones: ' + error.message, true);
   S.cambiosHorario = data || [];
+}
+
+async function cargarReactivaciones() {
+  const { data, error } = await S.sb.from('reactivaciones_alumno')
+    .select('*, alumnos(nombre), profesores(nombre)')
+    .order('fecha', { ascending: false });
+  if (error) return avisar('Error cargando reactivaciones: ' + error.message, true);
+  S.reactivaciones = data || [];
 }
 
 // Solo el administrador ve/gestiona finanzas (RLS ya lo restringe también).
@@ -317,6 +326,7 @@ function renderInicio() {
     : [];
   const modificacionesSinVer = esAdmin ? S.cambiosHorario.filter(c => !c.visto) : [];
   const altasFueraDeFecha = esAdmin ? recibosPendientesFueraDeFecha() : [];
+  const reactivacionesSinVer = esAdmin ? S.reactivaciones.filter(r => !r.visto) : [];
 
   document.getElementById('contenido').innerHTML = `
   <div class="portada">
@@ -351,7 +361,7 @@ function renderInicio() {
         <div class="pc-detalle">Tus pósits</div>
       </div>
     </div>
-    ${esAdmin && (fichasIncompletas.length || modificacionesSinVer.length || altasFueraDeFecha.length) ? `
+    ${esAdmin && (fichasIncompletas.length || modificacionesSinVer.length || altasFueraDeFecha.length || reactivacionesSinVer.length) ? `
     <h3 class="seccion" style="margin-top:28px">Pendiente de revisar</h3>
     <div class="portada-cards">
       ${fichasIncompletas.length ? `
@@ -372,6 +382,12 @@ function renderInicio() {
         <div class="pc-titulo">recibo${altasFueraDeFecha.length === 1 ? '' : 's'} para generar a mano</div>
         <div class="pc-detalle">Alta posterior al día 3, fuera del envío automático</div>
       </div>` : ''}
+      ${reactivacionesSinVer.length ? `
+      <div class="portada-card alerta" id="pc-reactivaciones">
+        <div class="pc-num">${reactivacionesSinVer.length}</div>
+        <div class="pc-titulo">alumno${reactivacionesSinVer.length === 1 ? '' : 's'} reactivado${reactivacionesSinVer.length === 1 ? '' : 's'}</div>
+        <div class="pc-detalle">Un profesor ha reactivado a un alumno</div>
+      </div>` : ''}
     </div>` : ''}
   </div>`;
 
@@ -385,6 +401,8 @@ function renderInicio() {
   if (pcMod) pcMod.onclick = () => modalModificacionesSinVer(modificacionesSinVer);
   const pcFuera = document.getElementById('pc-fuera-fecha');
   if (pcFuera) pcFuera.onclick = () => modalRecibosFueraDeFecha(altasFueraDeFecha);
+  const pcReact = document.getElementById('pc-reactivaciones');
+  if (pcReact) pcReact.onclick = () => modalReactivacionesSinVer(reactivacionesSinVer);
 }
 
 // Alumnos dados de alta este mes DESPUÉS del día 3 (fuera de la generación
@@ -756,8 +774,12 @@ function modalAlumno(alumno) {
         : await S.sb.from('matriculas').insert(datos);
       if (error) return msg(errorMatricula(error));
     }
+    // Si reactiva un profesor (no la admin), se avisa a la admin para que lo revise.
+    if (estadoNuevo === 'activo' && !esAdmin) {
+      await S.sb.from('reactivaciones_alumno').insert({ alumno_id: alumnoId, profesor_id: S.profesor.id });
+    }
     cerrarModal();
-    await cargarAlumnos();
+    await Promise.all([cargarAlumnos(), cargarReactivaciones()]);
     renderAlumnos();
     avisar(estadoNuevo ? `${fila.nombre} reactivado.` : (alumno ? 'Ficha actualizada.' : 'Alumno dado de alta.'));
   };
@@ -859,6 +881,47 @@ function modalModificacionesSinVer(lista) {
     if (S.vista === 'inicio') renderInicio();
     avisar('Modificaciones marcadas como vistas.');
   };
+}
+
+// Alumnos que un profesor (no la admin) ha reactivado: ella puede entrar a
+// corregir la ficha (nivel, precio, horas…) o simplemente marcarlo como visto.
+function modalReactivacionesSinVer(lista) {
+  abrirModal(`
+  <h2>Alumnos reactivados por profesores</h2>
+  <ul class="detalle-alumnos" style="columns:1">
+    ${lista.map(r => `<li>
+      <strong>${e(r.alumnos?.nombre || '')}</strong>
+      <br><small>Reactivado por ${e(r.profesores?.nombre || '')} · ${fmtFecha(String(r.fecha).slice(0, 10))}</small>
+      <br>
+      <button class="btn chico" data-editar-reactivacion="${r.id}" data-alumno-reactivacion="${r.alumno_id}">Editar ficha</button>
+      <button class="btn chico liso" data-visto-reactivacion="${r.id}">✓ Visto</button>
+    </li>`).join('')}
+  </ul>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cerrar sin marcar</button>
+    <button class="btn primario" id="rv-marcar-vistas">Marcar todas como vistas</button>
+  </div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('rv-marcar-vistas').onclick = async () => {
+    await S.sb.from('reactivaciones_alumno').update({ visto: true }).in('id', lista.map(r => r.id));
+    await cargarReactivaciones();
+    cerrarModal();
+    if (S.vista === 'inicio') renderInicio();
+    avisar('Reactivaciones marcadas como vistas.');
+  };
+  document.querySelectorAll('[data-visto-reactivacion]').forEach(b => b.onclick = async () => {
+    await S.sb.from('reactivaciones_alumno').update({ visto: true }).eq('id', b.dataset.vistoReactivacion);
+    await cargarReactivaciones();
+    cerrarModal();
+    if (S.vista === 'inicio') renderInicio();
+    avisar('Marcado como visto.');
+  });
+  document.querySelectorAll('[data-editar-reactivacion]').forEach(b => b.onclick = async () => {
+    await S.sb.from('reactivaciones_alumno').update({ visto: true }).eq('id', b.dataset.editarReactivacion);
+    await cargarReactivaciones();
+    cerrarModal();
+    modalAlumno(S.alumnos.find(a => a.id === b.dataset.alumnoReactivacion));
+  });
 }
 
 async function exportarAlumnosCsv() {
