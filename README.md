@@ -66,18 +66,58 @@ actualiza en el siguiente cierre normal — nadie tiene que hacer nada.
 
 ### Publicar una versión nueva
 
-1. Sube la versión en `package.json` (`"version": "1.0.1"`, por ejemplo).
-2. Ejecuta:
+1. Sube la versión en `package.json` (`"version": "1.3.7"`, por ejemplo) y haz commit.
+2. Compila el instalador de Windows:
    ```bash
-   npm run release
+   npm run dist
    ```
-   Esto compila, genera el instalador y sube un borrador de "release" a GitHub.
-3. Publica el borrador (quitarle "Draft"), desde la web de GitHub o con:
+3. Los archivos quedan en `dist/` con espacios en el nombre, pero `latest.yml`
+   (lo que lee la auto-actualización) los espera con guiones, así que hay que
+   renombrarlos antes de subirlos:
    ```bash
-   gh release edit vX.Y.Z --repo adriaan10/curiosamente-academia --draft=false
+   cd dist && cp "Curiosamente Setup 1.3.7.exe" "Curiosamente-Setup-1.3.7.exe" && cp "Curiosamente Setup 1.3.7.exe.blockmap" "Curiosamente-Setup-1.3.7.exe.blockmap"
    ```
-4. En cuanto está publicado, todos los ordenadores de la academia lo detectan solos
-   la próxima vez que abran la app.
+4. Crea la versión con los tres archivos:
+   ```bash
+   gh release create v1.3.7 "Curiosamente-Setup-1.3.7.exe" "Curiosamente-Setup-1.3.7.exe.blockmap" "latest.yml" --repo adriaan10/curiosamente-academia --title "Curiosamente 1.3.7" --notes "Qué cambia en esta versión"
+   ```
+   (`npm run release` haría los pasos 2-4 de una vez, pero al subir el `.exe`
+   de 80 MB se corta a media subida y deja la versión incompleta.)
+5. Al publicarla, el `.dmg` de Mac se compila solo en GitHub y aparece en esa
+   misma versión unos minutos después (ver más abajo). Los ordenadores con
+   Windows se actualizan solos la próxima vez que abran la app.
+
+### La versión de Mac
+
+Un `.dmg` solo se puede compilar en un Mac, así que lo hace un ordenador
+prestado de GitHub (gratis en repositorios públicos) con el flujo
+`.github/workflows/compilar-mac.yml`. Se dispara solo al publicar una versión;
+también se puede lanzar a mano para probar sin tocar ninguna versión:
+
+```bash
+gh workflow run compilar-mac.yml --repo adriaan10/curiosamente-academia
+```
+
+Se compila para **Apple Silicon** (Mac de 2020 en adelante) y **sin firmar**,
+porque firmar exige una cuenta de Apple Developer de 99 $/año. Consecuencias:
+
+- Al instalarlo la primera vez macOS avisa de que no puede comprobar el
+  desarrollador: hay que abrirlo con **clic derecho → Abrir** y confirmar.
+- **La auto-actualización no funciona en Mac.** Cada versión nueva hay que
+  descargarla e instalarla a mano desde la página de versiones.
+
+Si algún día se contrata la cuenta de Apple, **no hay que tocar código**: basta
+con añadir estos secretos en *Settings → Secrets and variables → Actions* del
+repositorio, y el flujo detecta que existen y pasa a firmar y notarizar solo,
+con lo que la auto-actualización empieza a funcionar también en Mac:
+
+| Secreto | Qué es |
+|---|---|
+| `MAC_CERT_P12` | El certificado *Developer ID Application* exportado a .p12 y codificado en base64 |
+| `MAC_CERT_PASSWORD` | La contraseña que se le puso al exportar el .p12 |
+| `APPLE_ID` | El correo de la cuenta de Apple Developer |
+| `APPLE_APP_SPECIFIC_PASSWORD` | Contraseña específica de app, generada en appleid.apple.com |
+| `APPLE_TEAM_ID` | El identificador de equipo (10 caracteres) de la cuenta |
 
 ## Envío automático por WhatsApp (pendiente de activar)
 
