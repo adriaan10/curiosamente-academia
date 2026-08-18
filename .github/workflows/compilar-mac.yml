@@ -93,8 +93,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          # latest-mac.yml es lo que necesitará la auto-actualización cuando la
-          # app esté firmada; si aún no se genera, se sube solo el .dmg.
+          # El .blockmap y latest-mac.yml son lo que necesitará la
+          # auto-actualización cuando la app esté firmada (el .blockmap permite
+          # descargar solo lo que cambia). Se suben si existen.
           ARCHIVOS=(dist/*.dmg)
-          [ -f dist/latest-mac.yml ] && ARCHIVOS+=(dist/latest-mac.yml)
+          for extra in dist/*.dmg.blockmap dist/latest-mac.yml; do
+            [ -f "$extra" ] && ARCHIVOS+=("$extra")
+          done
+          echo "Subiendo a $TAG: ${ARCHIVOS[*]}"
           gh release upload "$TAG" "${ARCHIVOS[@]}" --clobber --repo "$GITHUB_REPOSITORY"
