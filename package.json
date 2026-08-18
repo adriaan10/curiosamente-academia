@@ -8,6 +8,7 @@
     "start": "npm run build && electron .",
     "test": "node test/test-pdf.mjs",
     "dist": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
     "release": "npm run build && electron-builder --win --publish always"
   },
   "author": "Academia Curiosamente",
@@ -28,6 +29,18 @@
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64"]
+        }
+      ],
+      "icon": "assets/icon.png",
+      "category": "public.app-category.education",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "hardenedRuntime": true
     },
     "files": [
       "main.js",

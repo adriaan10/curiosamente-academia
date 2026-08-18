@@ -1,0 +1,100 @@
+name: Compilar versión de Mac
+
+# El instalador de Windows se genera desde el PC de la academia, pero el de Mac
+# solo se puede compilar en un Mac, así que lo hace GitHub en uno prestado
+# (gratis en repositorios públicos como este).
+#
+# Se dispara solo al publicar una versión nueva: al cabo de unos minutos, el
+# .dmg aparece junto al .exe en esa misma versión de la página de descargas.
+# También se puede lanzar a mano para probar, sin tocar ninguna versión.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Versión donde subir el .dmg (ej. v1.3.6). Vacío = solo compilar para probar, sin subirlo a ninguna versión.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  compilar:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Mientras no se pague la cuenta de Apple (99 $/año) no hay certificado y
+      # la app se compila sin firmar: se instala igual, pero macOS avisa la
+      # primera vez y hay que abrirla con clic derecho -> Abrir.
+      #
+      # El día que se contrate, basta con añadir los secretos del repositorio
+      # (MAC_CERT_P12, MAC_CERT_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD
+      # y APPLE_TEAM_ID) en Settings -> Secrets: este paso los detecta solo y
+      # pasa a firmar y notarizar, sin tocar ni una línea de código.
+      - name: Ver si hay credenciales de firma de Apple
+        id: firma
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+        run: |
+          if [ -n "$MAC_CERT_P12" ]; then
+            echo "Certificado encontrado: se firmará y notarizará."
+            echo "activa=si" >> "$GITHUB_OUTPUT"
+          else
+            echo "Sin certificado: se compilará sin firmar (normal por ahora)."
+            echo "activa=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compilar el .dmg (sin firmar)
+        if: steps.firma.outputs.activa == 'no'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          npm run build
+          npx electron-builder --mac --publish never -c.mac.identity=null
+
+      - name: Compilar el .dmg (firmado y notarizado por Apple)
+        if: steps.firma.outputs.activa == 'si'
+        env:
+          CSC_LINK: ${{ secrets.MAC_CERT_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          npm run build
+          npx electron-builder --mac --publish never -c.mac.notarize=true
+
+      - name: Ver qué se ha generado
+        run: ls -lh dist/*.dmg dist/latest-mac.yml 2>/dev/null || ls -lh dist
+
+      # Copia descargable desde la propia página de la ejecución, para poder
+      # probar el .dmg en un Mac sin necesidad de publicar una versión.
+      - name: Guardar el .dmg como copia de prueba
+        uses: actions/upload-artifact@v4
+        with:
+          name: curiosamente-mac
+          path: dist/*.dmg
+          if-no-files-found: error
+
+      - name: Subir el .dmg a la versión publicada
+        if: github.event_name == 'release' || inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          # latest-mac.yml es lo que necesitará la auto-actualización cuando la
+          # app esté firmada; si aún no se genera, se sube solo el .dmg.
+          ARCHIVOS=(dist/*.dmg)
+          [ -f dist/latest-mac.yml ] && ARCHIVOS+=(dist/latest-mac.yml)
+          gh release upload "$TAG" "${ARCHIVOS[@]}" --clobber --repo "$GITHUB_REPOSITORY"

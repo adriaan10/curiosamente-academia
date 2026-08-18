@@ -9,6 +9,12 @@ let win;
 // se descarga sola y se instala en el próximo cierre normal de la app.
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
+// La descarga sigue en segundo plano después de comprobar, y si falla ahí
+// (sin conexión, o en Mac sin firmar, donde la auto-actualización no está
+// permitida) el aviso llega por este evento y no por la promesa de abajo.
+// Sin este oyente, ese error tumbaría la app: se ignora a propósito, la
+// actualización se reintenta sola la próxima vez que se abra.
+autoUpdater.on('error', () => { /* actualizar nunca debe romper el uso normal */ });
 function comprobarActualizaciones() {
   autoUpdater.checkForUpdates().catch(() => { /* sin conexión: se reintenta la próxima vez */ });
 }
