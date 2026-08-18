@@ -25,11 +25,11 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci
@@ -81,7 +81,7 @@ jobs:
       # Copia descargable desde la propia página de la ejecución, para poder
       # probar el .dmg en un Mac sin necesidad de publicar una versión.
       - name: Guardar el .dmg como copia de prueba
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: curiosamente-mac
           path: dist/*.dmg
