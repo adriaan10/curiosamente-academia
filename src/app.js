@@ -2021,10 +2021,17 @@ async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
     if (error) return { ok: false, error: 'el servidor rechazó el envío' };
     if (!data?.ok) return { ok: false, error: data?.error || 'error desconocido' };
 
-    if (!esPago) {
-      await S.sb.from('recibos')
-        .update({ fecha_envio_whatsapp: new Date().toISOString() })
-        .eq('id', recibo.id);
+    // Con un envío real (no simulado) guardamos el id del mensaje: es lo que
+    // luego usa el webhook para saber a qué recibo corresponde cada aviso de
+    // "entregado"/"leído"/"fallido" que llegue de Meta.
+    const actualizacion = {};
+    if (!esPago) actualizacion.fecha_envio_whatsapp = new Date().toISOString();
+    if (!data.simulado && data.mensajeId) {
+      actualizacion.whatsapp_message_id = data.mensajeId;
+      actualizacion.estado_whatsapp = 'enviado';
+    }
+    if (Object.keys(actualizacion).length) {
+      await S.sb.from('recibos').update(actualizacion).eq('id', recibo.id);
     }
     return { ok: true, simulado: Boolean(data.simulado) };
   } catch (err) {
@@ -2205,7 +2212,11 @@ function filasRecibos(lista, esAdmin, pagados) {
       <td><strong>${formatoImporte(r.importe)}€</strong></td>
       ${esAdmin ? `<td>${e(r.profesores?.nombre || '')}</td>` : ''}
       <td><span class="chip ${r.estado}">${r.estado}</span>
-        <span class="chip ${r.fecha_envio_whatsapp ? 'envio-si' : 'envio-no'}">${r.fecha_envio_whatsapp ? 'enviado' : 'por enviar'}</span></td>
+        <span class="chip ${r.fecha_envio_whatsapp ? 'envio-si' : 'envio-no'}">${r.fecha_envio_whatsapp ? 'enviado' : 'por enviar'}</span>
+        ${r.estado_whatsapp === 'fallido' ? '<span class="chip wa-fallido" title="WhatsApp no pudo entregarlo: revisa el teléfono">Fallido</span>'
+          : r.estado_whatsapp === 'leido' ? '<span class="chip wa-leido">Leído</span>'
+          : r.estado_whatsapp === 'entregado' ? '<span class="chip wa-por-leer">Por leer</span>'
+          : ''}</td>
       <td class="acciones">
         ${pagados
           ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>` : '')

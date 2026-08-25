@@ -721,3 +721,18 @@ create policy "reactivaciones_alumno_insert" on public.reactivaciones_alumno
   for insert to authenticated with check (profesor_id = auth.uid() or public.is_admin());
 create policy "reactivaciones_alumno_update" on public.reactivaciones_alumno
   for update to authenticated using (public.is_admin()) with check (public.is_admin());
+
+-- ============================================================
+-- Estado de entrega de WhatsApp (entregado / leído / fallido)
+-- ============================================================
+alter table public.recibos
+  add column whatsapp_message_id text,
+  add column estado_whatsapp text check (estado_whatsapp in ('enviado', 'entregado', 'leido', 'fallido'));
+
+create unique index recibos_whatsapp_message_id_idx on public.recibos (whatsapp_message_id) where whatsapp_message_id is not null;
+
+-- Función whatsapp-webhook (supabase/functions/whatsapp-webhook/index.ts):
+-- recibe los avisos de estado de Meta (verify_jwt=false, autenticación propia
+-- por firma HMAC con WHATSAPP_APP_SECRET) y actualiza estado_whatsapp según
+-- el whatsapp_message_id guardado al enviar. Requiere los secretos
+-- WHATSAPP_APP_SECRET y WHATSAPP_VERIFY_TOKEN en Supabase.

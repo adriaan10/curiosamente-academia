@@ -10,6 +10,7 @@
   --fondo: #FAF6F1;
   --rojo: #c0392b;
   --verde: #1e8e4e;
+  --azul: #1a6dc4;
 }
 
 * { box-sizing: border-box; margin: 0; }
@@ -151,6 +152,9 @@ td small { color: var(--gris); }
 .chip.emitido, .chip.enviado { background: var(--naranja-suave); color: var(--naranja); }
 .chip.envio-no { background: var(--naranja-suave); color: var(--naranja); }
 .chip.envio-si { background: #e6f4ec; color: var(--verde); }
+.chip.wa-por-leer { background: var(--naranja-suave); color: var(--naranja); }
+.chip.wa-leido { background: #e8f1fb; color: var(--azul); }
+.chip.wa-fallido { background: #fdecea; color: var(--rojo); }
 
 .btn.pagar { border-color: var(--verde); color: var(--verde); font-weight: 600; }
 .btn.pagar:hover { background: var(--verde); color: #fff; }
