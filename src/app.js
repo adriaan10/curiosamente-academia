@@ -27,7 +27,9 @@ const S = {
   finanzas: [],
   vista: 'inicio',
   vistaRecibos: 'pendientes',
-  mesPagados: '',
+  mesRecibos: '',
+  recibosSeleccionados: new Set(),
+  vistaRosterRecibos: false,
   filtros: { texto: '', asignatura: '', estado: 'activo', profesor: '', textoRecibo: '' },
   logoBase64: null
 };
@@ -2279,14 +2281,16 @@ function tituloMes(clave) {
   return `${MESES[(mes || 1) - 1]} ${anio || ''}`;
 }
 
-function filasRecibos(lista, esAdmin, pagados) {
+function filasRecibos(lista, esAdmin, pagados, seleccionables) {
   return `<table>
     <thead><tr>
+      ${seleccionables ? '<th></th>' : ''}
       <th>Alumno</th><th>Concepto</th><th>Total</th>
       ${esAdmin ? '<th>Profesor</th>' : ''}<th>Estado</th><th></th>
     </tr></thead>
     <tbody>
     ${lista.map(r => `<tr>
+      ${seleccionables ? `<td><input type="checkbox" data-check="${r.id}" ${S.recibosSeleccionados.has(r.id) ? 'checked' : ''}></td>` : ''}
       <td><strong>${e(r.alumnos?.nombre || '')}</strong><br>
         <small>R-${String(r.referencia).padStart(5, '0')} · ${e((r.fecha_emision || '').split('-').reverse().join('/'))}</small></td>
       <td>${e(r.concepto)}</td>
@@ -2312,45 +2316,80 @@ function filasRecibos(lista, esAdmin, pagados) {
   </table>`;
 }
 
+// Barra ‹ mes › compartida por las pestañas de Recibos y la vista por alumno
+// (mismo patrón que ya usa Finanzas). Devuelve el HTML y dice qué meses hay.
+function mesesConRecibos() {
+  const mesActual = claveMes(new Date().toISOString());
+  const mesesConDatos = S.recibos.map(r => claveMes(r.fecha_emision)).sort();
+  const primerMes = mesesConDatos.length ? mesesConDatos[0] : mesActual;
+  const ultimoMes = mesesConDatos.length && mesesConDatos[mesesConDatos.length - 1] > mesActual
+    ? mesesConDatos[mesesConDatos.length - 1] : mesActual;
+  return mesesEntre(primerMes, ultimoMes).reverse();
+}
+
+function barraMesRecibos() {
+  const meses = mesesConRecibos();
+  const mesActual = claveMes(new Date().toISOString());
+  if (!S.mesRecibos || !meses.includes(S.mesRecibos)) S.mesRecibos = meses.includes(mesActual) ? mesActual : (meses[0] || mesActual);
+  const esElMasReciente = S.mesRecibos === meses[0];
+  const esElMasAntiguo = S.mesRecibos === meses[meses.length - 1];
+  return `
+  <div class="mes-nav">
+    <button class="btn chico liso" id="rc-mes-ant" ${esElMasAntiguo ? 'disabled' : ''}>‹</button>
+    <select id="rc-mes">
+      ${meses.map(m => `<option value="${m}" ${m === S.mesRecibos ? 'selected' : ''}>${tituloMes(m)}</option>`).join('')}
+    </select>
+    <button class="btn chico liso" id="rc-mes-sig" ${esElMasReciente ? 'disabled' : ''}>›</button>
+  </div>`;
+}
+
+function cambiarMesRecibos(nuevo) {
+  if (nuevo === S.mesRecibos) return;
+  S.mesRecibos = nuevo;
+  S.recibosSeleccionados.clear();
+  if (S.vistaRosterRecibos) renderRecibosPorAlumno(); else renderRecibos();
+}
+
 function renderRecibos() {
+  if (S.vistaRosterRecibos) return renderRecibosPorAlumno();
+
   const esAdmin = S.profesor?.es_admin;
-  const sub = S.vistaRecibos || 'pendientes';
+  const sub = (S.vistaRecibos === 'enviar' && !esAdmin) ? 'pendientes' : (S.vistaRecibos || 'pendientes');
+  const barraMes = barraMesRecibos(); // fija S.mesRecibos por defecto antes de filtrar
   const lista = recibosFiltrados();
-  const pendientes = lista.filter(r => r.estado !== 'pagado');
-  const pagados = lista.filter(r => r.estado === 'pagado');
+  const delMes = lista.filter(r => claveMes(r.fecha_emision) === S.mesRecibos);
+  const pendientes = delMes.filter(r => r.estado !== 'pagado');
+  const pagados = delMes.filter(r => r.estado === 'pagado');
+  const porEnviar = pendientes.filter(r => !r.fecha_envio_whatsapp);
 
   let cuerpo = '';
-  let selectorMesPagados = '';
-
-  if (sub === 'pendientes') {
-    // Agrupados por mes de emisión (el más reciente primero): si alguien lleva
-    // varios meses sin pagar, se ve cada mes con sus recibos pendientes.
-    const meses = [...new Set(pendientes.map(r => claveMes(r.fecha_emision)))].sort().reverse();
-    cuerpo = pendientes.length === 0
-      ? `<div class="vacio">No hay recibos pendientes. 🎉<br><small>Genera recibos desde la pestaña Alumnos.</small></div>`
-      : meses.map(m => {
-        const delMes = pendientes.filter(r => claveMes(r.fecha_emision) === m);
-        const total = delMes.reduce((s, r) => s + Number(r.importe), 0);
-        return `<h3 class="mes-seccion">${tituloMes(m)}
-          <small>${delMes.length} pendiente${delMes.length === 1 ? '' : 's'} · ${formatoImporte(total)}€</small>
-          ${esAdmin ? `<button class="btn chico" data-enviar-mes="${m}">📤 Enviar todos por WhatsApp</button>` : ''}
-          <button class="btn chico" data-descargar-mes="${m}">⬇ Descargar todos los PDF</button></h3>
-        ${filasRecibos(delMes, esAdmin, false)}`;
-      }).join('');
-  } else {
-    const meses = [...new Set(pagados.map(r => claveMes(r.fecha_emision)))].sort().reverse();
-    if (!S.mesPagados || !meses.includes(S.mesPagados)) S.mesPagados = meses[0] || '';
-    const delMes = pagados.filter(r => claveMes(r.fecha_emision) === S.mesPagados);
-    const total = delMes.reduce((s, r) => s + Number(r.importe), 0);
-    selectorMesPagados = meses.length ? `<select id="fr-mes">
-      ${meses.map(m => `<option value="${m}" ${m === S.mesPagados ? 'selected' : ''}>${tituloMes(m)}</option>`).join('')}
-    </select>` : '';
+  if (sub === 'enviar') {
+    const total = porEnviar.reduce((s, r) => s + Number(r.importe), 0);
+    const nSeleccionados = porEnviar.filter(r => S.recibosSeleccionados.has(r.id)).length;
+    const todosMarcados = porEnviar.length > 0 && nSeleccionados === porEnviar.length;
+    cuerpo = porEnviar.length === 0
+      ? `<div class="vacio">No hay recibos por enviar este mes. 🎉</div>`
+      : `<h3 class="mes-seccion">${tituloMes(S.mesRecibos)}
+          <small>${porEnviar.length} por enviar · ${formatoImporte(total)}€</small>
+          <button class="btn chico" id="rc-marcar-todos">${todosMarcados ? 'Quitar selección' : 'Seleccionar todos'}</button>
+          <button class="btn primario chico" id="rc-enviar-seleccionados" ${nSeleccionados ? '' : 'disabled'}>📤 Enviar seleccionados (${nSeleccionados})</button></h3>
+        ${filasRecibos(porEnviar, esAdmin, false, true)}`;
+  } else if (sub === 'pagados') {
+    const total = pagados.reduce((s, r) => s + Number(r.importe), 0);
     cuerpo = pagados.length === 0
-      ? `<div class="vacio">Todavía no hay recibos pagados.</div>`
-      : `<h3 class="mes-seccion">${tituloMes(S.mesPagados)}
-          <small>${delMes.length} pagado${delMes.length === 1 ? '' : 's'} · ${formatoImporte(total)}€</small>
-          <button class="btn chico" data-descargar-mes="${S.mesPagados}">⬇ Descargar todos los PDF</button></h3>
-        ${filasRecibos(delMes, esAdmin, true)}`;
+      ? `<div class="vacio">Todavía no hay recibos pagados este mes.</div>`
+      : `<h3 class="mes-seccion">${tituloMes(S.mesRecibos)}
+          <small>${pagados.length} pagado${pagados.length === 1 ? '' : 's'} · ${formatoImporte(total)}€</small>
+          <button class="btn chico" id="rc-descargar-mes">⬇ Descargar todos los PDF</button></h3>
+        ${filasRecibos(pagados, esAdmin, true)}`;
+  } else {
+    const total = pendientes.reduce((s, r) => s + Number(r.importe), 0);
+    cuerpo = pendientes.length === 0
+      ? `<div class="vacio">No hay recibos pendientes este mes. 🎉<br><small>Genera recibos desde la pestaña Alumnos.</small></div>`
+      : `<h3 class="mes-seccion">${tituloMes(S.mesRecibos)}
+          <small>${pendientes.length} pendiente${pendientes.length === 1 ? '' : 's'} · ${formatoImporte(total)}€</small>
+          <button class="btn chico" id="rc-descargar-mes">⬇ Descargar todos los PDF</button></h3>
+        ${filasRecibos(pendientes, esAdmin, false)}`;
   }
 
   document.getElementById('contenido').innerHTML = `
@@ -2358,28 +2397,58 @@ function renderRecibos() {
     <div class="segmentos">
       <button class="seg ${sub === 'pendientes' ? 'activo' : ''}" data-sub="pendientes">Pendientes${pendientes.length ? ` (${pendientes.length})` : ''}</button>
       <button class="seg ${sub === 'pagados' ? 'activo' : ''}" data-sub="pagados">Pagados</button>
+      ${esAdmin ? `<button class="seg ${sub === 'enviar' ? 'activo' : ''}" data-sub="enviar">Enviar recibos${porEnviar.length ? ` (${porEnviar.length})` : ''}</button>` : ''}
     </div>
-    ${selectorMesPagados}
+    ${barraMes}
     <input id="fr-texto" type="search" placeholder="Buscar por alumno o concepto…" value="${e(S.filtros.textoRecibo)}">
     ${esAdmin ? `<select id="fr-prof">
       <option value="">Todos los profesores</option>
       ${profesoresActivos().map(p => `<option value="${p.id}" ${p.id === S.filtros.profesor ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
     </select>` : ''}
     <span class="flex1"></span>
+    ${esAdmin ? '<button class="btn liso" id="rc-por-alumno">Ver por alumno</button>' : ''}
     <button class="btn" id="fr-csv">Exportar CSV</button>
   </div>
   ${cuerpo}`;
 
   document.querySelectorAll('[data-sub]').forEach(b => b.onclick = () => {
     S.vistaRecibos = b.dataset.sub;
+    S.recibosSeleccionados.clear();
     renderRecibos();
   });
-  const fm = document.getElementById('fr-mes');
-  if (fm) fm.onchange = (ev) => { S.mesPagados = ev.target.value; renderRecibos(); };
+  const rcMesAnt = document.getElementById('rc-mes-ant');
+  const rcMesSig = document.getElementById('rc-mes-sig');
+  const rcMes = document.getElementById('rc-mes');
+  if (rcMesAnt) rcMesAnt.onclick = () => { const m = mesesConRecibos(); cambiarMesRecibos(m[m.indexOf(S.mesRecibos) + 1]); };
+  if (rcMesSig) rcMesSig.onclick = () => { const m = mesesConRecibos(); cambiarMesRecibos(m[m.indexOf(S.mesRecibos) - 1]); };
+  if (rcMes) rcMes.onchange = (ev) => cambiarMesRecibos(ev.target.value);
   document.getElementById('fr-texto').oninput = (ev) => { S.filtros.textoRecibo = ev.target.value; conFocoPreservado(renderRecibos); };
   const fp = document.getElementById('fr-prof');
   if (fp) fp.onchange = (ev) => { S.filtros.profesor = ev.target.value; renderRecibos(); };
   document.getElementById('fr-csv').onclick = exportarRecibosCsv;
+  const rcPorAlumno = document.getElementById('rc-por-alumno');
+  if (rcPorAlumno) rcPorAlumno.onclick = () => { S.vistaRosterRecibos = true; renderRecibosPorAlumno(); };
+  document.querySelectorAll('[data-check]').forEach(cb => cb.onchange = () => {
+    if (cb.checked) S.recibosSeleccionados.add(cb.dataset.check); else S.recibosSeleccionados.delete(cb.dataset.check);
+    renderRecibos();
+  });
+  const rcDescargarMes = document.getElementById('rc-descargar-mes');
+  if (rcDescargarMes) rcDescargarMes.onclick = () => {
+    descargarPdfsMes(S.mesRecibos, sub === 'pagados' ? pagados : pendientes, rcDescargarMes);
+  };
+  const rcMarcarTodos = document.getElementById('rc-marcar-todos');
+  if (rcMarcarTodos) rcMarcarTodos.onclick = () => {
+    const todosMarcados = porEnviar.length > 0 && porEnviar.every(r => S.recibosSeleccionados.has(r.id));
+    porEnviar.forEach(r => todosMarcados ? S.recibosSeleccionados.delete(r.id) : S.recibosSeleccionados.add(r.id));
+    renderRecibos();
+  };
+  const rcEnviarSel = document.getElementById('rc-enviar-seleccionados');
+  if (rcEnviarSel) rcEnviarSel.onclick = () => {
+    const seleccion = porEnviar.filter(r => S.recibosSeleccionados.has(r.id));
+    if (!seleccion.length) return;
+    S.recibosSeleccionados.clear();
+    modalEnvioMasivo(seleccion);
+  };
 
   document.querySelectorAll('[data-pagar]').forEach(b => b.onclick = async () => {
     const r = S.recibos.find(x => x.id === b.dataset.pagar);
@@ -2414,18 +2483,6 @@ function renderRecibos() {
     renderRecibos();
     avisar('Recibo eliminado.');
   });
-  document.querySelectorAll('[data-descargar-mes]').forEach(b => b.onclick = () => {
-    const m = b.dataset.descargarMes;
-    const lista = recibosFiltrados().filter(r => claveMes(r.fecha_emision) === m
-      && (S.vistaRecibos === 'pagados' ? r.estado === 'pagado' : r.estado !== 'pagado'));
-    descargarPdfsMes(m, lista, b);
-  });
-  document.querySelectorAll('[data-enviar-mes]').forEach(b => b.onclick = () => {
-    const m = b.dataset.enviarMes;
-    const lista = recibosFiltrados().filter(r => claveMes(r.fecha_emision) === m && r.estado !== 'pagado');
-    if (!lista.length) return avisar('No hay recibos pendientes en ese mes.', true);
-    modalEnvioMasivo(lista);
-  });
   document.querySelectorAll('[data-editar-recibo]').forEach(b => b.onclick = () =>
     modalEditarRecibo(S.recibos.find(x => x.id === b.dataset.editarRecibo)));
   document.querySelectorAll('[data-wa]').forEach(b => b.onclick = () => {
@@ -2440,6 +2497,74 @@ function renderRecibos() {
       const ruta = await regenerarPdf(r);
       window.api.openPdf(ruta);
     }
+  });
+}
+
+// Vista "por alumno": para el mes seleccionado, quién ha pagado y quién no.
+// Con "Todos los profesores" el admin ve la academia entera; eligiendo uno
+// concreto se reduce a los alumnos matriculados en sus asignaturas — así
+// cubre tanto la vista global como la de "qué falta por asignatura" sin
+// necesitar dos funciones distintas.
+function renderRecibosPorAlumno() {
+  const esAdmin = S.profesor?.es_admin;
+  if (!esAdmin) { S.vistaRosterRecibos = false; return renderRecibos(); }
+
+  const barraMes = barraMesRecibos();
+  const t = (S.filtros.textoRecibo || '').toLowerCase();
+  const profId = S.filtros.profesor;
+  const alumnos = S.alumnos
+    .filter(a => a.estado === 'activo')
+    .filter(a => !profId || matriculasDeProfesor(a, profId).length > 0)
+    .filter(a => !t || (a.nombre || '').toLowerCase().includes(t))
+    .sort((a, b) => a.nombre.localeCompare(b.nombre));
+
+  const filas = alumnos.map(a => {
+    const recibo = S.recibos.find(r => r.alumno_id === a.id && claveMes(r.fecha_emision) === S.mesRecibos);
+    const chip = !recibo ? '<span class="chip baja">sin recibo</span>'
+      : recibo.estado === 'pagado' ? '<span class="chip pagado">pagado</span>'
+      : '<span class="chip pendiente">pendiente</span>';
+    const acciones = !recibo
+      ? `<button class="btn chico liso" data-generar-recibo="${a.id}">Generar recibo</button>`
+      : `<button class="btn chico liso" data-pdf-roster="${recibo.id}">PDF</button>`;
+    return `<tr>
+      <td><strong>${e(a.nombre)}</strong></td>
+      <td>${recibo ? formatoImporte(recibo.importe) + '€' : '—'}</td>
+      <td>${chip}</td>
+      <td class="acciones">${acciones}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('contenido').innerHTML = `
+  <div class="barra">
+    <button class="btn liso" id="rc-volver-lista">‹ Volver a la lista</button>
+    ${barraMes}
+    <input id="fr-texto" type="search" placeholder="Buscar alumno…" value="${e(S.filtros.textoRecibo)}">
+    <select id="fr-prof">
+      <option value="">Todos los profesores</option>
+      ${profesoresActivos().map(p => `<option value="${p.id}" ${p.id === profId ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
+    </select>
+    <span class="flex1"></span>
+  </div>
+  <h3 class="mes-seccion">${tituloMes(S.mesRecibos)} <small>${alumnos.length} alumno${alumnos.length === 1 ? '' : 's'}</small></h3>
+  ${alumnos.length === 0
+    ? `<div class="vacio">No hay alumnos que coincidan.</div>`
+    : `<table><thead><tr><th>Alumno</th><th>Importe</th><th>Estado</th><th></th></tr></thead><tbody>${filas}</tbody></table>`}`;
+
+  document.getElementById('rc-volver-lista').onclick = () => { S.vistaRosterRecibos = false; renderRecibos(); };
+  const rcMesAnt = document.getElementById('rc-mes-ant');
+  const rcMesSig = document.getElementById('rc-mes-sig');
+  const rcMes = document.getElementById('rc-mes');
+  if (rcMesAnt) rcMesAnt.onclick = () => { const m = mesesConRecibos(); cambiarMesRecibos(m[m.indexOf(S.mesRecibos) + 1]); };
+  if (rcMesSig) rcMesSig.onclick = () => { const m = mesesConRecibos(); cambiarMesRecibos(m[m.indexOf(S.mesRecibos) - 1]); };
+  if (rcMes) rcMes.onchange = (ev) => cambiarMesRecibos(ev.target.value);
+  document.getElementById('fr-texto').oninput = (ev) => { S.filtros.textoRecibo = ev.target.value; conFocoPreservado(renderRecibosPorAlumno); };
+  document.getElementById('fr-prof').onchange = (ev) => { S.filtros.profesor = ev.target.value; renderRecibosPorAlumno(); };
+  document.querySelectorAll('[data-generar-recibo]').forEach(b => b.onclick = () =>
+    modalRecibo(S.alumnos.find(a => a.id === b.dataset.generarRecibo)));
+  document.querySelectorAll('[data-pdf-roster]').forEach(b => b.onclick = async () => {
+    const r = S.recibos.find(x => x.id === b.dataset.pdfRoster);
+    const abierto = await window.api.openPdf(r.pdf_path);
+    if (!abierto) { const ruta = await regenerarPdf(r); window.api.openPdf(ruta); }
   });
 }
 
