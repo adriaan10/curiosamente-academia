@@ -446,7 +446,7 @@ function renderInicio() {
       ${modificacionesSinVer.length ? `
       <div class="portada-card alerta" id="pc-modificaciones">
         <div class="pc-num">${modificacionesSinVer.length}</div>
-        <div class="pc-titulo">modificación${modificacionesSinVer.length === 1 ? '' : 'es'} de horas</div>
+        <div class="pc-titulo">modificación${modificacionesSinVer.length === 1 ? '' : 'es'} horas alumnos</div>
         <div class="pc-detalle">Un profesor ha cambiado las horas de un alumno</div>
       </div>` : ''}
       ${altasFueraDeFecha.length ? `
@@ -619,7 +619,7 @@ function renderAlumnos() {
     </select>` : `<label class="check-inline"><input type="checkbox" id="f-todos" ${S.filtros.verTodos ? 'checked' : ''}> Toda la academia</label>`}
     <span class="flex1"></span>
     <button class="btn" id="btn-csv">Exportar CSV</button>
-    <button class="btn" id="btn-modificaciones">🔧 Modificaciones</button>
+    <button class="btn" id="btn-modificaciones">🔧 Modificación horas alumnos</button>
     <button class="btn" id="btn-bulk">Recibos del mes</button>
     <button class="btn primario" id="btn-nuevo">+ Nuevo alumno</button>
   </div>
@@ -684,11 +684,11 @@ function modalAlumno(alumno) {
   <h2>${alumno ? 'Ficha de ' + e(a.nombre) : 'Nuevo alumno'}</h2>
   ${alumno && a.estado === 'baja' ? '<p class="ayuda">⚠ Este alumno está <strong>de baja</strong>. Puedes corregir sus datos (nivel, precio, horas…) y reactivarlo a la vez con el botón de abajo.</p>' : ''}
   <div class="grid2">
-    <label>Nombre y apellidos *<input id="a-nombre" value="${e(a.nombre || '')}"></label>
+    <label>Nombre *<input id="a-nombre" value="${e(a.nombre || '')}"></label>
     <label>Apellidos <small>(para detectar hermanos automáticamente)</small>
       <input id="a-apellidos" value="${e(a.apellidos || '')}" placeholder="ej. García López"></label>
     <label>Teléfono / WhatsApp (si es menor, el del padre/madre)
-      <input id="a-tel" value="${e(a.telefono || a.tutor_telefono || '')}"></label>
+      <input id="a-tel" value="${e(a.telefono || a.tutor_telefono || '')}" inputmode="numeric" maxlength="9" placeholder="9 dígitos"></label>
     <label>Padre / madre / tutor (nombre y apellidos)
       <input id="a-tutor" value="${e(a.tutor_nombre || '')}" placeholder="El recibo irá a su nombre"></label>
     <label>Fecha de alta<input id="a-alta" type="date" value="${e(a.fecha_alta || new Date().toISOString().slice(0, 10))}"></label>
@@ -753,6 +753,9 @@ function modalAlumno(alumno) {
   };
   pintarMatriculas();
   document.getElementById('a-add-mat').onclick = () => { ms.push(nuevaMatricula()); pintarMatriculas(); };
+  document.getElementById('a-tel').oninput = (ev) => {
+    ev.target.value = ev.target.value.replace(/\D/g, '').slice(0, 9);
+  };
 
   // Resumen de descuentos ya aplicados (solo tiene sentido con datos guardados).
   if (alumno) {
@@ -803,9 +806,14 @@ function modalAlumno(alumno) {
   // y dar de alta a la vez, sin tener que reactivar primero y editar después.
   const guardarFicha = async (estadoNuevo) => {
     const v = (id) => document.getElementById(id)?.value.trim();
+    const nombreSolo = v('a-nombre');
+    const apellidos = v('a-apellidos') || null;
     const fila = {
-      nombre: v('a-nombre'),
-      apellidos: v('a-apellidos') || null,
+      // La ficha ahora pide nombre y apellidos por separado (antes había que
+      // escribir el apellido dos veces); el nombre completo que usan los
+      // recibos, la búsqueda, etc. se sigue guardando junto, como siempre.
+      nombre: [nombreSolo, apellidos].filter(Boolean).join(' '),
+      apellidos,
       telefono: v('a-tel') || null,
       tutor_nombre: v('a-tutor') || null,
       fecha_alta: v('a-alta') || null,
@@ -816,7 +824,7 @@ function modalAlumno(alumno) {
     };
     if (estadoNuevo) fila.estado = estadoNuevo;
     if (!esAdmin) delete fila.descuento_extra; // el profesor no lo toca, no se envía
-    if (!fila.nombre) return msg('El nombre es obligatorio.');
+    if (!nombreSolo) return msg('El nombre es obligatorio.');
     if (ms.some(m => !m.asignatura_id)) return msg('Elige la asignatura en cada fila.');
     if (esAdmin && ms.some(m => m.tarifa !== '' && m.tarifa != null && Number(m.tarifa) <= 0)) {
       return msg('Si pones un precio, tiene que ser mayor que 0.');
@@ -882,7 +890,7 @@ function errorMatricula(error) {
 function modalModificaciones() {
   const esAdmin = S.profesor?.es_admin;
   abrirModal(`
-  <h2>Modificaciones de horas</h2>
+  <h2>Modificación horas alumnos</h2>
   <p class="ayuda">Busca al alumno y cambia las horas semanales de la asignatura que quieras.
   El cambio queda registrado y avisa al administrador.</p>
   <label>Buscar alumno<input id="md-buscar" type="search" placeholder="Nombre del alumno…"></label>
@@ -953,7 +961,7 @@ function modalModificaciones() {
 // Vista para el administrador de los cambios de horas que no ha revisado aún.
 function modalModificacionesSinVer(lista) {
   abrirModal(`
-  <h2>Modificaciones de horas sin revisar</h2>
+  <h2>Modificación horas alumnos sin revisar</h2>
   <ul class="detalle-alumnos" style="columns:1">
     ${lista.map(c => `<li>
       <strong>${e(c.alumnos?.nombre || '')}</strong> — ${c.horas_antes ?? '—'} → ${c.horas_despues} h/sem
