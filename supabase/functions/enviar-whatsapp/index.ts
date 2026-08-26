@@ -18,13 +18,14 @@
 const API = 'https://graph.facebook.com/v21.0';
 
 type Peticion = {
-  tipo: 'recibo' | 'pago';
-  telefono: string;
-  nombre: string;
-  concepto: string;
-  importe: string;
+  tipo?: 'recibo' | 'pago';
+  telefono?: string;
+  nombre?: string;
+  concepto?: string;
+  importe?: string;
   pdfBase64?: string;
   nombreArchivo?: string;
+  comprobar?: boolean;
 };
 
 const cabeceras = {
@@ -115,7 +116,15 @@ Deno.serve(async (req) => {
     return respuesta({ ok: false, error: 'Petición mal formada' }, 400);
   }
 
-  const telefono = normalizarTelefono(p.telefono);
+  // Modo comprobación (botón "Comprobar de nuevo" en Ajustes): solo mira si
+  // hay credenciales configuradas, sin llamar a la API de WhatsApp ni enviar
+  // nada a ningún número, ni siquiera de prueba.
+  if (p.comprobar) {
+    const configurado = !!(Deno.env.get('WHATSAPP_TOKEN') && Deno.env.get('WHATSAPP_PHONE_ID'));
+    return respuesta({ ok: true, simulado: !configurado });
+  }
+
+  const telefono = normalizarTelefono(p.telefono || '');
   if (!telefono) {
     return respuesta({ ok: false, error: 'El teléfono no es válido para WhatsApp' }, 400);
   }

@@ -3414,7 +3414,7 @@ async function renderAjustes() {
     if (!el) return;
     el.textContent = 'Comprobando…';
     const { data, error } = await S.sb.functions.invoke('enviar-whatsapp', {
-      body: { tipo: 'recibo', telefono: '600000000', nombre: 'Prueba', concepto: 'Prueba', importe: '0' }
+      body: { comprobar: true }
     });
     if (error) el.innerHTML = '⚠ No se pudo comprobar el estado del envío.';
     else if (data?.simulado) {
