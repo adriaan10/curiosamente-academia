@@ -30,6 +30,7 @@
       "target": "nsis",
       "icon": "assets/icon.ico"
     },
+    "afterSign": "scripts/afterSignMac.cjs",
     "mac": {
       "target": [
         {
@@ -39,8 +40,7 @@
       ],
       "icon": "assets/icon.png",
       "category": "public.app-category.education",
-      "artifactName": "${productName}-${version}-${arch}.${ext}",
-      "afterSign": "scripts/afterSignMac.cjs"
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "files": [
       "main.js",
