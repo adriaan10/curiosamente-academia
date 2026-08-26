@@ -40,7 +40,7 @@
       "icon": "assets/icon.png",
       "category": "public.app-category.education",
       "artifactName": "${productName}-${version}-${arch}.${ext}",
-      "hardenedRuntime": true
+      "afterSign": "scripts/afterSignMac.cjs"
     },
     "files": [
       "main.js",
