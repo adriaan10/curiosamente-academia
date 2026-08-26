@@ -736,3 +736,28 @@ create unique index recibos_whatsapp_message_id_idx on public.recibos (whatsapp_
 -- por firma HMAC con WHATSAPP_APP_SECRET) y actualiza estado_whatsapp según
 -- el whatsapp_message_id guardado al enviar. Requiere los secretos
 -- WHATSAPP_APP_SECRET y WHATSAPP_VERIFY_TOKEN en Supabase.
+
+-- ============================================================
+-- Sincronización en tiempo real
+-- ============================================================
+-- Sin esto, un cambio hecho en un ordenador no se ve en otro hasta cerrar y
+-- volver a abrir la app. Se activa la réplica de Supabase Realtime en las
+-- tablas compartidas; el cliente se suscribe a todas ellas y, al llegar
+-- cualquier cambio, recarga y repinta solo (ver iniciarTiempoReal() en
+-- src/app.js). No hace falta activarlo tabla por tabla nunca más: cualquier
+-- tabla nueva que se quiera sincronizar solo hay que añadirla aquí y a la
+-- lista TABLAS_TIEMPO_REAL del código.
+alter publication supabase_realtime add table
+  public.alumnos,
+  public.matriculas,
+  public.clases,
+  public.clase_horarios,
+  public.clase_alumnos,
+  public.clase_excepciones,
+  public.recibos,
+  public.notas,
+  public.profesor_horario,
+  public.cambios_horario,
+  public.reactivaciones_alumno,
+  public.finanzas_movimientos,
+  public.profesores;

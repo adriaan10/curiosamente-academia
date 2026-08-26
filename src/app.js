@@ -42,6 +42,9 @@ async function init() {
   S.logoBase64 = await window.api.getLogo();
   if (!S.cfg.supabaseUrl || !S.cfg.supabaseKey) return renderSetup();
   S.sb = createClient(S.cfg.supabaseUrl, S.cfg.supabaseKey);
+  // Nuevo cliente (o venimos de reconfigurar la conexión en Ajustes): el canal
+  // en tiempo real anterior, si había, quedaba atado al cliente viejo.
+  canalTiempoReal = null;
   const { data } = await S.sb.auth.getSession();
   S.session = data.session;
   if (!S.session) return renderLogin();
@@ -81,6 +84,69 @@ async function cargarTodo() {
   ]);
   backupAutomatico();
   window.api.getRecibosDir(); // crea la carpeta de recibos de este equipo si no existía aún
+  iniciarTiempoReal();
+}
+
+// ---------------------------------------------------------------- tiempo real
+//
+// La app carga los datos una vez al iniciar sesión; sin esto, un cambio hecho
+// en otro ordenador no se vería hasta cerrar y volver a abrir. Aquí nos
+// suscribimos a los cambios de Supabase en las tablas compartidas y, cuando
+// llega uno, recargamos y repintamos solos.
+//
+// No se aplican parches fila a fila (sería mucho más código y más frágil,
+// sobre todo con las tablas que se cruzan entre sí como alumnos+matrículas o
+// clases+horarios+inscritos): al llegar cualquier cambio, se recarga todo de
+// golpe. Con los tamaños de datos de una academia esto es prácticamente
+// instantáneo, así que no compensa la complejidad de ir más fino.
+const TABLAS_TIEMPO_REAL = [
+  'alumnos', 'matriculas', 'clases', 'clase_horarios', 'clase_alumnos', 'clase_excepciones',
+  'recibos', 'notas', 'profesor_horario', 'cambios_horario', 'reactivaciones_alumno',
+  'finanzas_movimientos', 'profesores'
+];
+
+let canalTiempoReal = null;
+let timerRecargaTiempoReal = null;
+
+function iniciarTiempoReal() {
+  if (canalTiempoReal) return; // ya está en marcha, no crear otro canal duplicado
+  let canal = S.sb.channel('cambios-academia');
+  for (const tabla of TABLAS_TIEMPO_REAL) {
+    canal = canal.on('postgres_changes', { event: '*', schema: 'public', table: tabla }, programarRecargaTiempoReal);
+  }
+  canal.subscribe();
+  canalTiempoReal = canal;
+}
+
+function detenerTiempoReal() {
+  if (canalTiempoReal) S.sb.removeChannel(canalTiempoReal);
+  canalTiempoReal = null;
+  clearTimeout(timerRecargaTiempoReal);
+}
+
+// Varios cambios pueden llegar seguidos (ej. un envío de recibos en lote): se
+// agrupan en una sola recarga en vez de una por cada aviso.
+function programarRecargaTiempoReal() {
+  clearTimeout(timerRecargaTiempoReal);
+  timerRecargaTiempoReal = setTimeout(recargarTrasCambioRemoto, 400);
+}
+
+async function recargarTrasCambioRemoto() {
+  const [profs, asigs, profAsig] = await Promise.all([
+    S.sb.from('profesores').select('*').order('nombre'),
+    S.sb.from('asignaturas').select('*').order('id'),
+    S.sb.from('profesor_asignaturas').select('*'),
+    cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
+    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarFinanzas()
+  ]);
+  S.profesores = profs.data || [];
+  S.asignaturas = asigs.data || [];
+  S.profAsig = profAsig.data || [];
+  // No interrumpir con un repintado completo si hay una ficha/modal abierta:
+  // se vería la pantalla de golpe y se perdería lo que se estuviera editando.
+  const modal = document.getElementById('modal-raiz');
+  if (modal && modal.innerHTML.trim()) return;
+  renderVistaActual();
 }
 
 async function cargarCambiosHorario() {
@@ -279,10 +345,17 @@ function renderMain() {
   <div id="toast"></div>`;
   document.querySelectorAll('.tab').forEach(b => b.onclick = () => { S.vista = b.dataset.v; renderMain(); });
   document.getElementById('logout').onclick = async () => {
+    detenerTiempoReal();
     await S.sb.auth.signOut();
     S.session = null; S.profesor = null;
     renderLogin();
   };
+  renderVistaActual();
+}
+
+// Repinta solo la pestaña actual (sin reconstruir cabecera/menú), usada tanto
+// al cambiar de pestaña como al recibir un cambio en tiempo real de otro equipo.
+function renderVistaActual() {
   if (S.vista === 'inicio') renderInicio();
   else if (S.vista === 'alumnos') renderAlumnos();
   else if (S.vista === 'clases') renderClases();
