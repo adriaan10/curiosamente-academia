@@ -73,6 +73,17 @@ async function cargarTodo() {
     S.sb.from('asignaturas').select('*').order('id'),
     S.sb.from('profesor_asignaturas').select('*')
   ]);
+  // Si esta consulta falla justo al entrar (un hipo de red puntual), no se
+  // sigue con un perfil vacío — se vuelve al login y se puede reintentar,
+  // en vez de arrastrar una sesión a medio cargar por el resto de la app.
+  if (prof.error) {
+    renderLogin();
+    setTimeout(() => {
+      const m = document.getElementById('msg');
+      if (m) m.textContent = 'No se pudo cargar tu perfil (' + prof.error.message + '). Inténtalo de nuevo.';
+    }, 0);
+    throw new Error('error cargando perfil');
+  }
   S.profesor = prof.data;
   // Si el profesor fue dado de baja con la sesión aún abierta, se le expulsa.
   if (S.profesor?.estado === 'baja') {
