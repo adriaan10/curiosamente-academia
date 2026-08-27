@@ -86,9 +86,12 @@ async function cargarTodo() {
     }, 0);
     throw new Error('acceso desactivado');
   }
-  S.profesores = profs.data || [];
-  S.asignaturas = asigs.data || [];
-  S.profAsig = profAsig.data || [];
+  if (profs.error) avisar('Error cargando profesores: ' + profs.error.message, true);
+  else S.profesores = profs.data || [];
+  if (asigs.error) avisar('Error cargando asignaturas: ' + asigs.error.message, true);
+  else S.asignaturas = asigs.data || [];
+  if (profAsig.error) avisar('Error cargando asignaturas de profesor: ' + profAsig.error.message, true);
+  else S.profAsig = profAsig.data || [];
   await Promise.all([
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
     cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarFinanzas()
@@ -156,9 +159,17 @@ async function recargarTrasCambioRemoto() {
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
     cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarFinanzas()
   ]);
-  S.profesores = profs.data || [];
-  S.asignaturas = asigs.data || [];
-  S.profAsig = profAsig.data || [];
+  // Si alguna de estas tres falla (un hipo de red, el token de sesión
+  // renovándose justo en ese momento…) no se pisa lo que ya había: hacerlo
+  // sin comprobar el error es lo que provocaba que, tras dejar la app
+  // abierta un rato, "desaparecieran" los profesores (o asignaturas) de la
+  // pantalla hasta el siguiente cambio en tiempo real.
+  if (profs.error) avisar('Error recargando profesores: ' + profs.error.message, true);
+  else S.profesores = profs.data || [];
+  if (asigs.error) avisar('Error recargando asignaturas: ' + asigs.error.message, true);
+  else S.asignaturas = asigs.data || [];
+  if (profAsig.error) avisar('Error recargando asignaturas de profesor: ' + profAsig.error.message, true);
+  else S.profAsig = profAsig.data || [];
   // No interrumpir con un repintado completo si hay una ficha/modal abierta:
   // se vería la pantalla de golpe y se perdería lo que se estuviera editando.
   const modal = document.getElementById('modal-raiz');
@@ -211,7 +222,8 @@ async function cargarClases() {
   ]);
   if (clases.error) return avisar('Error cargando clases: ' + clases.error.message, true);
   S.clases = clases.data || [];
-  S.excepciones = excepciones.data || [];
+  if (excepciones.error) avisar('Error cargando excepciones de clase: ' + excepciones.error.message, true);
+  else S.excepciones = excepciones.data || [];
 }
 
 // Copia de seguridad local diaria con los datos visibles para este usuario.
