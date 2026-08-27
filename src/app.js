@@ -125,6 +125,12 @@ function iniciarTiempoReal() {
   for (const tabla of TABLAS_TIEMPO_REAL) {
     canal = canal.on('postgres_changes', { event: '*', schema: 'public', table: tabla }, programarRecargaTiempoReal);
   }
+  // Aviso instantáneo de actualización: en cuanto se publica una versión
+  // nueva se cambia esta fila (a mano, no desde la app), y todas las
+  // sesiones abiertas lo notan al momento y comprueban ya la actualización,
+  // en vez de esperar a que alguien cierre y vuelva a abrir la app.
+  canal = canal.on('postgres_changes', { event: '*', schema: 'public', table: 'app_version' },
+    () => window.api.comprobarActualizacionesAhora());
   canal.subscribe();
   canalTiempoReal = canal;
 }

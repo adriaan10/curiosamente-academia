@@ -196,3 +196,6 @@ ipcMain.handle('logo:get', () => {
 
 ipcMain.handle('actualizacion:pendiente', () => actualizacionLista);
 ipcMain.on('actualizacion:instalar', () => autoUpdater.quitAndInstall());
+// Aviso instantáneo por Supabase Realtime (tabla app_version): en vez de
+// esperar a la próxima apertura, se relanza la comprobación ya mismo.
+ipcMain.on('actualizacion:comprobar-ahora', () => comprobarActualizaciones());

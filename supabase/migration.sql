@@ -761,3 +761,31 @@ alter publication supabase_realtime add table
   public.reactivaciones_alumno,
   public.finanzas_movimientos,
   public.profesores;
+
+-- ============================================================
+-- Aviso instantáneo de actualización disponible (v1.4.0)
+-- ============================================================
+
+-- Fila única con la última versión publicada. Solo se toca a mano (Claude,
+-- vía MCP) al publicar una versión nueva — la app nunca escribe aquí, solo
+-- lee. Al cambiar, todas las sesiones abiertas se enteran al momento por
+-- tiempo real y relanzan la comprobación de electron-updater ya mismo, en
+-- vez de esperar a que alguien cierre y vuelva a abrir la app (ver
+-- iniciarTiempoReal() en src/app.js y comprobarActualizaciones() en main.js).
+create table public.app_version (
+  id boolean primary key default true,
+  version text not null,
+  actualizado_en timestamptz not null default now(),
+  constraint app_version_una_sola_fila check (id)
+);
+
+insert into public.app_version (id, version) values (true, '1.3.9');
+
+alter table public.app_version enable row level security;
+
+create policy "Cualquier sesión autenticada puede leer la versión"
+  on public.app_version for select
+  to authenticated
+  using (true);
+
+alter publication supabase_realtime add table public.app_version;

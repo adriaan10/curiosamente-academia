@@ -16,5 +16,6 @@ contextBridge.exposeInMainWorld('api', {
   getLogo: () => ipcRenderer.invoke('logo:get'),
   getActualizacionPendiente: () => ipcRenderer.invoke('actualizacion:pendiente'),
   onActualizacionLista: (cb) => ipcRenderer.on('actualizacion:lista', (_e, version) => cb(version)),
-  instalarActualizacion: () => ipcRenderer.send('actualizacion:instalar')
+  instalarActualizacion: () => ipcRenderer.send('actualizacion:instalar'),
+  comprobarActualizacionesAhora: () => ipcRenderer.send('actualizacion:comprobar-ahora')
 });

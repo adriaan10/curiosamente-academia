@@ -61,8 +61,14 @@ código (la clave de Supabase incluida es la "publicable", pensada para ir en ap
 cliente; la seguridad real la aplican las reglas RLS del servidor).
 
 La app trae integrado `electron-updater`: al abrirse comprueba en segundo plano si
-hay una versión más nueva publicada en GitHub, la descarga sola si la hay, y se
-actualiza en el siguiente cierre normal — nadie tiene que hacer nada.
+hay una versión más nueva publicada en GitHub, y si la hay la descarga sola. En
+cuanto termina de descargarse (o al cerrar y reabrir, como red de seguridad),
+aparece una pantalla completa con el botón "Actualizar".
+
+Para no depender de que alguien cierre y reabra la app para enterarse, la tabla
+`public.app_version` (una sola fila) está en la réplica de Supabase Realtime: al
+cambiar su columna `version`, todas las sesiones abiertas se enteran al momento
+y relanzan la comprobación ya mismo, en vez de esperar a la próxima apertura.
 
 ### Publicar una versión nueva
 
@@ -86,6 +92,11 @@ actualiza en el siguiente cierre normal — nadie tiene que hacer nada.
 5. Al publicarla, el `.dmg` de Mac se compila solo en GitHub y aparece en esa
    misma versión unos minutos después (ver más abajo). Los ordenadores con
    Windows se actualizan solos la próxima vez que abran la app.
+6. Para que las sesiones ya abiertas se enteren al momento (en vez de esperar a
+   que alguien cierre y reabra), actualiza la fila de `app_version`:
+   ```sql
+   update public.app_version set version = '1.3.7', actualizado_en = now() where id = true;
+   ```
 
 ### La versión de Mac
 
