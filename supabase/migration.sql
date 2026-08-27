@@ -804,3 +804,18 @@ alter table public.profesores add column da_clases boolean not null default true
 
 update public.profesores set da_clases = false
 where email in ('adrianfernandezartiaga@gmail.com', 'judith@curiosamente.es');
+
+-- ============================================================
+-- Justificante de pago: quién puede marcar pagado y qué falta por enviar (v1.5.0)
+-- ============================================================
+
+-- La RLS de recibos ya permitía a cualquier profesor ver/actualizar los
+-- recibos de sus propios alumnos (por matriculas + profesor_asignaturas),
+-- no solo los que él mismo generó — así que un profesor ya podía marcar
+-- pagado a nivel de base de datos; solo faltaba el botón en la interfaz
+-- (ver filasRecibos() en src/app.js). Marcar pagado ya NO dispara el envío
+-- del justificante al momento: eso pasa a ser una acción del admin, en la
+-- pestaña "Pagados por enviar". Esta columna, paralela a la ya existente
+-- fecha_envio_whatsapp (para el recibo original), dice si el justificante
+-- de PAGO de ese recibo ya se mandó.
+alter table public.recibos add column fecha_envio_whatsapp_pago timestamptz;

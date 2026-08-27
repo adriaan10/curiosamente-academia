@@ -436,8 +436,11 @@ function renderInicio() {
   clasesHoy.sort((a, b) => String(a.hora).localeCompare(String(b.hora)));
 
   // Avisos solo para el administrador: fichas sin precio, modificaciones de
-  // horas sin revisar, y altas tardías con recibo pendiente de generar a mano.
+  // horas sin revisar, altas tardías con recibo pendiente de generar a mano,
+  // y recibos ya marcados pagados (por cualquier profesor) que faltan por
+  // mandar el justificante — solo el admin tiene acceso al envío.
   const esAdmin = S.profesor?.es_admin;
+  const daClases = S.profesor?.da_clases !== false;
   const fichasIncompletas = esAdmin
     ? S.alumnos.flatMap(al => (al.matriculas || [])
         .filter(m => m.tarifa == null)
@@ -446,6 +449,9 @@ function renderInicio() {
   const modificacionesSinVer = esAdmin ? S.cambiosHorario.filter(c => !c.visto) : [];
   const altasFueraDeFecha = esAdmin ? recibosPendientesFueraDeFecha() : [];
   const reactivacionesSinVer = esAdmin ? S.reactivaciones.filter(r => !r.visto) : [];
+  const pagadosPorEnviar = esAdmin
+    ? S.recibos.filter(r => r.estado === 'pagado' && !r.fecha_envio_whatsapp_pago)
+    : [];
 
   document.getElementById('contenido').innerHTML = `
   <div class="portada">
@@ -457,13 +463,14 @@ function renderInicio() {
     </div>
     <p class="portada-hola">Hola, <strong>${e(S.profesor?.nombre || '')}</strong> · ${e(fecha)}</p>
     <div class="portada-cards">
+      ${daClases ? `
       <div class="portada-card" data-ir="horario">
         <div class="pc-num">${clasesHoy.length}</div>
         <div class="pc-titulo">clase${clasesHoy.length === 1 ? '' : 's'} hoy</div>
         <div class="pc-detalle">${clasesHoy.length
           ? e(clasesHoy.slice(0, 3).map(s => `${horaCorta(s.hora)} ${s.clase.nombre}`).join(' · ')) + (clasesHoy.length > 3 ? '…' : '')
           : 'Nada en el horario de hoy'}</div>
-      </div>
+      </div>` : ''}
       <div class="portada-card" data-ir="alumnos">
         <div class="pc-num">${activos}</div>
         <div class="pc-titulo">alumno${activos === 1 ? '' : 's'} activo${activos === 1 ? '' : 's'}</div>
@@ -480,9 +487,15 @@ function renderInicio() {
         <div class="pc-detalle">Tus pósits</div>
       </div>
     </div>
-    ${esAdmin && (fichasIncompletas.length || modificacionesSinVer.length || altasFueraDeFecha.length || reactivacionesSinVer.length) ? `
+    ${esAdmin && (fichasIncompletas.length || modificacionesSinVer.length || altasFueraDeFecha.length || reactivacionesSinVer.length || pagadosPorEnviar.length) ? `
     <h3 class="seccion" style="margin-top:28px">Pendiente de revisar</h3>
     <div class="portada-cards">
+      ${pagadosPorEnviar.length ? `
+      <div class="portada-card alerta" id="pc-pagados-enviar">
+        <div class="pc-num">${pagadosPorEnviar.length}</div>
+        <div class="pc-titulo">recibo${pagadosPorEnviar.length === 1 ? '' : 's'} pagado${pagadosPorEnviar.length === 1 ? '' : 's'} por enviar</div>
+        <div class="pc-detalle">Un profesor ha marcado un pago: manda el justificante</div>
+      </div>` : ''}
       ${fichasIncompletas.length ? `
       <div class="portada-card alerta" id="pc-fichas">
         <div class="pc-num">${fichasIncompletas.length}</div>
@@ -522,6 +535,13 @@ function renderInicio() {
   if (pcFuera) pcFuera.onclick = () => modalRecibosFueraDeFecha(altasFueraDeFecha);
   const pcReact = document.getElementById('pc-reactivaciones');
   if (pcReact) pcReact.onclick = () => modalReactivacionesSinVer(reactivacionesSinVer);
+  const pcPagados = document.getElementById('pc-pagados-enviar');
+  if (pcPagados) pcPagados.onclick = () => {
+    S.vista = 'recibos';
+    S.vistaRosterRecibos = false;
+    S.vistaRecibos = 'pagados-enviar';
+    renderMain();
+  };
 }
 
 // Alumnos dados de alta este mes DESPUÉS del día 3 (fuera de la generación
@@ -2171,7 +2191,8 @@ async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
     // luego usa el webhook para saber a qué recibo corresponde cada aviso de
     // "entregado"/"leído"/"fallido" que llegue de Meta.
     const actualizacion = {};
-    if (!esPago) actualizacion.fecha_envio_whatsapp = new Date().toISOString();
+    if (esPago) actualizacion.fecha_envio_whatsapp_pago = new Date().toISOString();
+    else actualizacion.fecha_envio_whatsapp = new Date().toISOString();
     if (!data.simulado && data.mensajeId) {
       actualizacion.whatsapp_message_id = data.mensajeId;
       actualizacion.estado_whatsapp = 'enviado';
@@ -2185,17 +2206,20 @@ async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
   }
 }
 
-// Envío masivo por tandas, con progreso y resumen final.
-function modalEnvioMasivo(lista) {
+// Envío masivo por tandas, con progreso y resumen final. tipo='recibo' manda
+// el recibo normal; tipo='pago' manda el justificante de pago (mismo PDF,
+// sellado como PAGADO).
+function modalEnvioMasivo(lista, tipo = 'recibo') {
+  const esPago = tipo === 'pago';
   const conTelefono = lista.filter(r => telefonoWa(r.alumnos?.telefono || r.alumnos?.tutor_telefono));
   const sinTelefono = lista.length - conTelefono.length;
   const TANDA = 10;
 
   abrirModal(`
-  <h2>Enviar recibos por WhatsApp</h2>
-  <p class="ayuda">Se enviarán <strong>${conTelefono.length}</strong> recibos con el PDF ya adjunto,
+  <h2>Enviar ${esPago ? 'justificantes de pago' : 'recibos'} por WhatsApp</h2>
+  <p class="ayuda">Se enviarán <strong>${conTelefono.length}</strong> ${esPago ? 'justificantes' : 'recibos'} con el PDF ya adjunto,
   en tandas de ${TANDA} para poder seguirlo con calma.
-  ${sinTelefono ? `<br>⚠ ${sinTelefono} recibo${sinTelefono === 1 ? '' : 's'} sin teléfono válido se omitirá${sinTelefono === 1 ? '' : 'n'}.` : ''}</p>
+  ${sinTelefono ? `<br>⚠ ${sinTelefono} ${esPago ? 'justificante' : 'recibo'}${sinTelefono === 1 ? '' : 's'} sin teléfono válido se omitirá${sinTelefono === 1 ? '' : 'n'}.` : ''}</p>
   <div id="em-progreso"></div>
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cancelar</button>
@@ -2216,7 +2240,7 @@ function modalEnvioMasivo(lista) {
       const r = conTelefono[i];
       prog.innerHTML = `<p class="letras">Enviando ${i + 1} de ${conTelefono.length}…
         <strong>${e(r.alumnos?.nombre || '')}</strong></p>`;
-      const res = await enviarPorWhatsAppApi(r, 'recibo');
+      const res = await enviarPorWhatsAppApi(r, tipo);
       if (res.ok) { enviados++; simulado = simulado || res.simulado; }
       else fallos.push(`${r.alumnos?.nombre || 'Alumno'} — ${res.error}`);
       // Respiro entre tandas para no saturar el envío.
@@ -2368,8 +2392,8 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
       <td class="acciones">
         ${pagados
           ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>` : '')
-          : `${esAdmin ? `<button class="btn chico pagar" data-pagar="${r.id}">✓ Pagado</button>
-             <button class="btn chico liso" data-wa="${r.id}">WhatsApp</button>` : ''}
+          : `<button class="btn chico pagar" data-pagar="${r.id}">✓ Pagado</button>
+             ${esAdmin ? `<button class="btn chico liso" data-wa="${r.id}">WhatsApp</button>` : ''}
              <button class="btn chico liso" data-editar-recibo="${r.id}" title="Editar recibo">✏️</button>`}
         <button class="btn chico liso" data-pdf="${r.id}">PDF</button>
         <button class="btn chico liso peligro" data-borrar-recibo="${r.id}" title="Eliminar recibo">✕</button>
@@ -2417,26 +2441,35 @@ function renderRecibos() {
   if (S.vistaRosterRecibos) return renderRecibosPorAlumno();
 
   const esAdmin = S.profesor?.es_admin;
-  const sub = (S.vistaRecibos === 'enviar' && !esAdmin) ? 'pendientes' : (S.vistaRecibos || 'pendientes');
+  const sub = (['enviar', 'pagados-enviar'].includes(S.vistaRecibos) && !esAdmin) ? 'pendientes' : (S.vistaRecibos || 'pendientes');
   const barraMes = barraMesRecibos(); // fija S.mesRecibos por defecto antes de filtrar
   const lista = recibosFiltrados();
   const delMes = lista.filter(r => claveMes(r.fecha_emision) === S.mesRecibos);
   const pendientes = delMes.filter(r => r.estado !== 'pagado');
   const pagados = delMes.filter(r => r.estado === 'pagado');
   const porEnviar = pendientes.filter(r => !r.fecha_envio_whatsapp);
+  const pagadosPorEnviar = pagados.filter(r => !r.fecha_envio_whatsapp_pago);
+  // La pestaña activa (si es una de las dos "por enviar") y su tipo de envío,
+  // para que el bloque de casillas/selección de abajo sirva para las dos.
+  const listaEnviable = sub === 'pagados-enviar' ? pagadosPorEnviar : porEnviar;
+  const tipoEnviable = sub === 'pagados-enviar' ? 'pago' : 'recibo';
 
   let cuerpo = '';
-  if (sub === 'enviar') {
-    const total = porEnviar.reduce((s, r) => s + Number(r.importe), 0);
-    const nSeleccionados = porEnviar.filter(r => S.recibosSeleccionados.has(r.id)).length;
-    const todosMarcados = porEnviar.length > 0 && nSeleccionados === porEnviar.length;
-    cuerpo = porEnviar.length === 0
-      ? `<div class="vacio">No hay recibos por enviar este mes. 🎉</div>`
+  if (sub === 'enviar' || sub === 'pagados-enviar') {
+    const total = listaEnviable.reduce((s, r) => s + Number(r.importe), 0);
+    const nSeleccionados = listaEnviable.filter(r => S.recibosSeleccionados.has(r.id)).length;
+    const todosMarcados = listaEnviable.length > 0 && nSeleccionados === listaEnviable.length;
+    const mensajeVacio = sub === 'pagados-enviar'
+      ? 'No hay justificantes de pago por enviar este mes. 🎉'
+      : 'No hay recibos por enviar este mes. 🎉';
+    const etiquetaLista = sub === 'pagados-enviar' ? 'pagado' : 'por enviar';
+    cuerpo = listaEnviable.length === 0
+      ? `<div class="vacio">${mensajeVacio}</div>`
       : `<h3 class="mes-seccion">${tituloMes(S.mesRecibos)}
-          <small>${porEnviar.length} por enviar · ${formatoImporte(total)}€</small>
+          <small>${listaEnviable.length} ${etiquetaLista} · ${formatoImporte(total)}€</small>
           <button class="btn chico" id="rc-marcar-todos">${todosMarcados ? 'Quitar selección' : 'Seleccionar todos'}</button>
           <button class="btn primario chico" id="rc-enviar-seleccionados" ${nSeleccionados ? '' : 'disabled'}>📤 Enviar seleccionados (${nSeleccionados})</button></h3>
-        ${filasRecibos(porEnviar, esAdmin, false, true)}`;
+        ${filasRecibos(listaEnviable, esAdmin, sub === 'pagados-enviar', true)}`;
   } else if (sub === 'pagados') {
     const total = pagados.reduce((s, r) => s + Number(r.importe), 0);
     cuerpo = pagados.length === 0
@@ -2461,6 +2494,7 @@ function renderRecibos() {
       <button class="seg ${sub === 'pendientes' ? 'activo' : ''}" data-sub="pendientes">Pendientes${pendientes.length ? ` (${pendientes.length})` : ''}</button>
       <button class="seg ${sub === 'pagados' ? 'activo' : ''}" data-sub="pagados">Pagados</button>
       ${esAdmin ? `<button class="seg ${sub === 'enviar' ? 'activo' : ''}" data-sub="enviar">Enviar recibos${porEnviar.length ? ` (${porEnviar.length})` : ''}</button>` : ''}
+      ${esAdmin ? `<button class="seg ${sub === 'pagados-enviar' ? 'activo' : ''}" data-sub="pagados-enviar">Pagados por enviar${pagadosPorEnviar.length ? ` (${pagadosPorEnviar.length})` : ''}</button>` : ''}
     </div>
     ${barraMes}
     <input id="fr-texto" type="search" placeholder="Buscar por alumno o concepto…" value="${e(S.filtros.textoRecibo)}">
@@ -2501,16 +2535,16 @@ function renderRecibos() {
   };
   const rcMarcarTodos = document.getElementById('rc-marcar-todos');
   if (rcMarcarTodos) rcMarcarTodos.onclick = () => {
-    const todosMarcados = porEnviar.length > 0 && porEnviar.every(r => S.recibosSeleccionados.has(r.id));
-    porEnviar.forEach(r => todosMarcados ? S.recibosSeleccionados.delete(r.id) : S.recibosSeleccionados.add(r.id));
+    const todosMarcados = listaEnviable.length > 0 && listaEnviable.every(r => S.recibosSeleccionados.has(r.id));
+    listaEnviable.forEach(r => todosMarcados ? S.recibosSeleccionados.delete(r.id) : S.recibosSeleccionados.add(r.id));
     renderRecibos();
   };
   const rcEnviarSel = document.getElementById('rc-enviar-seleccionados');
   if (rcEnviarSel) rcEnviarSel.onclick = () => {
-    const seleccion = porEnviar.filter(r => S.recibosSeleccionados.has(r.id));
+    const seleccion = listaEnviable.filter(r => S.recibosSeleccionados.has(r.id));
     if (!seleccion.length) return;
     S.recibosSeleccionados.clear();
-    modalEnvioMasivo(seleccion);
+    modalEnvioMasivo(seleccion, tipoEnviable);
   };
 
   document.querySelectorAll('[data-pagar]').forEach(b => b.onclick = async () => {
@@ -2520,18 +2554,15 @@ function renderRecibos() {
       .eq('id', b.dataset.pagar);
     await cargarRecibos();
     renderRecibos();
-
-    // Justificante sellado como PAGADO, al momento y sin pasos extra.
-    const actualizado = S.recibos.find(x => x.id === b.dataset.pagar) || r;
-    const res = await enviarPorWhatsAppApi(actualizado, 'pago');
-    if (res.ok && res.simulado) avisar('Pagado. (WhatsApp sin configurar: justificante no enviado)');
-    else if (res.ok) avisar('Pagado. Justificante enviado por WhatsApp.');
-    else avisar(`Pagado, pero no se pudo enviar el justificante: ${res.error}`, true);
+    // El envío del justificante ya no es automático: solo el admin lo manda,
+    // desde la pestaña "Pagados por enviar" (así cualquier profesor puede
+    // marcar el pago sin depender de tener acceso a WhatsApp).
+    avisar('Marcado como pagado.');
   });
   document.querySelectorAll('[data-despagar]').forEach(b => b.onclick = async () => {
     const r = S.recibos.find(x => x.id === b.dataset.despagar);
     if (!confirm(`¿Estás seguro de que quieres volver a dejar PENDIENTE el recibo de ${r?.alumnos?.nombre || 'este alumno'} (${formatoImporte(r?.importe || 0)}€, ${r?.concepto || ''})?`)) return;
-    await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null })
+    await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null })
       .eq('id', b.dataset.despagar);
     await cargarRecibos();
     renderRecibos();
