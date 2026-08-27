@@ -708,9 +708,28 @@ function renderAlumnos() {
     b.onclick = () => modalRecibo(S.alumnos.find(a => a.id === b.dataset.recibo)));
 }
 
+// Separa nombre de pila y apellidos para rellenar las dos casillas. Si el
+// alumno ya tiene apellidos guardados, se quitan del final de "nombre" (por
+// si quedó sin limpiar de un guardado anterior); si no los tiene aún (fichas
+// de antes del cambio), se adivinan solos con la primera palabra como nombre
+// y el resto como apellidos — así el admin no tiene que recortar nada a mano,
+// que fue justo lo que provocó apellidos duplicados la primera vez.
+function separarNombreApellidos(a) {
+  if (a.apellidos) {
+    let base = a.nombre || '';
+    while (base.length > a.apellidos.length && base.endsWith(' ' + a.apellidos)) {
+      base = base.slice(0, -(a.apellidos.length + 1));
+    }
+    return { nombre: base, apellidos: a.apellidos };
+  }
+  const partes = (a.nombre || '').trim().split(/\s+/).filter(Boolean);
+  return { nombre: partes[0] || '', apellidos: partes.slice(1).join(' ') };
+}
+
 function modalAlumno(alumno) {
   const esAdmin = S.profesor?.es_admin;
   const a = alumno || {};
+  const nombreForm = separarNombreApellidos(a);
   // Matrículas en edición local: las de mis asignaturas (o todas si admin) se
   // pueden tocar; las del resto de profesores se muestran solo informativas.
   const ms = alumno ? misMatriculas(alumno).map(m => ({ ...m })) : [];
@@ -730,9 +749,9 @@ function modalAlumno(alumno) {
   <h2>${alumno ? 'Ficha de ' + e(a.nombre) : 'Nuevo alumno'}</h2>
   ${alumno && a.estado === 'baja' ? '<p class="ayuda">⚠ Este alumno está <strong>de baja</strong>. Puedes corregir sus datos (nivel, precio, horas…) y reactivarlo a la vez con el botón de abajo.</p>' : ''}
   <div class="grid2">
-    <label>Nombre *<input id="a-nombre" value="${e(a.nombre || '')}"></label>
+    <label>Nombre *<input id="a-nombre" value="${e(nombreForm.nombre)}"></label>
     <label>Apellidos <small>(para detectar hermanos automáticamente)</small>
-      <input id="a-apellidos" value="${e(a.apellidos || '')}" placeholder="ej. García López"></label>
+      <input id="a-apellidos" value="${e(nombreForm.apellidos)}" placeholder="ej. García López"></label>
     <label>Teléfono / WhatsApp (si es menor, el del padre/madre)
       <input id="a-tel" value="${e(a.telefono || a.tutor_telefono || '')}" inputmode="numeric" maxlength="9" placeholder="9 dígitos"></label>
     <label>Padre / madre / tutor (nombre y apellidos)
