@@ -31,7 +31,8 @@ const S = {
   recibosSeleccionados: new Set(),
   vistaRosterRecibos: false,
   filtros: { texto: '', asignatura: '', estado: 'activo', profesor: '', textoRecibo: '' },
-  logoBase64: null
+  logoBase64: null,
+  actualizacionPendiente: null
 };
 
 const $app = () => document.getElementById('app');
@@ -40,6 +41,14 @@ const e = escapeHtml;
 // ---------------------------------------------------------------- arranque
 
 async function init() {
+  // Si ya hay una versión descargada esperando (el proceso principal la
+  // recuerda aunque haya terminado antes de que esta ventana cargara), se
+  // avisa antes que nada; si llega mientras se usa la app, el aviso salta en
+  // cuanto llegue (o al cerrar un modal que estuviera abierto, ver cerrarModal).
+  window.api.onActualizacionLista((version) => avisoActualizacionPendiente(version));
+  const yaLista = await window.api.getActualizacionPendiente();
+  if (yaLista) return avisoActualizacionPendiente(yaLista);
+
   S.cfg = await window.api.getConfig();
   S.logoBase64 = await window.api.getLogo();
   if (!S.cfg.supabaseUrl || !S.cfg.supabaseKey) return renderSetup();
@@ -258,6 +267,35 @@ function renderSetup() {
     S.cfg = await window.api.setConfig({ supabaseUrl, supabaseKey });
     init();
   };
+}
+
+// Pantalla completa que obliga a actualizar: se dispara en cuanto el proceso
+// principal avisa de que ya hay una versión descargada y lista para instalar.
+function mostrarPantallaActualizacion(version) {
+  $app().innerHTML = `
+  <div class="centrado">
+    <div class="tarjeta login">
+      ${logoHtml()}
+      <p class="sub">tu centro de estudios</p>
+      <h2>Hay una versión nueva</h2>
+      <p class="ayuda">La versión ${e(version)} ya está descargada. Actualiza para seguir usando la app con las últimas mejoras.</p>
+      <button class="btn primario" id="actualizar-btn">Actualizar</button>
+    </div>
+  </div>`;
+  document.getElementById('actualizar-btn').onclick = (ev) => {
+    ev.target.disabled = true;
+    ev.target.textContent = 'Actualizando…';
+    window.api.instalarActualizacion();
+  };
+}
+
+// Si hay un modal abierto (una ficha a medio editar, un recibo a medio
+// generar…) se espera a que se cierre antes de tapar la pantalla entera:
+// cerrarModal() se encarga de mostrarla en cuanto quede libre.
+function avisoActualizacionPendiente(version) {
+  S.actualizacionPendiente = version;
+  const modalAbierto = document.getElementById('modal-raiz')?.innerHTML.trim();
+  if (!modalAbierto) mostrarPantallaActualizacion(version);
 }
 
 function logoHtml(clase = 'logo-login') {
@@ -3640,6 +3678,7 @@ function abrirModal(html) {
 
 function cerrarModal() {
   document.getElementById('modal-raiz').innerHTML = '';
+  if (S.actualizacionPendiente) mostrarPantallaActualizacion(S.actualizacionPendiente);
 }
 
 let toastTimer;

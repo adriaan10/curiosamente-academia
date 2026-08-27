@@ -13,5 +13,8 @@ contextBridge.exposeInMainWorld('api', {
   openWhatsApp: (tel, texto) => ipcRenderer.invoke('wa:open', { tel, texto }),
   saveCsv: (content, suggestedName) => ipcRenderer.invoke('csv:save', { content, suggestedName }),
   saveBackup: (json) => ipcRenderer.invoke('backup:save', json),
-  getLogo: () => ipcRenderer.invoke('logo:get')
+  getLogo: () => ipcRenderer.invoke('logo:get'),
+  getActualizacionPendiente: () => ipcRenderer.invoke('actualizacion:pendiente'),
+  onActualizacionLista: (cb) => ipcRenderer.on('actualizacion:lista', (_e, version) => cb(version)),
+  instalarActualizacion: () => ipcRenderer.send('actualizacion:instalar')
 });

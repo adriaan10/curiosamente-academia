@@ -6,7 +6,9 @@ const { autoUpdater } = require('electron-updater');
 let win;
 
 // Comprueba versiones nuevas en segundo plano, sin preguntar nada: si hay una,
-// se descarga sola y se instala en el próximo cierre normal de la app.
+// se descarga sola. Cuando ya está lista, se avisa a la ventana con una
+// pantalla completa (en vez de esperar en silencio al próximo cierre) para
+// que quien esté usando la app sepa que tiene que actualizar.
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 // La descarga sigue en segundo plano después de comprobar, y si falla ahí
@@ -15,6 +17,16 @@ autoUpdater.autoInstallOnAppQuit = true;
 // Sin este oyente, ese error tumbaría la app: se ignora a propósito, la
 // actualización se reintenta sola la próxima vez que se abra.
 autoUpdater.on('error', () => { /* actualizar nunca debe romper el uso normal */ });
+
+// Guardada aquí (no solo enviada por evento) por si la descarga termina antes
+// de que la ventana haya cargado del todo y monte su oyente: el renderer la
+// pregunta también al arrancar, con `actualizacion:pendiente`.
+let actualizacionLista = null;
+autoUpdater.on('update-downloaded', (info) => {
+  actualizacionLista = info.version;
+  if (win && !win.isDestroyed()) win.webContents.send('actualizacion:lista', info.version);
+});
+
 function comprobarActualizaciones() {
   autoUpdater.checkForUpdates().catch(() => { /* sin conexión: se reintenta la próxima vez */ });
 }
@@ -181,3 +193,6 @@ ipcMain.handle('logo:get', () => {
     return null;
   }
 });
+
+ipcMain.handle('actualizacion:pendiente', () => actualizacionLista);
+ipcMain.on('actualizacion:instalar', () => autoUpdater.quitAndInstall());
