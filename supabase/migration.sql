@@ -789,3 +789,18 @@ create policy "Cualquier sesión autenticada puede leer la versión"
   using (true);
 
 alter publication supabase_realtime add table public.app_version;
+
+-- ============================================================
+-- Admins que no dan clase (v1.4.0)
+-- ============================================================
+
+-- Adrián (admin de la app) y Judith (admin de la academia) llevan la
+-- gestión pero no tienen asignaturas propias: no deberían salir en los
+-- desplegables "por profesor" (Alumnos, Clases, Horario, Recibos, Ver por
+-- alumno) ni como profesor asignable de una clase. Sí siguen apareciendo
+-- con normalidad en la pestaña Profesores (gestión de personal), que no usa
+-- profesoresActivos() sino la lista completa.
+alter table public.profesores add column da_clases boolean not null default true;
+
+update public.profesores set da_clases = false
+where email in ('adrianfernandezartiaga@gmail.com', 'judith@curiosamente.es');

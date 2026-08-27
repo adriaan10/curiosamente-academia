@@ -2819,8 +2819,12 @@ function renderNotas() {
 
 // ---------------------------------------------------------------- profesores (solo admin)
 
+// Para elegir "por profesor" en un filtro o asignar quién da una clase: solo
+// profesores que de verdad dan clase (algunos admins llevan la gestión pero
+// no tienen asignaturas propias). La pestaña Profesores, que gestiona a todo
+// el personal, no usa esta lista — usa S.profesores directamente.
 function profesoresActivos() {
-  return S.profesores.filter(p => p.estado !== 'baja');
+  return S.profesores.filter(p => p.estado !== 'baja' && p.da_clases !== false);
 }
 
 function renderProfesores() {
