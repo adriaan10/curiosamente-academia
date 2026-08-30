@@ -572,6 +572,11 @@ function renderInicio() {
 // este mes: hay que generárselo a mano una vez.
 function recibosPendientesFueraDeFecha() {
   const hoy = new Date();
+  // En julio y agosto no hay generación automática de recibos (receso de
+  // verano, ver generar_recibos_mensuales() en el servidor), así que no tiene
+  // sentido avisar de "se quedó fuera del envío automático" en esos meses —
+  // nadie tiene recibo automático esos meses, se den de alta cuando se den de alta.
+  if ([6, 7].includes(hoy.getMonth())) return [];
   const periodoActual = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}`;
   return S.alumnos.filter(a => {
     if (a.estado !== 'activo' || !a.fecha_alta) return false;
