@@ -127,7 +127,7 @@ async function cargarTodo() {
 const TABLAS_TIEMPO_REAL = [
   'alumnos', 'matriculas', 'clases', 'clase_horarios', 'clase_alumnos', 'clase_excepciones',
   'recibos', 'notas', 'profesor_horario', 'cambios_horario', 'reactivaciones_alumno',
-  'finanzas_movimientos', 'profesores'
+  'finanzas_movimientos', 'profesores', 'asignaturas', 'profesor_asignaturas'
 ];
 
 let canalTiempoReal = null;
@@ -181,6 +181,29 @@ async function recargarTrasCambioRemoto() {
   else S.asignaturas = asigs.data || [];
   if (profAsig.error) avisar('Error recargando asignaturas de profesor: ' + profAsig.error.message, true);
   else S.profAsig = profAsig.data || [];
+
+  // La lista de profesores ya incluye la propia fila: se actualiza S.profesor
+  // con ella para que un cambio hecho por otra persona (quitar admin, quitar
+  // asignaturas, marcar de baja…) se note en la propia sesión ya abierta, sin
+  // esperar a un cierre y apertura. Si a alguien lo dan de baja mientras
+  // tiene la app abierta, se le expulsa igual que al iniciar sesión.
+  if (!profs.error && S.profesor) {
+    const propia = S.profesores.find(p => p.id === S.profesor.id);
+    if (propia?.estado === 'baja') {
+      detenerTiempoReal();
+      await S.sb.auth.signOut();
+      S.session = null;
+      S.profesor = null;
+      renderLogin();
+      setTimeout(() => {
+        const m = document.getElementById('msg');
+        if (m) m.textContent = 'Tu acceso está desactivado. Habla con la academia.';
+      }, 0);
+      return;
+    }
+    if (propia) S.profesor = propia;
+  }
+
   // No interrumpir con un repintado completo si hay una ficha/modal abierta:
   // se vería la pantalla de golpe y se perdería lo que se estuviera editando.
   const modal = document.getElementById('modal-raiz');

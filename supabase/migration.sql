@@ -819,3 +819,12 @@ where email in ('adrianfernandezartiaga@gmail.com', 'judith@curiosamente.es');
 -- fecha_envio_whatsapp (para el recibo original), dice si el justificante
 -- de PAGO de ese recibo ya se mandó.
 alter table public.recibos add column fecha_envio_whatsapp_pago timestamptz;
+
+-- ============================================================
+-- Tiempo real: faltaban asignaturas y profesor_asignaturas (v1.5.2)
+-- ============================================================
+
+-- Cambiar las asignaturas de un profesor, o crear una asignatura nueva sobre
+-- la marcha (desde Profesores), no se enteraba en tiempo real en otras
+-- sesiones abiertas: faltaban estas dos tablas en la réplica.
+alter publication supabase_realtime add table public.asignaturas, public.profesor_asignaturas;
