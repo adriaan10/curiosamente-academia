@@ -2579,6 +2579,22 @@ function tituloMes(clave) {
   return `${MESES[(mes || 1) - 1]} ${anio || ''}`;
 }
 
+// Un solo estado por fila que cuenta la cadena completa (en vez de dos chips
+// sueltos de "estado" + "envío" que no dejaban claro en qué paso iba cada
+// recibo): sin enviar el recibo no tiene sentido hablar de "cobro" (el
+// alumno/tutor ni sabe que tiene que pagar), y una vez cobrado lo que queda
+// por seguir es el justificante de PAGO, no el recibo original.
+function estadoRecibo(r, pagados) {
+  if (!pagados) {
+    return r.fecha_envio_whatsapp
+      ? { clase: 'envio-no', texto: 'Pendiente por cobrar' }
+      : { clase: 'pendiente', texto: 'Pendiente de envío' };
+  }
+  return r.fecha_envio_whatsapp_pago
+    ? { clase: 'pagado', texto: 'Cobrado y enviado' }
+    : { clase: 'envio-no', texto: 'Cobrado y por enviar' };
+}
+
 function filasRecibos(lista, esAdmin, pagados, seleccionables) {
   return `<table>
     <thead><tr>
@@ -2588,12 +2604,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
     </tr></thead>
     <tbody>
     ${lista.map(r => {
-      // El chip de envío refleja justificante distinto según la pestaña: en
-      // pendientes es el envío del recibo; en cobrados/justificantes es el
-      // envío del justificante de PAGO — antes se miraba siempre el mismo
-      // campo (fecha_envio_whatsapp) y por eso un recibo ya cobrado y con el
-      // justificante de pago enviado seguía apareciendo como "por enviar".
-      const fechaEnvio = pagados ? r.fecha_envio_whatsapp_pago : r.fecha_envio_whatsapp;
+      const estado = estadoRecibo(r, pagados);
       return `<tr>
       ${seleccionables ? `<td><input type="checkbox" data-check="${r.id}" ${S.recibosSeleccionados.has(r.id) ? 'checked' : ''}></td>` : ''}
       <td><strong>${e(r.alumnos?.nombre || '')}</strong><br>
@@ -2601,8 +2612,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
       <td>${e(r.concepto)}</td>
       <td><strong>${formatoImporte(r.importe)}€</strong></td>
       ${esAdmin ? `<td>${e(r.profesores?.nombre || '')}</td>` : ''}
-      <td><span class="chip ${r.estado}">${r.estado}</span>
-        <span class="chip ${fechaEnvio ? 'envio-si' : 'envio-no'}">${fechaEnvio ? 'enviado' : 'por enviar'}</span>
+      <td><span class="chip ${estado.clase}">${estado.texto}</span>
         ${r.estado_whatsapp === 'fallido' ? '<span class="chip wa-fallido" title="WhatsApp no pudo entregarlo: revisa el teléfono">Fallido</span>'
           : r.estado_whatsapp === 'leido' ? '<span class="chip wa-leido">Leído</span>'
           : r.estado_whatsapp === 'entregado' ? '<span class="chip wa-por-leer">Por leer</span>'
@@ -2663,9 +2673,14 @@ function renderRecibos() {
   const barraMes = barraMesRecibos(); // fija S.mesRecibos por defecto antes de filtrar
   const lista = recibosFiltrados();
   const delMes = lista.filter(r => claveMes(r.fecha_emision) === S.mesRecibos);
-  const pendientes = delMes.filter(r => r.estado !== 'pagado');
+  const noPagados = delMes.filter(r => r.estado !== 'pagado');
   const pagados = delMes.filter(r => r.estado === 'pagado');
-  const porEnviar = pendientes.filter(r => !r.fecha_envio_whatsapp);
+  // Cadena de estados: sin enviar el recibo no tiene sentido "pendiente de
+  // cobro" (el alumno/tutor ni sabe que hay que pagar), así que un recibo sin
+  // enviar sale solo en "Pendientes de envío" y desaparece de ahí en cuanto
+  // se manda — nunca están en las dos pestañas a la vez.
+  const porEnviar = noPagados.filter(r => !r.fecha_envio_whatsapp);
+  const pendientesCobro = noPagados.filter(r => r.fecha_envio_whatsapp);
   const pagadosPorEnviar = pagados.filter(r => !r.fecha_envio_whatsapp_pago);
   // La pestaña activa (si es una de las dos "por enviar") y su tipo de envío,
   // para que el bloque de casillas/selección de abajo sirva para las dos.
@@ -2697,20 +2712,20 @@ function renderRecibos() {
           <button class="btn chico" id="rc-descargar-mes">⬇ Descargar todos los PDF</button></h3>
         ${filasRecibos(pagados, esAdmin, true)}`;
   } else {
-    const total = pendientes.reduce((s, r) => s + Number(r.importe), 0);
-    cuerpo = pendientes.length === 0
-      ? `<div class="vacio">No hay recibos pendientes este mes. 🎉<br><small>Genera recibos desde la pestaña Alumnos.</small></div>`
+    const total = pendientesCobro.reduce((s, r) => s + Number(r.importe), 0);
+    cuerpo = pendientesCobro.length === 0
+      ? `<div class="vacio">No hay recibos pendientes de cobro este mes. 🎉</div>`
       : `<h3 class="mes-seccion">${tituloMes(S.mesRecibos)}
-          <small>${pendientes.length} pendiente${pendientes.length === 1 ? '' : 's'}${esAdmin ? ` · ${formatoImporte(total)}€` : ''}</small>
+          <small>${pendientesCobro.length} pendiente${pendientesCobro.length === 1 ? '' : 's'}${esAdmin ? ` · ${formatoImporte(total)}€` : ''}</small>
           <button class="btn chico" id="rc-descargar-mes">⬇ Descargar todos los PDF</button></h3>
-        ${filasRecibos(pendientes, esAdmin, false)}`;
+        ${filasRecibos(pendientesCobro, esAdmin, false)}`;
   }
 
   document.getElementById('contenido').innerHTML = `
   <div class="barra">
     <div class="segmentos">
       ${esAdmin ? `<button class="seg ${sub === 'enviar' ? 'activo' : ''}" data-sub="enviar">Pendientes de envío${porEnviar.length ? ` (${porEnviar.length})` : ''}</button>` : ''}
-      <button class="seg ${sub === 'pendientes' ? 'activo' : ''}" data-sub="pendientes">Pendientes de cobrar${pendientes.length ? ` (${pendientes.length})` : ''}</button>
+      <button class="seg ${sub === 'pendientes' ? 'activo' : ''}" data-sub="pendientes">Pendientes de cobrar${pendientesCobro.length ? ` (${pendientesCobro.length})` : ''}</button>
       <button class="seg ${sub === 'pagados' ? 'activo' : ''}" data-sub="pagados">Cobrados</button>
       ${esAdmin ? `<button class="seg ${sub === 'pagados-enviar' ? 'activo' : ''}" data-sub="pagados-enviar">Justificantes por enviar${pagadosPorEnviar.length ? ` (${pagadosPorEnviar.length})` : ''}</button>` : ''}
     </div>
@@ -2749,7 +2764,7 @@ function renderRecibos() {
   });
   const rcDescargarMes = document.getElementById('rc-descargar-mes');
   if (rcDescargarMes) rcDescargarMes.onclick = () => {
-    descargarPdfsMes(S.mesRecibos, sub === 'pagados' ? pagados : pendientes, rcDescargarMes);
+    descargarPdfsMes(S.mesRecibos, sub === 'pagados' ? pagados : pendientesCobro, rcDescargarMes);
   };
   const rcMarcarTodos = document.getElementById('rc-marcar-todos');
   if (rcMarcarTodos) rcMarcarTodos.onclick = () => {
