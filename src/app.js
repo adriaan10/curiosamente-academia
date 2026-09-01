@@ -734,9 +734,11 @@ function alumnosFiltrados() {
   const t = f.texto.toLowerCase();
   const esAdmin = S.profesor?.es_admin;
   return S.alumnos.filter(a =>
-    // Por defecto cada profesor ve los alumnos de sus asignaturas; con
-    // "Toda la academia" (o buscando por texto) ve la base de datos común.
-    (esAdmin || f.verTodos || t || misMatriculas(a).length > 0) &&
+    // Por defecto cada profesor ve solo los alumnos de sus asignaturas; con
+    // "Toda la academia" ve la base de datos común. Buscar por texto NO
+    // debe saltarse esta restricción: un profesor de inglés no debe poder
+    // encontrar un alumno que solo está en matemáticas escribiendo su nombre.
+    (esAdmin || f.verTodos || misMatriculas(a).length > 0) &&
     (!t || a.nombre.toLowerCase().includes(t) || (a.telefono || '').includes(t)) &&
     (!f.asignatura || (a.matriculas || []).some(m => String(m.asignatura_id) === f.asignatura)) &&
     (!f.estado || a.estado === f.estado) &&
@@ -3725,10 +3727,15 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes) {
     .filter(m => m.tipo === tipo && m.categoria === categoria && claveMesFecha(m.fecha) === claveMes)
     .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
   const total = lista.reduce((s, m) => s + Number(m.importe), 0);
+  // Solo las columnas que el admin haya añadido a mano se pueden borrar del
+  // todo (las fijas del código no, ni las "sueltas" que ya venían de datos
+  // antiguos sin haberlas creado desde aquí).
+  const esPersonalizada = S.finanzasCategorias.some(c => c.tipo === tipo && c.categoria === categoria);
 
   abrirModal(`
   <h2>${e(categoria)} — ${tituloMes(claveMes)}</h2>
-  <p class="ayuda">Total del mes: <strong>${formatoImporte(total)}€</strong></p>
+  <p class="ayuda">Total del mes: <strong>${formatoImporte(total)}€</strong>
+    ${esPersonalizada ? '<button class="btn chico liso peligro" id="fc-borrar-categoria" style="margin-left:10px">🗑 Eliminar esta categoría</button>' : ''}</p>
   ${lista.length === 0 ? '<p class="ayuda">Sin movimientos todavía.</p>' : `
   <div class="tabla-wrap"><table>
     <thead><tr><th>Fecha</th><th>Importe</th><th>Descripción</th><th></th></tr></thead>
@@ -3762,6 +3769,25 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes) {
     await cargarFinanzas();
     modalCategoriaMovimientos(tipo, categoria, claveMes);
   });
+  const btnBorrarCategoria = document.getElementById('fc-borrar-categoria');
+  if (btnBorrarCategoria) btnBorrarCategoria.onclick = async () => {
+    const todos = S.finanzas.filter(m => m.tipo === tipo && m.categoria === categoria);
+    const totalTodos = todos.reduce((s, m) => s + Number(m.importe), 0);
+    const aviso = todos.length
+      ? `¿Seguro que quieres eliminar la columna "${categoria}"? Se borrarán también sus ${todos.length} movimiento${todos.length === 1 ? '' : 's'} de TODOS los meses (${formatoImporte(totalTodos)}€ en total). Esta acción no se puede deshacer.`
+      : `¿Eliminar la columna "${categoria}"? No tiene ningún movimiento todavía.`;
+    if (!confirm(aviso)) return;
+    if (todos.length) {
+      const { error } = await S.sb.from('finanzas_movimientos').delete().eq('tipo', tipo).eq('categoria', categoria);
+      if (error) return avisar('Error: ' + error.message, true);
+    }
+    const { error } = await S.sb.from('finanzas_categorias').delete().eq('tipo', tipo).eq('categoria', categoria);
+    if (error) return avisar('Error: ' + error.message, true);
+    cerrarModal();
+    await Promise.all([cargarFinanzas(), cargarFinanzasCategorias()]);
+    renderFinanzas();
+    avisar('Columna eliminada.');
+  };
   document.getElementById('fc-guardar').onclick = async () => {
     const importe = Number(document.getElementById('fc-importe').value);
     const fecha = document.getElementById('fc-fecha').value;
