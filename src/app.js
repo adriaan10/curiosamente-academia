@@ -2587,7 +2587,14 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
       ${esAdmin ? '<th>Profesor</th>' : ''}<th>Estado</th><th></th>
     </tr></thead>
     <tbody>
-    ${lista.map(r => `<tr>
+    ${lista.map(r => {
+      // El chip de envío refleja justificante distinto según la pestaña: en
+      // pendientes es el envío del recibo; en cobrados/justificantes es el
+      // envío del justificante de PAGO — antes se miraba siempre el mismo
+      // campo (fecha_envio_whatsapp) y por eso un recibo ya cobrado y con el
+      // justificante de pago enviado seguía apareciendo como "por enviar".
+      const fechaEnvio = pagados ? r.fecha_envio_whatsapp_pago : r.fecha_envio_whatsapp;
+      return `<tr>
       ${seleccionables ? `<td><input type="checkbox" data-check="${r.id}" ${S.recibosSeleccionados.has(r.id) ? 'checked' : ''}></td>` : ''}
       <td><strong>${e(r.alumnos?.nombre || '')}</strong><br>
         <small>R-${String(r.referencia).padStart(5, '0')} · ${e((r.fecha_emision || '').split('-').reverse().join('/'))}</small></td>
@@ -2595,7 +2602,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
       <td><strong>${formatoImporte(r.importe)}€</strong></td>
       ${esAdmin ? `<td>${e(r.profesores?.nombre || '')}</td>` : ''}
       <td><span class="chip ${r.estado}">${r.estado}</span>
-        <span class="chip ${r.fecha_envio_whatsapp ? 'envio-si' : 'envio-no'}">${r.fecha_envio_whatsapp ? 'enviado' : 'por enviar'}</span>
+        <span class="chip ${fechaEnvio ? 'envio-si' : 'envio-no'}">${fechaEnvio ? 'enviado' : 'por enviar'}</span>
         ${r.estado_whatsapp === 'fallido' ? '<span class="chip wa-fallido" title="WhatsApp no pudo entregarlo: revisa el teléfono">Fallido</span>'
           : r.estado_whatsapp === 'leido' ? '<span class="chip wa-leido">Leído</span>'
           : r.estado_whatsapp === 'entregado' ? '<span class="chip wa-por-leer">Por leer</span>'
@@ -2609,7 +2616,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
         <button class="btn chico liso" data-pdf="${r.id}">PDF</button>
         <button class="btn chico liso peligro" data-borrar-recibo="${r.id}" title="Eliminar recibo">✕</button>
       </td>
-    </tr>`).join('')}
+    </tr>`;}).join('')}
     </tbody>
   </table>`;
 }
@@ -2702,10 +2709,10 @@ function renderRecibos() {
   document.getElementById('contenido').innerHTML = `
   <div class="barra">
     <div class="segmentos">
-      <button class="seg ${sub === 'pendientes' ? 'activo' : ''}" data-sub="pendientes">Pendientes${pendientes.length ? ` (${pendientes.length})` : ''}</button>
-      <button class="seg ${sub === 'pagados' ? 'activo' : ''}" data-sub="pagados">Pagados</button>
-      ${esAdmin ? `<button class="seg ${sub === 'enviar' ? 'activo' : ''}" data-sub="enviar">Enviar recibos${porEnviar.length ? ` (${porEnviar.length})` : ''}</button>` : ''}
-      ${esAdmin ? `<button class="seg ${sub === 'pagados-enviar' ? 'activo' : ''}" data-sub="pagados-enviar">Pagados por enviar${pagadosPorEnviar.length ? ` (${pagadosPorEnviar.length})` : ''}</button>` : ''}
+      ${esAdmin ? `<button class="seg ${sub === 'enviar' ? 'activo' : ''}" data-sub="enviar">Pendientes de envío${porEnviar.length ? ` (${porEnviar.length})` : ''}</button>` : ''}
+      <button class="seg ${sub === 'pendientes' ? 'activo' : ''}" data-sub="pendientes">Pendientes de cobrar${pendientes.length ? ` (${pendientes.length})` : ''}</button>
+      <button class="seg ${sub === 'pagados' ? 'activo' : ''}" data-sub="pagados">Cobrados</button>
+      ${esAdmin ? `<button class="seg ${sub === 'pagados-enviar' ? 'activo' : ''}" data-sub="pagados-enviar">Justificantes por enviar${pagadosPorEnviar.length ? ` (${pagadosPorEnviar.length})` : ''}</button>` : ''}
     </div>
     ${barraMes}
     <input id="fr-texto" type="search" placeholder="Buscar por alumno, concepto o referencia (R-00001)…" value="${e(S.filtros.textoRecibo)}">
