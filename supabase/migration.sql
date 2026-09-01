@@ -828,3 +828,85 @@ alter table public.recibos add column fecha_envio_whatsapp_pago timestamptz;
 -- la marcha (desde Profesores), no se enteraba en tiempo real en otras
 -- sesiones abiertas: faltaban estas dos tablas en la réplica.
 alter publication supabase_realtime add table public.asignaturas, public.profesor_asignaturas;
+
+-- ============================================================
+-- Sin recibos automáticos en septiembre (v1.6.0)
+-- ============================================================
+
+-- El curso empieza el 7 de septiembre: para cuando llegue el día 3 todavía
+-- no está el profesorado ni las matrículas listas para facturar. Septiembre
+-- se une a julio/agosto como mes sin generación automática — ese mes los
+-- recibos se generan a mano, desde la pestaña Recibos, cuando el admin lo
+-- tenga listo.
+create or replace function public.generar_recibos_mensuales()
+returns integer
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+  v_periodo text := to_char(now(), 'YYYY-MM');
+  v_mes text := (array['Enero','Febrero','Marzo','Abril','Mayo','Junio',
+    'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'])[extract(month from now())::int];
+  v_admin uuid;
+  v_creados integer := 0;
+  fila record;
+  v_desc record;
+begin
+  if extract(month from now())::int in (7, 8, 9) then
+    return 0;
+  end if;
+
+  select id into v_admin from public.profesores
+  where es_admin and estado = 'activo' order by created_at limit 1;
+  if v_admin is null then
+    raise exception 'No hay administrador activo';
+  end if;
+
+  for fila in
+    select a.id as alumno_id
+    from public.alumnos a
+    where a.estado = 'activo'
+      and exists (select 1 from public.matriculas m where m.alumno_id = a.id and m.tipo_tarifa = 'mes' and m.tarifa is not null)
+  loop
+    select * into v_desc from public.calcular_descuentos_alumno(fila.alumno_id);
+    if v_desc.total is null or v_desc.total <= 0 then continue; end if;
+
+    begin
+      insert into public.recibos (alumno_id, profesor_id, fecha_emision, concepto,
+        importe, importe_letras, estado, periodos)
+      values (fila.alumno_id, v_admin, current_date, v_mes,
+        v_desc.total, '', 'pendiente', array[v_periodo]);
+      v_creados := v_creados + 1;
+    exception when others then
+      null;
+    end;
+  end loop;
+  return v_creados;
+end;
+$$;
+
+select cron.unschedule('recibos-mensuales');
+select cron.schedule('recibos-mensuales', '0 6 3 1-6,10-12 *', 'select public.generar_recibos_mensuales()');
+
+-- ============================================================
+-- Columnas propias en Ingresos y gastos (v1.6.0)
+-- ============================================================
+
+-- Categorías extra que el admin añade a mano, además de las fijas del
+-- código (ver CATEGORIAS_INGRESO/CATEGORIAS_GASTO y categoriasConExtras()
+-- en src/app.js). Solo admin, mismo trato que el resto de Finanzas.
+create table public.finanzas_categorias (
+  id uuid primary key default gen_random_uuid(),
+  tipo text not null check (tipo in ('ingreso', 'gasto')),
+  categoria text not null,
+  created_at timestamptz not null default now(),
+  unique (tipo, categoria)
+);
+
+alter table public.finanzas_categorias enable row level security;
+
+create policy "finanzas_categorias_admin" on public.finanzas_categorias
+  for all to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+
+alter publication supabase_realtime add table public.finanzas_categorias;

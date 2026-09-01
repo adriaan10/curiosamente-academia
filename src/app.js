@@ -25,6 +25,7 @@ const S = {
   cambiosHorario: [],
   reactivaciones: [],
   finanzas: [],
+  finanzasCategorias: [],
   vista: 'inicio',
   vistaRecibos: 'pendientes',
   mesRecibos: '',
@@ -105,7 +106,7 @@ async function cargarTodo() {
   else S.profAsig = profAsig.data || [];
   await Promise.all([
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
-    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarFinanzas()
+    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarFinanzas(), cargarFinanzasCategorias()
   ]);
   backupAutomatico();
   window.api.getRecibosDir(); // crea la carpeta de recibos de este equipo si no existía aún
@@ -127,7 +128,7 @@ async function cargarTodo() {
 const TABLAS_TIEMPO_REAL = [
   'alumnos', 'matriculas', 'clases', 'clase_horarios', 'clase_alumnos', 'clase_excepciones',
   'recibos', 'notas', 'profesor_horario', 'cambios_horario', 'reactivaciones_alumno',
-  'finanzas_movimientos', 'profesores', 'asignaturas', 'profesor_asignaturas'
+  'finanzas_movimientos', 'finanzas_categorias', 'profesores', 'asignaturas', 'profesor_asignaturas'
 ];
 
 let canalTiempoReal = null;
@@ -168,7 +169,7 @@ async function recargarTrasCambioRemoto() {
     S.sb.from('asignaturas').select('*').order('id'),
     S.sb.from('profesor_asignaturas').select('*'),
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
-    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarFinanzas()
+    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarFinanzas(), cargarFinanzasCategorias()
   ]);
   // Si alguna de estas tres falla (un hipo de red, el token de sesión
   // renovándose justo en ese momento…) no se pisa lo que ya había: hacerlo
@@ -233,6 +234,14 @@ async function cargarFinanzas() {
   const { data, error } = await S.sb.from('finanzas_movimientos').select('*').order('fecha', { ascending: false });
   if (error) return avisar('Error cargando finanzas: ' + error.message, true);
   S.finanzas = data || [];
+}
+
+// Categorías extra que el admin haya creado (además de las fijas de siempre).
+async function cargarFinanzasCategorias() {
+  if (!S.profesor?.es_admin) { S.finanzasCategorias = []; return; }
+  const { data, error } = await S.sb.from('finanzas_categorias').select('*');
+  if (error) return avisar('Error cargando categorías: ' + error.message, true);
+  S.finanzasCategorias = data || [];
 }
 
 async function cargarHorarioTrabajo() {
@@ -525,7 +534,7 @@ function renderInicio() {
       <div class="portada-card ${pendientes.length ? 'alerta' : ''}" data-ir="recibos">
         <div class="pc-num">${pendientes.length}</div>
         <div class="pc-titulo">recibo${pendientes.length === 1 ? '' : 's'} pendiente${pendientes.length === 1 ? '' : 's'}</div>
-        <div class="pc-detalle">${pendientes.length ? formatoImporte(totalPendiente) + '€ por cobrar' : 'Todo cobrado 🎉'}</div>
+        <div class="pc-detalle">${!pendientes.length ? 'Todo cobrado 🎉' : esAdmin ? formatoImporte(totalPendiente) + '€ por cobrar' : 'Ver quién falta'}</div>
       </div>
       <div class="portada-card" data-ir="notas">
         <div class="pc-num">${S.notas.length}</div>
@@ -599,7 +608,7 @@ function recibosPendientesFueraDeFecha() {
   // verano, ver generar_recibos_mensuales() en el servidor), así que no tiene
   // sentido avisar de "se quedó fuera del envío automático" en esos meses —
   // nadie tiene recibo automático esos meses, se den de alta cuando se den de alta.
-  if ([6, 7].includes(hoy.getMonth())) return [];
+  if ([6, 7, 8].includes(hoy.getMonth())) return [];
   const periodoActual = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}`;
   return S.alumnos.filter(a => {
     if (a.estado !== 'activo' || !a.fecha_alta) return false;
@@ -2403,11 +2412,18 @@ async function regenerarPdf(r) {
 
 function recibosFiltrados() {
   const f = S.filtros;
-  const t = (f.textoRecibo || '').toLowerCase();
-  return S.recibos.filter(r =>
-    (!t || (r.alumnos?.nombre || '').toLowerCase().includes(t) || (r.concepto || '').toLowerCase().includes(t)) &&
-    (!f.profesor || r.profesor_id === f.profesor)
-  );
+  const t = (f.textoRecibo || '').toLowerCase().trim();
+  return S.recibos.filter(r => {
+    if (t) {
+      const refFormateada = `r-${String(r.referencia).padStart(5, '0')}`;
+      const coincide = (r.alumnos?.nombre || '').toLowerCase().includes(t)
+        || (r.concepto || '').toLowerCase().includes(t)
+        || refFormateada.includes(t)
+        || String(r.referencia).includes(t);
+      if (!coincide) return false;
+    }
+    return !f.profesor || r.profesor_id === f.profesor;
+  });
 }
 
 function claveMes(fechaIso) {
@@ -2526,7 +2542,7 @@ function renderRecibos() {
     cuerpo = pagados.length === 0
       ? `<div class="vacio">Todavía no hay recibos pagados este mes.</div>`
       : `<h3 class="mes-seccion">${tituloMes(S.mesRecibos)}
-          <small>${pagados.length} pagado${pagados.length === 1 ? '' : 's'} · ${formatoImporte(total)}€</small>
+          <small>${pagados.length} pagado${pagados.length === 1 ? '' : 's'}${esAdmin ? ` · ${formatoImporte(total)}€` : ''}</small>
           <button class="btn chico" id="rc-descargar-mes">⬇ Descargar todos los PDF</button></h3>
         ${filasRecibos(pagados, esAdmin, true)}`;
   } else {
@@ -2534,7 +2550,7 @@ function renderRecibos() {
     cuerpo = pendientes.length === 0
       ? `<div class="vacio">No hay recibos pendientes este mes. 🎉<br><small>Genera recibos desde la pestaña Alumnos.</small></div>`
       : `<h3 class="mes-seccion">${tituloMes(S.mesRecibos)}
-          <small>${pendientes.length} pendiente${pendientes.length === 1 ? '' : 's'} · ${formatoImporte(total)}€</small>
+          <small>${pendientes.length} pendiente${pendientes.length === 1 ? '' : 's'}${esAdmin ? ` · ${formatoImporte(total)}€` : ''}</small>
           <button class="btn chico" id="rc-descargar-mes">⬇ Descargar todos los PDF</button></h3>
         ${filasRecibos(pendientes, esAdmin, false)}`;
   }
@@ -2548,7 +2564,7 @@ function renderRecibos() {
       ${esAdmin ? `<button class="seg ${sub === 'pagados-enviar' ? 'activo' : ''}" data-sub="pagados-enviar">Pagados por enviar${pagadosPorEnviar.length ? ` (${pagadosPorEnviar.length})` : ''}</button>` : ''}
     </div>
     ${barraMes}
-    <input id="fr-texto" type="search" placeholder="Buscar por alumno o concepto…" value="${e(S.filtros.textoRecibo)}">
+    <input id="fr-texto" type="search" placeholder="Buscar por alumno, concepto o referencia (R-00001)…" value="${e(S.filtros.textoRecibo)}">
     ${esAdmin ? `<select id="fr-prof">
       <option value="">Todos los profesores</option>
       ${profesoresActivos().map(p => `<option value="${p.id}" ${p.id === S.filtros.profesor ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
@@ -3300,8 +3316,10 @@ function totalTipoEnMeses(tipo, clavesMes) {
 // (por ejemplo, datos antiguos) para no esconder dinero que no encaje en la lista.
 function categoriasConExtras(tipo) {
   const fijas = tipo === 'gasto' ? CATEGORIAS_GASTO : CATEGORIAS_INGRESO;
+  const propias = S.finanzasCategorias.filter(c => c.tipo === tipo).map(c => c.categoria);
   const usadas = [...new Set(S.finanzas.filter(m => m.tipo === tipo).map(m => m.categoria))];
-  return [...fijas, ...usadas.filter(c => !fijas.includes(c))];
+  const extra = [...propias, ...usadas].filter((c, i, arr) => !fijas.includes(c) && arr.indexOf(c) === i);
+  return [...fijas, ...extra];
 }
 
 function fechaPorDefectoParaMes(claveMes) {
@@ -3462,6 +3480,7 @@ function renderFinanzas() {
       <button class="seg ${modo === 'mes' ? 'activo' : ''}" data-modo-fin="mes">Mes</button>
       <button class="seg ${modo === 'anual' ? 'activo' : ''}" data-modo-fin="anual">Año completo</button>
     </div>
+    <button class="btn liso" id="fin-anadir-categoria">+ Añadir columna</button>
     <span class="flex1"></span>
     ${barraNav}
   </div>
@@ -3487,6 +3506,7 @@ function renderFinanzas() {
 
   document.querySelectorAll('[data-tipo-fin]').forEach(b => b.onclick = () => { S.vistaFinanzas = b.dataset.tipoFin; renderFinanzas(); });
   document.querySelectorAll('[data-modo-fin]').forEach(b => b.onclick = () => { S.modoFinanzas = b.dataset.modoFin; renderFinanzas(); });
+  document.getElementById('fin-anadir-categoria').onclick = () => modalAnadirCategoriaFinanzas(tipo);
   document.querySelectorAll('.celda-fin[data-cat]').forEach(el => el.onclick = () =>
     modalCategoriaMovimientos(tipo, el.dataset.cat, el.dataset.mes));
 
@@ -3524,6 +3544,35 @@ function renderFinanzas() {
       renderFinanzas();
     };
   }
+}
+
+// Nueva columna (categoría) para Ingresos o Gastos, a mano — se guarda en
+// finanzas_categorias y se suma a las fijas de siempre en categoriasConExtras().
+function modalAnadirCategoriaFinanzas(tipo) {
+  abrirModal(`
+  <h2>Añadir columna — ${tipo === 'gasto' ? 'Gastos' : 'Ingresos'}</h2>
+  <p class="ayuda">Se añade como una categoría más, igual que las que ya hay, y aparecerá también en la vista de
+  curso completo.</p>
+  <label>Nombre de la categoría<input id="fc-nombre" placeholder="ej. Formación"></label>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+    <button class="btn primario" id="fc-guardar">Añadir</button>
+  </div>
+  <p id="m-msg" class="error"></p>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('fc-guardar').onclick = async () => {
+    const msg = document.getElementById('m-msg');
+    const nombre = document.getElementById('fc-nombre').value.trim();
+    if (!nombre) { msg.textContent = 'Escribe un nombre.'; return; }
+    const yaExiste = categoriasConExtras(tipo).some(c => c.toLowerCase() === nombre.toLowerCase());
+    if (yaExiste) { msg.textContent = 'Ya hay una categoría con ese nombre.'; return; }
+    const { error } = await S.sb.from('finanzas_categorias').insert({ tipo, categoria: nombre });
+    if (error) { msg.textContent = 'Error: ' + error.message; return; }
+    await cargarFinanzasCategorias();
+    cerrarModal();
+    renderFinanzas();
+    avisar('Columna añadida.');
+  };
 }
 
 // Movimientos de una categoría en un mes concreto: verlos, borrarlos, y añadir uno nuevo.
