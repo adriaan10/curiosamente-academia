@@ -734,11 +734,9 @@ function alumnosFiltrados() {
   const t = f.texto.toLowerCase();
   const esAdmin = S.profesor?.es_admin;
   return S.alumnos.filter(a =>
-    // Por defecto cada profesor ve solo los alumnos de sus asignaturas; con
-    // "Toda la academia" ve la base de datos común. Buscar por texto NO
-    // debe saltarse esta restricción: un profesor de inglés no debe poder
-    // encontrar un alumno que solo está en matemáticas escribiendo su nombre.
-    (esAdmin || f.verTodos || misMatriculas(a).length > 0) &&
+    // Por defecto cada profesor ve los alumnos de sus asignaturas; con
+    // "Toda la academia" (o buscando por texto) ve la base de datos común.
+    (esAdmin || f.verTodos || t || misMatriculas(a).length > 0) &&
     (!t || a.nombre.toLowerCase().includes(t) || (a.telefono || '').includes(t)) &&
     (!f.asignatura || (a.matriculas || []).some(m => String(m.asignatura_id) === f.asignatura)) &&
     (!f.estado || a.estado === f.estado) &&
