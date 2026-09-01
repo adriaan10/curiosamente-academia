@@ -24,6 +24,7 @@ const S = {
   profesorHorario: [],
   cambiosHorario: [],
   reactivaciones: [],
+  bajasAsignatura: [],
   finanzas: [],
   finanzasCategorias: [],
   vista: 'inicio',
@@ -106,7 +107,8 @@ async function cargarTodo() {
   else S.profAsig = profAsig.data || [];
   await Promise.all([
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
-    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarFinanzas(), cargarFinanzasCategorias()
+    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
+    cargarFinanzas(), cargarFinanzasCategorias()
   ]);
   backupAutomatico();
   window.api.getRecibosDir(); // crea la carpeta de recibos de este equipo si no existía aún
@@ -127,7 +129,7 @@ async function cargarTodo() {
 // instantáneo, así que no compensa la complejidad de ir más fino.
 const TABLAS_TIEMPO_REAL = [
   'alumnos', 'matriculas', 'clases', 'clase_horarios', 'clase_alumnos', 'clase_excepciones',
-  'recibos', 'notas', 'profesor_horario', 'cambios_horario', 'reactivaciones_alumno',
+  'recibos', 'notas', 'profesor_horario', 'cambios_horario', 'reactivaciones_alumno', 'bajas_asignatura',
   'finanzas_movimientos', 'finanzas_categorias', 'profesores', 'asignaturas', 'profesor_asignaturas'
 ];
 
@@ -169,7 +171,8 @@ async function recargarTrasCambioRemoto() {
     S.sb.from('asignaturas').select('*').order('id'),
     S.sb.from('profesor_asignaturas').select('*'),
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
-    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarFinanzas(), cargarFinanzasCategorias()
+    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
+    cargarFinanzas(), cargarFinanzasCategorias()
   ]);
   // Si alguna de estas tres falla (un hipo de red, el token de sesión
   // renovándose justo en ese momento…) no se pisa lo que ya había: hacerlo
@@ -226,6 +229,14 @@ async function cargarReactivaciones() {
     .order('fecha', { ascending: false });
   if (error) return avisar('Error cargando reactivaciones: ' + error.message, true);
   S.reactivaciones = data || [];
+}
+
+async function cargarBajasAsignatura() {
+  const { data, error } = await S.sb.from('bajas_asignatura')
+    .select('*, alumnos(nombre), profesores(nombre), asignaturas(nombre)')
+    .order('fecha', { ascending: false });
+  if (error) return avisar('Error cargando bajas de asignatura: ' + error.message, true);
+  S.bajasAsignatura = data || [];
 }
 
 // Solo el administrador ve/gestiona finanzas (RLS ya lo restringe también).
@@ -504,6 +515,7 @@ function renderInicio() {
   const modificacionesSinVer = esAdmin ? S.cambiosHorario.filter(c => !c.visto) : [];
   const altasFueraDeFecha = esAdmin ? recibosPendientesFueraDeFecha() : [];
   const reactivacionesSinVer = esAdmin ? S.reactivaciones.filter(r => !r.visto) : [];
+  const bajasAsignaturaSinVer = esAdmin ? S.bajasAsignatura.filter(b => !b.visto) : [];
   const pagadosPorEnviar = esAdmin
     ? S.recibos.filter(r => r.estado === 'pagado' && !r.fecha_envio_whatsapp_pago)
     : [];
@@ -542,7 +554,7 @@ function renderInicio() {
         <div class="pc-detalle">Tus pósits</div>
       </div>
     </div>
-    ${esAdmin && (fichasIncompletas.length || modificacionesSinVer.length || altasFueraDeFecha.length || reactivacionesSinVer.length || pagadosPorEnviar.length) ? `
+    ${esAdmin && (fichasIncompletas.length || modificacionesSinVer.length || altasFueraDeFecha.length || reactivacionesSinVer.length || bajasAsignaturaSinVer.length || pagadosPorEnviar.length) ? `
     <h3 class="seccion" style="margin-top:28px">Pendiente de revisar</h3>
     <div class="portada-cards">
       ${pagadosPorEnviar.length ? `
@@ -575,6 +587,12 @@ function renderInicio() {
         <div class="pc-titulo">alumno${reactivacionesSinVer.length === 1 ? '' : 's'} reactivado${reactivacionesSinVer.length === 1 ? '' : 's'}</div>
         <div class="pc-detalle">Un profesor ha reactivado a un alumno</div>
       </div>` : ''}
+      ${bajasAsignaturaSinVer.length ? `
+      <div class="portada-card alerta" id="pc-bajas-asignatura">
+        <div class="pc-num">${bajasAsignaturaSinVer.length}</div>
+        <div class="pc-titulo">baja${bajasAsignaturaSinVer.length === 1 ? '' : 's'} de asignatura</div>
+        <div class="pc-detalle">Un profesor ha dado de baja a un alumno de una asignatura: revisa el precio</div>
+      </div>` : ''}
     </div>` : ''}
   </div>`;
 
@@ -590,6 +608,8 @@ function renderInicio() {
   if (pcFuera) pcFuera.onclick = () => modalRecibosFueraDeFecha(altasFueraDeFecha);
   const pcReact = document.getElementById('pc-reactivaciones');
   if (pcReact) pcReact.onclick = () => modalReactivacionesSinVer(reactivacionesSinVer);
+  const pcBajasAsig = document.getElementById('pc-bajas-asignatura');
+  if (pcBajasAsig) pcBajasAsig.onclick = () => modalBajasAsignaturaSinVer(bajasAsignaturaSinVer);
   const pcPagados = document.getElementById('pc-pagados-enviar');
   if (pcPagados) pcPagados.onclick = () => {
     S.vista = 'recibos';
@@ -869,7 +889,7 @@ function modalAlumno(alumno) {
   <div class="pie-modal">
     ${alumno ? (a.estado === 'baja'
       ? '<button class="btn" id="a-reactivar">Reactivar y guardar cambios</button>'
-      : '<button class="btn liso peligro" id="a-baja">Dar de baja (de todo)</button>') : ''}
+      : '<button class="btn liso peligro" id="a-baja">Sistema de bajas</button>') : ''}
     <span class="flex1"></span>
     <button class="btn liso" id="m-cancelar">Cancelar</button>
     <button class="btn primario" id="m-guardar">Guardar</button>
@@ -925,15 +945,7 @@ function modalAlumno(alumno) {
 
   if (alumno) {
     const btnBaja = document.getElementById('a-baja');
-    if (btnBaja) btnBaja.onclick = async () => {
-      if (!confirm(`Vas a dar de baja a ${a.nombre} de TODO: todas las asignaturas y todas las clases. La ficha se conserva en el filtro "Bajas" por si vuelve. ¿Continuar?`)) return;
-      const { error } = await S.sb.rpc('dar_baja_alumno', { p_alumno: a.id });
-      if (error) return msg('Error: ' + error.message);
-      cerrarModal();
-      await Promise.all([cargarAlumnos(), cargarClases()]);
-      renderAlumnos();
-      avisar(`${a.nombre} dado de baja. Su ficha sigue en el filtro "Bajas".`);
-    };
+    if (btnBaja) btnBaja.onclick = () => modalSistemaBajas(alumno);
     const btnRe = document.getElementById('a-reactivar');
     if (btnRe) btnRe.onclick = () => guardarFicha('activo');
     document.querySelectorAll('[data-pdf-hist]').forEach(b => b.onclick = async () => {
@@ -1012,6 +1024,96 @@ function modalAlumno(alumno) {
 
   document.getElementById('m-cancelar').onclick = cerrarModal;
   document.getElementById('m-guardar').onclick = () => guardarFicha();
+}
+
+// Da de baja al alumno de TODO: todas las asignaturas y todas las clases,
+// pero conserva sus matrículas (por si vuelve, para no reintroducir precio
+// y horas de cero) y su ficha entera bajo el filtro "Bajas".
+async function confirmarBajaCompleta(alumno) {
+  if (!confirm(`Vas a dar de baja a ${alumno.nombre} de TODO: todas las asignaturas y todas las clases. La ficha se conserva en el filtro "Bajas" por si vuelve. ¿Continuar?`)) return;
+  const { error } = await S.sb.rpc('dar_baja_alumno', { p_alumno: alumno.id });
+  if (error) return avisar('Error: ' + error.message, true);
+  cerrarModal();
+  await Promise.all([cargarAlumnos(), cargarClases()]);
+  renderAlumnos();
+  avisar(`${alumno.nombre} dado de baja. Su ficha sigue en el filtro "Bajas".`);
+}
+
+// Da de baja al alumno de UNA sola asignatura: se borra esa matrícula (y sus
+// clases de esa asignatura), pero sigue activo en el resto — a diferencia de
+// la baja completa, aquí no tiene sentido conservar la matrícula porque no
+// es "todo el alumno" lo que pausa, solo esa asignatura concreta. El
+// histórico de recibos no depende de las matrículas, así que no se toca.
+async function confirmarBajaAsignatura(alumno, asignaturaId, nombreAsignatura) {
+  if (!confirm(`¿Dar de baja a ${alumno.nombre} de ${nombreAsignatura}? Dejará de salir en esa asignatura; su historial de recibos se conserva igual.`)) return;
+  const { error } = await S.sb.rpc('dar_baja_asignatura', { p_alumno: alumno.id, p_asignatura: asignaturaId });
+  if (error) { avisar('Error: ' + error.message, true); return; }
+  // Si lo hace un profesor (no la admin), se avisa a la admin para que
+  // revise el precio de la ficha (puede que ya no le corresponda el
+  // descuento por varias asignaturas).
+  if (!S.profesor?.es_admin) {
+    await S.sb.from('bajas_asignatura').insert({
+      alumno_id: alumno.id, asignatura_id: asignaturaId, profesor_id: S.profesor.id
+    });
+  }
+  cerrarModal();
+  await Promise.all([cargarAlumnos(), cargarClases(), cargarBajasAsignatura()]);
+  renderAlumnos();
+  avisar(`${alumno.nombre} dado de baja de ${nombreAsignatura}.`);
+}
+
+// Si el profesor que da de baja tiene más de una asignatura propia con este
+// alumno, deja elegir cuál; si solo tiene una, va directo sin preguntar.
+function modalElegirAsignaturaBaja(alumno, matriculasPropias) {
+  if (matriculasPropias.length === 1) {
+    const m = matriculasPropias[0];
+    return confirmarBajaAsignatura(alumno, m.asignatura_id, m.asignaturas?.nombre || '');
+  }
+  abrirModal(`
+  <h2>¿De qué asignatura? — ${e(alumno.nombre)}</h2>
+  <ul class="detalle-alumnos">
+    ${matriculasPropias.map(m => `<li>
+      <button class="btn chico peligro" data-baja-asig="${m.asignatura_id}">Dar de baja</button>
+      &nbsp;${e(m.asignaturas?.nombre || '')}
+    </li>`).join('')}
+  </ul>
+  <div class="pie-modal"><button class="btn liso" id="m-cancelar">Cancelar</button></div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.querySelectorAll('[data-baja-asig]').forEach(b => b.onclick = () => {
+    const asignaturaId = Number(b.dataset.bajaAsig);
+    const m = matriculasPropias.find(x => x.asignatura_id === asignaturaId);
+    confirmarBajaAsignatura(alumno, asignaturaId, m?.asignaturas?.nombre || '');
+  });
+}
+
+// Punto de entrada del botón "Sistema de bajas": si el alumno solo tiene una
+// asignatura en total, es una baja completa directa (no hay nada que
+// "separar"). Si tiene varias, deja elegir entre dar de baja solo una de las
+// tuyas o la baja completa — la baja completa solo se ofrece si todas las
+// asignaturas del alumno son tuyas (o eres admin): no tiene sentido que un
+// profesor pueda desapuntar de golpe una asignatura que no es la suya.
+function modalSistemaBajas(alumno) {
+  const esAdmin = S.profesor?.es_admin;
+  const todasMats = alumno.matriculas || [];
+  const misMats = misMatriculas(alumno);
+
+  if (todasMats.length <= 1) return confirmarBajaCompleta(alumno);
+
+  const puedeBajaCompleta = esAdmin || misMats.length === todasMats.length;
+  abrirModal(`
+  <h2>Sistema de bajas — ${e(alumno.nombre)}</h2>
+  <p class="ayuda">Este alumno está apuntado a ${todasMats.length} asignaturas.</p>
+  <div class="pie-modal columna">
+    ${misMats.length ? '<button class="btn liso" id="sb-una">Dar de baja de una asignatura</button>' : ''}
+    ${puedeBajaCompleta ? '<button class="btn liso peligro" id="sb-completa">Dar de baja completa (de todo)</button>' : ''}
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+  </div>
+  ${!puedeBajaCompleta ? '<p class="ayuda">También está en asignaturas de otro profesor, así que solo puedes darle de baja de las tuyas.</p>' : ''}`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  const btnUna = document.getElementById('sb-una');
+  if (btnUna) btnUna.onclick = () => modalElegirAsignaturaBaja(alumno, misMats);
+  const btnCompleta = document.getElementById('sb-completa');
+  if (btnCompleta) btnCompleta.onclick = () => confirmarBajaCompleta(alumno);
 }
 
 function errorAlumno(error) {
@@ -1181,6 +1283,48 @@ function modalReactivacionesSinVer(lista) {
     await cargarReactivaciones();
     cerrarModal();
     modalAlumno(S.alumnos.find(a => a.id === b.dataset.alumnoReactivacion));
+  });
+}
+
+// Alumnos que un profesor (no la admin) ha dado de baja de UNA asignatura:
+// la admin puede entrar a revisar el precio (puede que ya no le corresponda
+// el descuento por varias asignaturas) o simplemente marcarlo como visto.
+function modalBajasAsignaturaSinVer(lista) {
+  abrirModal(`
+  <h2>Bajas de asignatura sin revisar</h2>
+  <ul class="detalle-alumnos" style="columns:1">
+    ${lista.map(b => `<li>
+      <strong>${e(b.alumnos?.nombre || '')}</strong> — baja de ${e(b.asignaturas?.nombre || '')}
+      <br><small>${e(b.profesores?.nombre || '')} · ${fmtFecha(String(b.fecha).slice(0, 10))}</small>
+      <br>
+      <button class="btn chico" data-editar-baja-asig="${b.id}" data-alumno-baja-asig="${b.alumno_id}">Editar ficha</button>
+      <button class="btn chico liso" data-visto-baja-asig="${b.id}">✓ Visto</button>
+    </li>`).join('')}
+  </ul>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cerrar sin marcar</button>
+    <button class="btn primario" id="ba-marcar-vistas">Marcar todas como vistas</button>
+  </div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('ba-marcar-vistas').onclick = async () => {
+    await S.sb.from('bajas_asignatura').update({ visto: true }).in('id', lista.map(b => b.id));
+    await cargarBajasAsignatura();
+    cerrarModal();
+    if (S.vista === 'inicio') renderInicio();
+    avisar('Bajas de asignatura marcadas como vistas.');
+  };
+  document.querySelectorAll('[data-visto-baja-asig]').forEach(b => b.onclick = async () => {
+    await S.sb.from('bajas_asignatura').update({ visto: true }).eq('id', b.dataset.vistoBajaAsig);
+    await cargarBajasAsignatura();
+    cerrarModal();
+    if (S.vista === 'inicio') renderInicio();
+    avisar('Marcado como visto.');
+  });
+  document.querySelectorAll('[data-editar-baja-asig]').forEach(b => b.onclick = async () => {
+    await S.sb.from('bajas_asignatura').update({ visto: true }).eq('id', b.dataset.editarBajaAsig);
+    await cargarBajasAsignatura();
+    cerrarModal();
+    modalAlumno(S.alumnos.find(a => a.id === b.dataset.alumnoBajaAsig));
   });
 }
 

@@ -910,3 +910,52 @@ create policy "finanzas_categorias_admin" on public.finanzas_categorias
   using (public.is_admin()) with check (public.is_admin());
 
 alter publication supabase_realtime add table public.finanzas_categorias;
+
+-- ============================================================
+-- Sistema de bajas por asignatura (v1.6.0)
+-- ============================================================
+
+-- Baja de UNA asignatura (a diferencia de dar_baja_alumno, que es de todo):
+-- borra esa matrícula y sus clases de esa asignatura, sin tocar el resto.
+-- No conserva la matrícula (a diferencia de la baja completa) porque aquí sí
+-- tiene sentido que "ya no está apuntado a eso" de verdad, no una pausa.
+-- Al borrar la matrícula, calcular_descuentos_alumno() deja de contarla
+-- automáticamente para el descuento por varias asignaturas — no hace falta
+-- tocar esa función.
+create or replace function public.dar_baja_asignatura(p_alumno uuid, p_asignatura integer)
+returns void
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+  delete from public.clase_alumnos ca
+    using public.clases c
+    where ca.clase_id = c.id and ca.alumno_id = p_alumno and c.asignatura_id = p_asignatura;
+  delete from public.matriculas where alumno_id = p_alumno and asignatura_id = p_asignatura;
+end;
+$$;
+
+grant execute on function public.dar_baja_asignatura(uuid, integer) to authenticated;
+
+-- Aviso al admin cuando un profesor (no la admin) da de baja a un alumno de
+-- una sola asignatura: puede que ya no le corresponda el descuento por
+-- varias asignaturas y convenga repasar el precio de la ficha.
+create table public.bajas_asignatura (
+  id uuid primary key default gen_random_uuid(),
+  alumno_id uuid not null references public.alumnos(id) on delete cascade,
+  asignatura_id integer not null references public.asignaturas(id),
+  profesor_id uuid not null references public.profesores(id),
+  fecha timestamptz not null default now(),
+  visto boolean not null default false
+);
+
+alter table public.bajas_asignatura enable row level security;
+
+create policy "bajas_asignatura_select" on public.bajas_asignatura
+  for select to authenticated using (true);
+create policy "bajas_asignatura_insert" on public.bajas_asignatura
+  for insert to authenticated with check (profesor_id = auth.uid() or public.is_admin());
+create policy "bajas_asignatura_update" on public.bajas_asignatura
+  for update to authenticated using (public.is_admin()) with check (public.is_admin());
+
+alter publication supabase_realtime add table public.bajas_asignatura;
