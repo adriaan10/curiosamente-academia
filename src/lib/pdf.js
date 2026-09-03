@@ -33,12 +33,19 @@ function dibujarLapiz(page, x, y, escala = 1) {
  *  - totalCifra: string (ej. "210")
  *  - referencia: string interna opcional (no visible salvo pie discreto)
  *  - logoPngBase64: base64 del logo real (opcional)
+ *  - desglose: string[] opcional — recibo conjunto de hermanos: una línea ya
+ *    formada por quien llama (ej. "Ana — Inglés Septiembre — 60€") por cada
+ *    hermano, sustituyendo la línea única de "Concepto:". `totalCifra` sigue
+ *    siendo la suma de todos, calculada por quien llama.
  * @returns {Uint8Array} bytes del PDF
  */
 export async function generarReciboPdf(datos) {
   const doc = await PDFDocument.create();
-  // A5 apaisado: formato compacto de "recibí"
-  const page = doc.addPage([595, 420]);
+  const desglose = datos.desglose && datos.desglose.length ? datos.desglose : null;
+  // A5 apaisado: formato compacto de "recibí". Con desglose (hermanos) se
+  // alarga la página para que quepan las líneas de más sin recortarse.
+  const extraAlto = desglose ? Math.max(0, desglose.length - 1) * 20 : 0;
+  const page = doc.addPage([595, 420 + extraAlto]);
   const helv = await doc.embedFont(StandardFonts.Helvetica);
   const helvBold = await doc.embedFont(StandardFonts.HelveticaBold);
   const { width, height } = page.getSize();
@@ -73,9 +80,9 @@ export async function generarReciboPdf(datos) {
   const campos = [
     ['Fecha de Emisión:', datos.fechaEmision],
     ['Recibí de:', datos.recibiDe],
-    ['La cantidad de:', `${datos.cantidadLetras}€`],
-    ['Concepto:', datos.concepto]
+    ['La cantidad de:', `${datos.cantidadLetras}€`]
   ];
+  if (!desglose) campos.push(['Concepto:', datos.concepto]);
 
   cursorY -= 42;
   const xEtiqueta = margen;
@@ -89,6 +96,21 @@ export async function generarReciboPdf(datos) {
       thickness: 0.5, color: rgb(0.75, 0.75, 0.75), dashArray: [1.5, 2.5]
     });
     cursorY -= 38;
+  }
+
+  // ---- Desglose (recibo conjunto de hermanos): sustituye a "Concepto:" ----
+  if (desglose) {
+    page.drawText('Concepto:', { x: xEtiqueta, y: cursorY, size: 12, font: helvBold, color: NEGRO });
+    let yLinea = cursorY;
+    for (const linea of desglose) {
+      page.drawText(linea, { x: xValor, y: yLinea, size: 10.5, font: helv, color: NEGRO });
+      yLinea -= 20;
+    }
+    page.drawLine({
+      start: { x: xValor - 4, y: yLinea + 12 }, end: { x: width - margen, y: yLinea + 12 },
+      thickness: 0.5, color: rgb(0.75, 0.75, 0.75), dashArray: [1.5, 2.5]
+    });
+    cursorY = yLinea - 12;
   }
 
   // ---- Total destacado ----

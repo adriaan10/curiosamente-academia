@@ -958,4 +958,139 @@ create policy "bajas_asignatura_insert" on public.bajas_asignatura
 create policy "bajas_asignatura_update" on public.bajas_asignatura
   for update to authenticated using (public.is_admin()) with check (public.is_admin());
 
+-- Recibos de hermanos juntos + reparto por padres separados (03/09/2026).
+--
+-- Bug arreglado de paso: este trigger llevaba tiempo bloqueando en la base
+-- de datos que un profesor no-admin marcara un recibo como pagado, aunque
+-- la interfaz ya le enseñaba el botón "✓ Pagado" a todo el mundo desde hace
+-- sesiones — como el código no comprobaba el error del UPDATE, el profesor
+-- veía "Marcado como pagado" sin que se hubiera guardado nada. La RLS de
+-- recibos ya permite a un profesor tocar los recibos de sus propios
+-- alumnos, así que este trigger ya era una restricción de más.
+drop trigger if exists recibos_pago_solo_admin on public.recibos;
+drop function if exists public.restringir_pago_a_admin();
+
+-- Padres separados: reparto del pago entre dos progenitores con teléfonos
+-- distintos. madre_porcentaje siempre entre 0 y 100 (excluidos): el del
+-- padre se deriva como 100 - madre_porcentaje, nunca se guarda aparte.
+alter table public.alumnos
+  add column padres_separados boolean not null default false,
+  add column madre_nombre text,
+  add column madre_telefono text,
+  add column padre_nombre text,
+  add column padre_telefono text,
+  add column madre_porcentaje numeric not null default 50
+    check (madre_porcentaje > 0 and madre_porcentaje < 100);
+
+-- Discrimina, cuando el alumno tiene padres separados, a cuál de los dos
+-- corresponde cada recibo (null en el caso normal, sin padres separados).
+alter table public.recibos
+  add column progenitor text check (progenitor in ('madre','padre'));
+
+-- El disparador antiduplicados (check_recibo_duplicado, ya existía en la
+-- base de datos en producción desde antes de este log — nunca se había
+-- registrado aquí) prohibía cualquier segundo recibo del mismo alumno que
+-- se solapara en período. Se reescribe para permitir hasta 2 SOLO cuando el
+-- alumno tiene padres_separados = true (uno por progenitor); para el resto
+-- de alumnos el límite sigue siendo 1, exactamente como hasta ahora.
+create or replace function public.check_recibo_duplicado()
+returns trigger
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+  v_permitidos integer;
+  v_existentes integer;
+begin
+  if new.periodos is not null then
+    select case when padres_separados then 2 else 1 end into v_permitidos
+    from public.alumnos where id = new.alumno_id;
+
+    select count(*) into v_existentes
+    from public.recibos r
+    where r.alumno_id = new.alumno_id
+      and r.id <> new.id
+      and r.periodos && new.periodos;
+
+    if v_existentes >= coalesce(v_permitidos, 1) then
+      raise exception 'Este alumno ya tiene % recibo(s) de ese mes', v_existentes;
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+-- generar_recibos_mensuales(): misma rama de padres separados que el
+-- generador manual/en lote del cliente (crearRecibos() en app.js) — si el
+-- alumno tiene padres_separados, se insertan 2 filas repartidas en vez de 1.
+-- El resto de la función (receso jul/ago/sep, cálculo de descuentos) no cambia.
+create or replace function public.generar_recibos_mensuales()
+returns integer
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+  v_periodo text := to_char(now(), 'YYYY-MM');
+  v_mes text := (array['Enero','Febrero','Marzo','Abril','Mayo','Junio',
+    'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'])[extract(month from now())::int];
+  v_admin uuid;
+  v_creados integer := 0;
+  fila record;
+  v_desc record;
+  v_madre_importe numeric;
+  v_padre_importe numeric;
+begin
+  if extract(month from now())::int in (7, 8, 9) then
+    return 0;
+  end if;
+
+  select id into v_admin from public.profesores
+  where es_admin and estado = 'activo' order by created_at limit 1;
+  if v_admin is null then
+    raise exception 'No hay administrador activo';
+  end if;
+
+  for fila in
+    select a.id as alumno_id, a.padres_separados, a.madre_porcentaje
+    from public.alumnos a
+    where a.estado = 'activo'
+      and exists (select 1 from public.matriculas m where m.alumno_id = a.id and m.tipo_tarifa = 'mes' and m.tarifa is not null)
+  loop
+    select * into v_desc from public.calcular_descuentos_alumno(fila.alumno_id);
+    if v_desc.total is null or v_desc.total <= 0 then continue; end if;
+
+    begin
+      if fila.padres_separados then
+        v_madre_importe := round(v_desc.total * fila.madre_porcentaje / 100, 2);
+        v_padre_importe := round(v_desc.total - v_madre_importe, 2);
+        insert into public.recibos (alumno_id, profesor_id, fecha_emision, concepto,
+          importe, importe_letras, estado, periodos, progenitor)
+        values (fila.alumno_id, v_admin, current_date, v_mes || ' (Madre · ' || fila.madre_porcentaje || '%)',
+          v_madre_importe, '', 'pendiente', array[v_periodo], 'madre');
+        insert into public.recibos (alumno_id, profesor_id, fecha_emision, concepto,
+          importe, importe_letras, estado, periodos, progenitor)
+        values (fila.alumno_id, v_admin, current_date, v_mes || ' (Padre · ' || (100 - fila.madre_porcentaje) || '%)',
+          v_padre_importe, '', 'pendiente', array[v_periodo], 'padre');
+        v_creados := v_creados + 2;
+      else
+        insert into public.recibos (alumno_id, profesor_id, fecha_emision, concepto,
+          importe, importe_letras, estado, periodos)
+        values (fila.alumno_id, v_admin, current_date, v_mes,
+          v_desc.total, '', 'pendiente', array[v_periodo]);
+        v_creados := v_creados + 1;
+      end if;
+    exception when others then
+      null;
+    end;
+  end loop;
+  return v_creados;
+end;
+$$;
+
+-- Hermanos: NO se enlazan en la base de datos (nada de una columna
+-- hermano_id). Se detectan al vuelo con recibosHermanosDe() en app.js,
+-- mismo criterio (apellidos normalizados) que ya usa tieneHermano() para el
+-- descuento — funciona igual con 2 hermanos que con 3 (o más), sin
+-- depender de que se hayan generado a la vez ni de quién los generó.
+
 alter publication supabase_realtime add table public.bajas_asignatura;

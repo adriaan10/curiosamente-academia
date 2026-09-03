@@ -56,6 +56,38 @@ const ruta = new URL('./salida/recibo_muestra.pdf', import.meta.url);
 fs.writeFileSync(ruta, bytes);
 console.log(`OK  PDF de muestra generado (${bytes.length} bytes): ${ruta.pathname}`);
 
+// ---- PDF de recibo conjunto de hermanos (desglose) ----
+const bytesHermanos = await generarReciboPdf({
+  fechaEmision: '01/09/2026',
+  recibiDe: 'Familia Navarro Díaz',
+  cantidadLetras: importeALetras(175),
+  totalCifra: '175',
+  referencia: 'R-00010 / R-00011 / R-00012',
+  logoPngBase64: null,
+  desglose: [
+    'Ana Navarro Díaz — Septiembre — 60€',
+    'Pedro Navarro Díaz — Septiembre — 60€',
+    'Sara Navarro Díaz — Septiembre — 55€'
+  ]
+});
+const rutaHermanos = new URL('./salida/recibo_hermanos_muestra.pdf', import.meta.url);
+fs.writeFileSync(rutaHermanos, bytesHermanos);
+console.log(`OK  PDF de hermanos generado (${bytesHermanos.length} bytes, 3 líneas de desglose): ${rutaHermanos.pathname}`);
+
+// ---- Reparto padres separados: la suma de las dos partes cuadra siempre,
+// sin descuadre de redondeo, para totales "feos" que no dividen exacto ----
+function repartoMadrePadre(total, pctMadre) {
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const madre = round2(total * pctMadre / 100);
+  const padre = round2(total - madre);
+  return { madre, padre };
+}
+for (const [total, pct] of [[61, 33], [100, 50], [73.5, 40], [1, 99], [149.99, 67]]) {
+  const { madre, padre } = repartoMadrePadre(total, pct);
+  const suma = Math.round((madre + padre) * 100) / 100;
+  esperar(String(suma), String(total), `reparto ${total}€ a ${pct}% cuadra`);
+}
+
 if (fallos) {
   console.error(`\n${fallos} test(s) fallidos`);
   process.exit(1);

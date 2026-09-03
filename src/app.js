@@ -302,7 +302,7 @@ async function cargarAlumnos() {
 
 async function cargarRecibos() {
   const { data, error } = await S.sb.from('recibos')
-    .select('*, alumnos(nombre, telefono, tutor_telefono, tutor_nombre, facturacion_nombre), profesores(nombre)')
+    .select('*, alumnos(nombre, telefono, tutor_telefono, tutor_nombre, facturacion_nombre, madre_nombre, madre_telefono, padre_nombre, padre_telefono), profesores(nombre)')
     .order('created_at', { ascending: false });
   if (error) return avisar('Error cargando recibos: ' + error.message, true);
   S.recibos = data || [];
@@ -862,6 +862,28 @@ function modalAlumno(alumno) {
     <label>Descuento especial (€/mes)${esAdmin ? '' : ' <small>(solo admin)</small>'}
       <input id="a-descuento" type="number" min="0" step="0.01" value="${a.descuento_extra || ''}" placeholder="0" ${esAdmin ? '' : 'disabled'}></label>
   </div>
+  <label class="check-inline" style="margin-top:10px">
+    <input type="checkbox" id="a-padres-sep" ${a.padres_separados ? 'checked' : ''}>
+    Padres separados — repartir el recibo entre los dos, cada uno a su teléfono
+  </label>
+  <div id="a-padres-sep-bloque" style="${a.padres_separados ? '' : 'display:none'}; margin-top:8px">
+    <div class="grid2">
+      <label>Nombre de la madre<input id="a-madre-nombre" value="${e(a.madre_nombre || '')}"></label>
+      <label>Teléfono de la madre<input id="a-madre-tel" value="${e(a.madre_telefono || '')}" inputmode="numeric" maxlength="9" placeholder="9 dígitos"></label>
+      <label>Nombre del padre<input id="a-padre-nombre" value="${e(a.padre_nombre || '')}"></label>
+      <label>Teléfono del padre<input id="a-padre-tel" value="${e(a.padre_telefono || '')}" inputmode="numeric" maxlength="9" placeholder="9 dígitos"></label>
+    </div>
+    <label class="check-inline">
+      <input type="radio" name="a-reparto" id="a-reparto-igual" ${Number(a.madre_porcentaje ?? 50) === 50 ? 'checked' : ''}> 50% / 50%
+    </label>
+    <label class="check-inline">
+      <input type="radio" name="a-reparto" id="a-reparto-custom" ${Number(a.madre_porcentaje ?? 50) !== 50 ? 'checked' : ''}> Personalizado
+    </label>
+    <div class="grid2" id="a-reparto-custom-bloque" style="${Number(a.madre_porcentaje ?? 50) !== 50 ? '' : 'display:none'}">
+      <label>% que paga la madre<input id="a-madre-pct" type="number" min="1" max="99" value="${a.madre_porcentaje ?? 50}"></label>
+      <label>% que paga el padre (automático)<input id="a-padre-pct" type="number" disabled value="${100 - Number(a.madre_porcentaje ?? 50)}"></label>
+    </div>
+  </div>
   <h3 class="seccion">Asignaturas apuntadas</h3>
   ${soloLectura.length ? `<div class="detalle-horarios">
     ${soloLectura.map(m => chipAsignatura(m, ' <small>(otro profesor)</small>')).join('')}
@@ -921,6 +943,22 @@ function modalAlumno(alumno) {
   document.getElementById('a-tel').oninput = (ev) => {
     ev.target.value = ev.target.value.replace(/\D/g, '').slice(0, 9);
   };
+  document.getElementById('a-madre-tel').oninput = (ev) => {
+    ev.target.value = ev.target.value.replace(/\D/g, '').slice(0, 9);
+  };
+  document.getElementById('a-padre-tel').oninput = (ev) => {
+    ev.target.value = ev.target.value.replace(/\D/g, '').slice(0, 9);
+  };
+  document.getElementById('a-padres-sep').onchange = (ev) => {
+    document.getElementById('a-padres-sep-bloque').style.display = ev.target.checked ? '' : 'none';
+  };
+  const $repartoCustomBloque = document.getElementById('a-reparto-custom-bloque');
+  document.getElementById('a-reparto-igual').onchange = () => { $repartoCustomBloque.style.display = 'none'; };
+  document.getElementById('a-reparto-custom').onchange = () => { $repartoCustomBloque.style.display = ''; };
+  document.getElementById('a-madre-pct').oninput = (ev) => {
+    const pct = Math.min(99, Math.max(1, Number(ev.target.value) || 0));
+    document.getElementById('a-padre-pct').value = 100 - pct;
+  };
 
   // Resumen de descuentos ya aplicados (solo tiene sentido con datos guardados).
   if (alumno) {
@@ -979,9 +1017,33 @@ function modalAlumno(alumno) {
       notas: v('a-notas') || null,
       descuento_extra: esAdmin ? (Number(v('a-descuento')) || 0) : undefined
     };
+    // Padres separados: si se desmarca, se limpian los datos del reparto (no
+    // dejar configuración vieja colgando de una familia que ya no la usa).
+    const padresSeparados = document.getElementById('a-padres-sep').checked;
+    fila.padres_separados = padresSeparados;
+    if (padresSeparados) {
+      fila.madre_nombre = v('a-madre-nombre') || null;
+      fila.madre_telefono = v('a-madre-tel') || null;
+      fila.padre_nombre = v('a-padre-nombre') || null;
+      fila.padre_telefono = v('a-padre-tel') || null;
+      const repartoCustom = document.getElementById('a-reparto-custom').checked;
+      fila.madre_porcentaje = repartoCustom ? Number(v('a-madre-pct')) || 50 : 50;
+    } else {
+      fila.madre_nombre = null;
+      fila.madre_telefono = null;
+      fila.padre_nombre = null;
+      fila.padre_telefono = null;
+      fila.madre_porcentaje = 50;
+    }
     if (estadoNuevo) fila.estado = estadoNuevo;
     if (!esAdmin) delete fila.descuento_extra; // el profesor no lo toca, no se envía
     if (!nombreSolo) return msg('El nombre es obligatorio.');
+    if (padresSeparados && (!fila.madre_telefono || !fila.padre_telefono)) {
+      return msg('Si los padres están separados, hacen falta los dos teléfonos.');
+    }
+    if (padresSeparados && (fila.madre_porcentaje <= 0 || fila.madre_porcentaje >= 100)) {
+      return msg('El % de la madre tiene que estar entre 1 y 99.');
+    }
     if (ms.some(m => !m.asignatura_id)) return msg('Elige la asignatura en cada fila.');
     if (esAdmin && ms.some(m => m.tarifa !== '' && m.tarifa != null && Number(m.tarifa) <= 0)) {
       return msg('Si pones un precio, tiene que ser mayor que 0.');
@@ -2248,7 +2310,7 @@ function modalRecibo(alumno) {
     const btn = document.getElementById('r-generar');
     btn.disabled = true; btn.textContent = 'Generando…';
     try {
-      const recibo = await crearRecibo(alumno, {
+      const recibos = await crearRecibos(alumno, {
         concepto, importe,
         recibiDe: document.getElementById('r-recibide').value.trim() || alumno.nombre,
         fechaEmision: document.getElementById('r-fecha').value.trim() || hoyDDMMAAAA(),
@@ -2257,7 +2319,7 @@ function modalRecibo(alumno) {
       });
       cerrarModal();
       await cargarRecibos();
-      modalReciboListo(recibo);
+      modalReciboListo(recibos);
     } catch (err) {
       btn.disabled = false; btn.textContent = 'Generar recibo PDF';
       document.getElementById('m-msg').textContent = 'Error: ' + err.message;
@@ -2266,7 +2328,9 @@ function modalRecibo(alumno) {
 }
 
 // Crea el recibo: fila en BD + PDF en disco. Devuelve la fila con datos del alumno.
-async function crearRecibo(alumno, { concepto, importe, recibiDe, fechaEmision, periodos, importeMatricula }) {
+// `progenitor` ('madre'|'padre'|null) solo se usa con alumnos de padres
+// separados — ver crearRecibos(), que es quien decide si hace 1 o 2.
+async function crearRecibo(alumno, { concepto, importe, recibiDe, fechaEmision, periodos, importeMatricula }, progenitor = null) {
   const letras = importeALetras(importe);
   // La fecha del PDF (DD/MM/AAAA, editable) y la de la BD deben coincidir.
   const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(fechaEmision || '');
@@ -2281,7 +2345,8 @@ async function crearRecibo(alumno, { concepto, importe, recibiDe, fechaEmision, 
     estado: 'pendiente',
     periodos: periodos && periodos.length ? periodos : null,
     incluye_matricula: Boolean(importeMatricula),
-    importe_matricula: importeMatricula || 0
+    importe_matricula: importeMatricula || 0,
+    progenitor
   }).select('*').single();
   if (error) throw new Error(error.message);
 
@@ -2300,29 +2365,79 @@ async function crearRecibo(alumno, { concepto, importe, recibiDe, fechaEmision, 
   return { ...fila, pdf_path: pdfPath, alumnos: alumno };
 }
 
-function modalReciboListo(recibo) {
-  const tel = recibo.alumnos?.telefono || recibo.alumnos?.tutor_telefono;
+// Decide si al alumno le corresponde 1 recibo normal o 2 (uno por
+// progenitor, con su % de la mensualidad y de la matrícula) cuando tiene
+// padres separados. El importe del padre es el RESTO del de la madre (no
+// se redondean los dos por separado) para que la suma cuadre siempre con
+// el total exacto, sin descuadres de un céntimo.
+async function crearRecibos(alumno, opts) {
+  if (!alumno.padres_separados) return [await crearRecibo(alumno, opts)];
+  const pctMadre = Number(alumno.madre_porcentaje) || 50;
+  const pctPadre = 100 - pctMadre;
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const importeMadre = round2(opts.importe * pctMadre / 100);
+  const importePadre = round2(opts.importe - importeMadre);
+  const importeMatriculaMadre = opts.importeMatricula ? round2(opts.importeMatricula * pctMadre / 100) : 0;
+  const importeMatriculaPadre = opts.importeMatricula ? round2(opts.importeMatricula - importeMatriculaMadre) : 0;
+  const madre = await crearRecibo(alumno, {
+    ...opts, importe: importeMadre, importeMatricula: importeMatriculaMadre,
+    recibiDe: alumno.madre_nombre || opts.recibiDe,
+    concepto: `${opts.concepto} (Madre · ${pctMadre}%)`
+  }, 'madre');
+  const padre = await crearRecibo(alumno, {
+    ...opts, importe: importePadre, importeMatricula: importeMatriculaPadre,
+    recibiDe: alumno.padre_nombre || opts.recibiDe,
+    concepto: `${opts.concepto} (Padre · ${pctPadre}%)`
+  }, 'padre');
+  return [madre, padre];
+}
+
+// Teléfono/nombre a usar para un recibo concreto: si es de un progenitor
+// (padres separados), el suyo; si no, la cadena de siempre.
+function telefonoDeRecibo(recibo) {
+  const a = recibo.alumnos || {};
+  if (recibo.progenitor === 'madre') return a.madre_telefono;
+  if (recibo.progenitor === 'padre') return a.padre_telefono;
+  return a.telefono || a.tutor_telefono;
+}
+function destinatarioDeRecibo(recibo) {
+  const a = recibo.alumnos || {};
+  if (recibo.progenitor === 'madre') return a.madre_nombre || a.tutor_nombre || a.nombre || '';
+  if (recibo.progenitor === 'padre') return a.padre_nombre || a.tutor_nombre || a.nombre || '';
+  return a.facturacion_nombre || a.tutor_nombre || a.nombre || '';
+}
+
+function modalReciboListo(recibos) {
+  const lista = Array.isArray(recibos) ? recibos : [recibos];
   abrirModal(`
-  <h2>Recibo generado ✓</h2>
-  <p>${e(recibo.alumnos?.nombre || '')} — ${e(recibo.concepto)} — <strong>${formatoImporte(recibo.importe)}€</strong></p>
-  <p class="ayuda">PDF guardado como <code>${e(recibo.pdf_path)}</code></p>
-  <div class="pie-modal columna">
-    <button class="btn" id="rl-abrir">Ver PDF</button>
-    <button class="btn" id="rl-carpeta">Mostrar en carpeta</button>
-    <button class="btn primario" id="rl-wa" ${tel ? '' : 'disabled title="El alumno no tiene teléfono registrado"'}>Enviar por WhatsApp</button>
+  <h2>Recibo${lista.length > 1 ? 's' : ''} generado${lista.length > 1 ? 's' : ''} ✓</h2>
+  ${lista.map((recibo, i) => {
+    const tel = telefonoDeRecibo(recibo);
+    return `
+    <p>${recibo.progenitor ? `<strong>${recibo.progenitor === 'madre' ? 'Madre' : 'Padre'}:</strong> ` : ''}${e(recibo.alumnos?.nombre || '')} — ${e(recibo.concepto)} — <strong>${formatoImporte(recibo.importe)}€</strong></p>
+    <p class="ayuda">PDF guardado como <code>${e(recibo.pdf_path)}</code></p>
+    <div class="pie-modal columna">
+      <button class="btn" data-rl-abrir="${i}">Ver PDF</button>
+      <button class="btn" data-rl-carpeta="${i}">Mostrar en carpeta</button>
+      <button class="btn primario" data-rl-wa="${i}" ${tel ? '' : 'disabled title="No hay teléfono registrado"'}>Enviar por WhatsApp</button>
+    </div>`;
+  }).join('<hr>')}
+  <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cerrar</button>
   </div>
   <p class="ayuda">Al pulsar “Enviar por WhatsApp” se abre el chat con el mensaje escrito y la carpeta
   del PDF: arrastra el archivo al chat y envíalo.</p>`);
   document.getElementById('m-cancelar').onclick = () => { cerrarModal(); if (S.vista === 'recibos') renderRecibos(); };
-  document.getElementById('rl-abrir').onclick = () => window.api.openPdf(recibo.pdf_path);
-  document.getElementById('rl-carpeta').onclick = () => window.api.revealPdf(recibo.pdf_path);
-  const wa = document.getElementById('rl-wa');
-  if (tel) wa.onclick = () => enviarWhatsApp(recibo);
+  lista.forEach((recibo, i) => {
+    document.querySelector(`[data-rl-abrir="${i}"]`).onclick = () => window.api.openPdf(recibo.pdf_path);
+    document.querySelector(`[data-rl-carpeta="${i}"]`).onclick = () => window.api.revealPdf(recibo.pdf_path);
+    const wa = document.querySelector(`[data-rl-wa="${i}"]`);
+    if (telefonoDeRecibo(recibo)) wa.onclick = () => enviarWhatsApp(recibo);
+  });
 }
 
 async function enviarWhatsApp(recibo) {
-  const tel = recibo.alumnos?.telefono || recibo.alumnos?.tutor_telefono;
+  const tel = telefonoDeRecibo(recibo);
   const msg = `Hola, te adjunto el recibo de la Academia Curiosamente.\nConcepto: ${recibo.concepto}\nTotal: ${formatoImporte(recibo.importe)}€\n¡Gracias!`;
   const telWa = telefonoWa(tel);
   if (!telWa) return avisar('Teléfono no válido para WhatsApp.', true);
@@ -2356,12 +2471,16 @@ function bytesABase64(bytes) {
 // Envía un recibo (o el justificante de pago) con el PDF ya adjunto.
 // Devuelve { ok, simulado, error } — nunca lanza, para poder usarlo en tandas.
 async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
-  const alumno = recibo.alumnos || {};
-  const tel = alumno.telefono || alumno.tutor_telefono;
-  if (!telefonoWa(tel)) return { ok: false, error: 'sin teléfono válido' };
-
+  // Si tiene hermanos con un recibo pendiente de este mismo envío, se manda
+  // todo junto en un solo mensaje/PDF en vez de uno por hermano.
   const esPago = tipo === 'pago';
-  const destinatario = alumno.facturacion_nombre || alumno.tutor_nombre || alumno.nombre || '';
+  const hermanos = recibosHermanosDe(recibo).filter(h => esPago ? !h.fecha_envio_whatsapp_pago : !h.fecha_envio_whatsapp);
+  if (hermanos.length) return enviarPorWhatsAppApiConjunto([recibo, ...hermanos], tipo);
+
+  const alumno = recibo.alumnos || {};
+  const tel = telefonoDeRecibo(recibo);
+  if (!telefonoWa(tel)) return { ok: false, error: 'sin teléfono válido' };
+  const destinatario = destinatarioDeRecibo(recibo);
 
   try {
     const letras = recibo.importe_letras || importeALetras(recibo.importe);
@@ -2402,9 +2521,83 @@ async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
       actualizacion.estado_whatsapp = 'enviado';
     }
     if (Object.keys(actualizacion).length) {
-      await S.sb.from('recibos').update(actualizacion).eq('id', recibo.id);
+      const { error: errorUpdate } = await S.sb.from('recibos').update(actualizacion).eq('id', recibo.id);
+      if (errorUpdate) return { ok: false, error: 'enviado, pero no se pudo guardar el estado: ' + errorUpdate.message };
     }
-    return { ok: true, simulado: Boolean(data.simulado) };
+    return { ok: true, simulado: Boolean(data.simulado), idsIncluidos: [recibo.id] };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// Recibo conjunto de hermanos: un solo PDF con el desglose de cada uno y un
+// solo envío por WhatsApp al teléfono de la familia. Al terminar, marca
+// TODOS los recibos incluidos como enviados (no solo el que lo disparó).
+// La plantilla de WhatsApp solo admite 3 parámetros de texto fijos (nombre,
+// concepto, importe) — el desglose completo va en el PDF adjunto; el
+// "concepto" del mensaje es un resumen compacto y el importe es la suma.
+async function enviarPorWhatsAppApiConjunto(recibos, tipo = 'recibo') {
+  const esPago = tipo === 'pago';
+  const primero = recibos[0];
+  const tel = telefonoDeRecibo(primero);
+  if (!telefonoWa(tel)) return { ok: false, error: 'sin teléfono válido' };
+  const destinatario = destinatarioDeRecibo(primero);
+  const total = recibos.reduce((s, r) => s + Number(r.importe), 0);
+  const conceptoCombinado = recibos
+    .map(r => `${(r.alumnos?.nombre || '').split(' ')[0]}: ${r.concepto} (${formatoImporte(r.importe)}€)`)
+    .join(' + ');
+
+  try {
+    const desglose = recibos.map(r => `${r.alumnos?.nombre || ''} — ${r.concepto} — ${formatoImporte(r.importe)}€`);
+    const bytes = await generarReciboPdf({
+      fechaEmision: fmtFecha(primero.fecha_emision),
+      recibiDe: destinatario,
+      cantidadLetras: importeALetras(total),
+      desglose,
+      totalCifra: formatoImporte(total),
+      referencia: recibos.map(r => 'R-' + String(r.referencia).padStart(5, '0')).join(' / '),
+      logoPngBase64: S.logoBase64,
+      pagado: esPago,
+      fechaPago: esPago ? fmtFecha((primero.fecha_pago || new Date().toISOString()).slice(0, 10)) : null
+    });
+
+    const { data, error } = await S.sb.functions.invoke('enviar-whatsapp', {
+      body: {
+        tipo,
+        telefono: tel,
+        nombre: destinatario.split(' ')[0] || destinatario,
+        concepto: conceptoCombinado,
+        importe: formatoImporte(total),
+        pdfBase64: bytesABase64(bytes),
+        nombreArchivo: nombreArchivoRecibo(recibos.map(r => r.alumnos?.nombre).join('_'), 'hermanos', esPago)
+      }
+    });
+    if (error) return { ok: false, error: 'el servidor rechazó el envío' };
+    if (!data?.ok) return { ok: false, error: data?.error || 'error desconocido' };
+
+    // fecha_envio_whatsapp(_pago) se pone en TODOS los recibos incluidos —
+    // pero whatsapp_message_id tiene un índice ÚNICO en la base de datos (lo
+    // usa el webhook para saber a qué recibo corresponde un "leído" que
+    // llegue de Meta), así que el mismo id de mensaje no se puede repetir en
+    // varias filas: solo se guarda en la primera, el resto se queda sin él
+    // (comparten el mismo envío, así que su estado de entrega también vale).
+    const fechaCampo = esPago ? 'fecha_envio_whatsapp_pago' : 'fecha_envio_whatsapp';
+    const actualizacionPrimero = { [fechaCampo]: new Date().toISOString() };
+    if (!data.simulado && data.mensajeId) {
+      actualizacionPrimero.whatsapp_message_id = data.mensajeId;
+      actualizacionPrimero.estado_whatsapp = 'enviado';
+    }
+    const { error: errorPrimero } = await S.sb.from('recibos').update(actualizacionPrimero).eq('id', primero.id);
+    if (errorPrimero) return { ok: false, error: 'enviado, pero no se pudo guardar el estado: ' + errorPrimero.message };
+
+    const resto = recibos.slice(1);
+    if (resto.length) {
+      const { error: errorResto } = await S.sb.from('recibos')
+        .update({ [fechaCampo]: actualizacionPrimero[fechaCampo] })
+        .in('id', resto.map(r => r.id));
+      if (errorResto) return { ok: false, error: 'enviado, pero no se pudo guardar el estado de todos: ' + errorResto.message };
+    }
+    return { ok: true, simulado: Boolean(data.simulado), idsIncluidos: recibos.map(r => r.id) };
   } catch (err) {
     return { ok: false, error: err.message };
   }
@@ -2415,7 +2608,7 @@ async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
 // sellado como PAGADO).
 function modalEnvioMasivo(lista, tipo = 'recibo') {
   const esPago = tipo === 'pago';
-  const conTelefono = lista.filter(r => telefonoWa(r.alumnos?.telefono || r.alumnos?.tutor_telefono));
+  const conTelefono = lista.filter(r => telefonoWa(telefonoDeRecibo(r)));
   const sinTelefono = lista.length - conTelefono.length;
   const TANDA = 10;
 
@@ -2439,14 +2632,22 @@ function modalEnvioMasivo(lista, tipo = 'recibo') {
     cancelar.disabled = true;
     const fallos = [];
     let enviados = 0, simulado = false;
+    // Si dos hermanos están seleccionados a la vez, el primero ya manda el
+    // combinado de los dos — el segundo se salta para no repetir el envío.
+    const procesados = new Set();
 
     for (let i = 0; i < conTelefono.length; i++) {
       const r = conTelefono[i];
+      if (procesados.has(r.id)) continue;
       prog.innerHTML = `<p class="letras">Enviando ${i + 1} de ${conTelefono.length}…
         <strong>${e(r.alumnos?.nombre || '')}</strong></p>`;
       const res = await enviarPorWhatsAppApi(r, tipo);
-      if (res.ok) { enviados++; simulado = simulado || res.simulado; }
-      else fallos.push(`${r.alumnos?.nombre || 'Alumno'} — ${res.error}`);
+      if (res.ok) {
+        const ids = res.idsIncluidos || [r.id];
+        enviados += ids.length;
+        ids.forEach(id => procesados.add(id));
+        simulado = simulado || res.simulado;
+      } else fallos.push(`${r.alumnos?.nombre || 'Alumno'} — ${res.error}`);
       // Respiro entre tandas para no saturar el envío.
       if ((i + 1) % TANDA === 0 && i + 1 < conTelefono.length) {
         prog.innerHTML = `<p class="ayuda">Pausa entre tandas… (${i + 1} de ${conTelefono.length})</p>`;
@@ -2473,6 +2674,26 @@ function tieneHermano(alumno) {
   const norm = (s) => s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
   const miApellido = norm(alumno.apellidos);
   return S.alumnos.some(a2 => a2.id !== alumno.id && a2.estado === 'activo' && a2.apellidos && norm(a2.apellidos) === miApellido);
+}
+
+// Recibos de hermanos de `r` que están en el MISMO paso de la cadena
+// (pendientes con pendientes, pagados con pagados — no tiene sentido
+// juntar un pendiente con uno ya cobrado) y del mismo mes de emisión. No se
+// guarda ningún enlace en la base de datos: se calcula al vuelo cada vez,
+// igual que tieneHermano(), así que funciona con 2 hermanos o con 3 (ya hay
+// una familia real de 3 en la base de datos) y da igual quién ni cuándo
+// generó cada recibo por separado.
+function recibosHermanosDe(r) {
+  const alumno = S.alumnos.find(a => a.id === r.alumno_id);
+  if (!alumno || !tieneHermano(alumno)) return [];
+  const norm = (s) => s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
+  const miApellido = norm(alumno.apellidos);
+  const idsHermanos = new Set(S.alumnos
+    .filter(a2 => a2.id !== alumno.id && a2.estado === 'activo' && a2.apellidos && norm(a2.apellidos) === miApellido)
+    .map(a2 => a2.id));
+  const mesR = claveMes(r.fecha_emision);
+  return S.recibos.filter(r2 => r2.id !== r.id && idsHermanos.has(r2.alumno_id)
+    && claveMes(r2.fecha_emision) === mesR && r2.estado === r.estado);
 }
 
 function modalReciboBulk() {
@@ -2514,13 +2735,13 @@ function modalReciboBulk() {
         const descExtra = (misMesMats.length && a.descuento_extra > 0) ? a.descuento_extra * meses.length : 0;
         const importe = Math.max(0, baseMes - descMulti - descHermano - descExtra) + baseClase;
         if (importe <= 0) { mal++; continue; }
-        await crearRecibo(a, {
+        const generados = await crearRecibos(a, {
           concepto, importe,
           recibiDe: a.facturacion_nombre || a.tutor_nombre || a.nombre,
           fechaEmision: hoyDDMMAAAA(),
           periodos: periodosMarcados(cont, 'b')
         });
-        ok++;
+        ok += generados.length;
       } catch { mal++; }
     }
     cerrarModal();
@@ -2605,6 +2826,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
     <tbody>
     ${lista.map(r => {
       const estado = estadoRecibo(r, pagados);
+      const hermanos = recibosHermanosDe(r);
       return `<tr>
       ${seleccionables ? `<td><input type="checkbox" data-check="${r.id}" ${S.recibosSeleccionados.has(r.id) ? 'checked' : ''}></td>` : ''}
       <td><strong>${e(r.alumnos?.nombre || '')}</strong><br>
@@ -2613,6 +2835,8 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
       <td><strong>${formatoImporte(r.importe)}€</strong></td>
       ${esAdmin ? `<td>${e(r.profesores?.nombre || '')}</td>` : ''}
       <td><span class="chip ${estado.clase}">${estado.texto}</span>
+        ${r.progenitor ? `<span class="chip envio-si" title="Recibo repartido entre los dos progenitores">${r.progenitor === 'madre' ? 'Madre' : 'Padre'}</span>` : ''}
+        ${hermanos.length ? `<span class="chip activo" title="Junto con: ${e(hermanos.map(h => h.alumnos?.nombre || '').join(', '))}">👪 Recibo hermanos</span>` : ''}
         ${r.estado_whatsapp === 'fallido' ? '<span class="chip wa-fallido" title="WhatsApp no pudo entregarlo: revisa el teléfono">Fallido</span>'
           : r.estado_whatsapp === 'leido' ? '<span class="chip wa-leido">Leído</span>'
           : r.estado_whatsapp === 'entregado' ? '<span class="chip wa-por-leer">Por leer</span>'
@@ -2782,9 +3006,16 @@ function renderRecibos() {
 
   document.querySelectorAll('[data-pagar]').forEach(b => b.onclick = async () => {
     const r = S.recibos.find(x => x.id === b.dataset.pagar);
-    if (!confirm(`¿Estás seguro de que quieres marcar como PAGADO el recibo de ${r?.alumnos?.nombre || 'este alumno'} (${formatoImporte(r?.importe || 0)}€, ${r?.concepto || ''})?`)) return;
-    await S.sb.from('recibos').update({ estado: 'pagado', fecha_pago: new Date().toISOString() })
-      .eq('id', b.dataset.pagar);
+    if (!r) return;
+    // Hermanos con recibo del mismo mes aún sin pagar: se cobran a la vez,
+    // como una sola gestión familiar (se mandaron juntos, se cobran juntos).
+    const hermanos = recibosHermanosDe(r).filter(h => h.estado !== 'pagado');
+    const nombres = [r, ...hermanos].map(x => x.alumnos?.nombre || 'este alumno').join(' y ');
+    if (!confirm(`¿Estás seguro de que quieres marcar como PAGADO el recibo de ${nombres}${hermanos.length ? ' (recibo hermanos)' : ''} (${formatoImporte(r.importe)}€, ${r.concepto})?`)) return;
+    const ids = [r.id, ...hermanos.map(h => h.id)];
+    const { error } = await S.sb.from('recibos').update({ estado: 'pagado', fecha_pago: new Date().toISOString() })
+      .in('id', ids);
+    if (error) return avisar('Error al marcar como pagado: ' + error.message, true);
     await cargarRecibos();
     renderRecibos();
     // El envío del justificante ya no es automático: solo el admin lo manda,
@@ -2794,9 +3025,14 @@ function renderRecibos() {
   });
   document.querySelectorAll('[data-despagar]').forEach(b => b.onclick = async () => {
     const r = S.recibos.find(x => x.id === b.dataset.despagar);
-    if (!confirm(`¿Estás seguro de que quieres volver a dejar PENDIENTE el recibo de ${r?.alumnos?.nombre || 'este alumno'} (${formatoImporte(r?.importe || 0)}€, ${r?.concepto || ''})?`)) return;
-    await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null })
-      .eq('id', b.dataset.despagar);
+    if (!r) return;
+    const hermanos = recibosHermanosDe(r).filter(h => h.estado === 'pagado');
+    const nombres = [r, ...hermanos].map(x => x.alumnos?.nombre || 'este alumno').join(' y ');
+    if (!confirm(`¿Estás seguro de que quieres volver a dejar PENDIENTE el recibo de ${nombres} (${formatoImporte(r.importe)}€, ${r.concepto})?`)) return;
+    const ids = [r.id, ...hermanos.map(h => h.id)];
+    const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null })
+      .in('id', ids);
+    if (error) return avisar('Error: ' + error.message, true);
     await cargarRecibos();
     renderRecibos();
     avisar('Recibo devuelto a pendientes.');
@@ -2850,13 +3086,14 @@ function renderRecibosPorAlumno() {
     const chip = !recibo ? '<span class="chip baja">sin recibo</span>'
       : recibo.estado === 'pagado' ? '<span class="chip pagado">pagado</span>'
       : '<span class="chip pendiente">pendiente</span>';
+    const chipHermanos = recibo && recibosHermanosDe(recibo).length ? ' <span class="chip activo" title="Recibo hermanos">👪</span>' : '';
     const acciones = !recibo
       ? `<button class="btn chico liso" data-generar-recibo="${a.id}">Generar recibo</button>`
       : `<button class="btn chico liso" data-pdf-roster="${recibo.id}">PDF</button>`;
     return `<tr>
       <td><strong>${e(a.nombre)}</strong></td>
       <td>${recibo ? formatoImporte(recibo.importe) + '€' : '—'}</td>
-      <td>${chip}</td>
+      <td>${chip}${chipHermanos}</td>
       <td class="acciones">${acciones}</td>
     </tr>`;
   }).join('');
