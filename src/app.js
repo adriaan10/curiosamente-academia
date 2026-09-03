@@ -493,8 +493,12 @@ function renderInicio() {
     a.estado === 'activo' && (S.profesor?.es_admin || misMatriculas(a).length > 0)).length;
   const pendientes = S.recibos.filter(r => r.estado !== 'pagado');
   const totalPendiente = pendientes.reduce((s, r) => s + Number(r.importe), 0);
+  // Siempre las clases de quien ha entrado, nunca las del filtro compartido
+  // de Clases/Horario/Recibos (S.filtros.profesor) — si no, un admin que
+  // hubiera mirado el horario de otro profesor vería esas clases "de hoy"
+  // coladas en su propia portada.
   const clasesHoy = [];
-  for (const c of clasesFiltradas()) {
+  for (const c of S.clases.filter(c2 => c2.profesor_id === S.profesor?.id)) {
     for (const h of c.clase_horarios || []) {
       if (h.dia_semana === diaHoy) clasesHoy.push({ ...h, clase: c });
     }
@@ -579,7 +583,7 @@ function renderInicio() {
       <div class="portada-card alerta" id="pc-fuera-fecha">
         <div class="pc-num">${altasFueraDeFecha.length}</div>
         <div class="pc-titulo">recibo${altasFueraDeFecha.length === 1 ? '' : 's'} para generar a mano</div>
-        <div class="pc-detalle">Alta posterior al día 3, fuera del envío automático</div>
+        <div class="pc-detalle">Alta posterior al día 1, fuera del envío automático</div>
       </div>` : ''}
       ${reactivacionesSinVer.length ? `
       <div class="portada-card alerta" id="pc-reactivaciones">
@@ -619,7 +623,7 @@ function renderInicio() {
   };
 }
 
-// Alumnos dados de alta este mes DESPUÉS del día 3 (fuera de la generación
+// Alumnos dados de alta este mes DESPUÉS del día 1 (fuera de la generación
 // automática) que ya tienen precio fijado pero todavía no tienen recibo de
 // este mes: hay que generárselo a mano una vez.
 function recibosPendientesFueraDeFecha() {
@@ -634,7 +638,7 @@ function recibosPendientesFueraDeFecha() {
     if (a.estado !== 'activo' || !a.fecha_alta) return false;
     const alta = new Date(a.fecha_alta + 'T00:00:00');
     if (alta.getFullYear() !== hoy.getFullYear() || alta.getMonth() !== hoy.getMonth()) return false;
-    if (alta.getDate() <= 3) return false;
+    if (alta.getDate() <= 1) return false;
     const tienePrecio = (a.matriculas || []).some(m => m.tipo_tarifa === 'mes' && m.tarifa != null);
     if (!tienePrecio) return false;
     const yaTieneRecibo = S.recibos.some(r => r.alumno_id === a.id && (r.periodos || []).includes(periodoActual));
@@ -645,7 +649,7 @@ function recibosPendientesFueraDeFecha() {
 function modalRecibosFueraDeFecha(lista) {
   abrirModal(`
   <h2>Recibos para generar a mano</h2>
-  <p class="ayuda">Se dieron de alta después del día 3, así que el envío automático de este mes
+  <p class="ayuda">Se dieron de alta después del día 1, así que el envío automático de este mes
   ya no los recogió. Genera su recibo con el botón y listo.</p>
   <ul class="detalle-alumnos">
     ${lista.map(a => `<li>
@@ -2277,9 +2281,10 @@ function modalRecibo(alumno) {
 
     const baseMes = marcadasMes.reduce((s, m) => s + Number(m.tarifa), 0) * meses.length;
     const baseClase = marcadasClase.reduce((s, m) => s + Number(m.tarifa), 0);
-    // Los descuentos son mensuales: el de "varias asignaturas" solo cuenta las
-    // que se cobran en este recibo; los otros dos son un importe fijo al mes.
-    const descMulti = nMesTotal >= 2 ? 5 * marcadasMes.length * meses.length : 0;
+    // Los tres descuentos son un importe FIJO al mes (5€ cada uno, no por
+    // asignatura): si el alumno tiene 2+ asignaturas de pago mensual son
+    // -5€ en total, no -5€ por cada una.
+    const descMulti = nMesTotal >= 2 ? 5 * meses.length : 0;
     const descHermano = (descuentos.descuento_hermano > 0 && marcadasMes.length) ? descuentos.descuento_hermano * meses.length : 0;
     const descExtra = (descuentos.descuento_extra > 0 && marcadasMes.length) ? descuentos.descuento_extra * meses.length : 0;
 
@@ -2676,6 +2681,21 @@ function tieneHermano(alumno) {
   return S.alumnos.some(a2 => a2.id !== alumno.id && a2.estado === 'activo' && a2.apellidos && norm(a2.apellidos) === miApellido);
 }
 
+// De un grupo de hermanos, solo UNO se lleva el descuento de 5€ (no cada
+// uno por separado — se envían en un recibo conjunto, así que restarlo a
+// cada uno lo contaría 2 o 3 veces). El "designado" es el de id más bajo
+// del grupo, incluyéndose a sí mismo — mismo criterio que usa el servidor
+// en calcular_descuentos_alumno(), para que ambos coincidan siempre.
+function esHermanoDesignado(alumno) {
+  if (!tieneHermano(alumno)) return false; // sin hermano de verdad, no hay descuento que designar
+  const norm = (s) => s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
+  const miApellido = norm(alumno.apellidos);
+  const idsFamilia = S.alumnos
+    .filter(a2 => a2.estado === 'activo' && a2.apellidos && norm(a2.apellidos) === miApellido)
+    .map(a2 => a2.id);
+  return idsFamilia.every(id => id >= alumno.id);
+}
+
 // Recibos de hermanos de `r` que están en el MISMO paso de la cadena
 // (pendientes con pendientes, pagados con pagados — no tiene sentido
 // juntar un pendiente con uno ya cobrado) y del mismo mes de emisión. No se
@@ -2730,8 +2750,8 @@ function modalReciboBulk() {
         const nMesTotalAlumno = (a.matriculas || []).filter(m => m.tipo_tarifa === 'mes' && m.tarifa != null).length;
         const baseMes = misMesMats.reduce((s, m) => s + Number(m.tarifa), 0) * meses.length;
         const baseClase = misClaseMats.reduce((s, m) => s + Number(m.tarifa), 0);
-        const descMulti = nMesTotalAlumno >= 2 ? 5 * misMesMats.length * meses.length : 0;
-        const descHermano = (misMesMats.length && tieneHermano(a)) ? 5 * meses.length : 0;
+        const descMulti = nMesTotalAlumno >= 2 ? 5 * meses.length : 0;
+        const descHermano = (misMesMats.length && esHermanoDesignado(a)) ? 5 * meses.length : 0;
         const descExtra = (misMesMats.length && a.descuento_extra > 0) ? a.descuento_extra * meses.length : 0;
         const importe = Math.max(0, baseMes - descMulti - descHermano - descExtra) + baseClase;
         if (importe <= 0) { mal++; continue; }
@@ -3179,8 +3199,15 @@ async function descargarPdfsMes(claveM, lista, boton) {
 
 // Editar un recibo pendiente (ej. añadir horas extra antes de enviarlo).
 function modalEditarRecibo(r) {
-  const conceptoOriginal = r.concepto;
-  const importeOriginal = Number(r.importe);
+  // Si el recibo ya traía matrícula de fábrica, se separa del resto del
+  // importe/concepto para no duplicarla al recalcular (y se le quita el
+  // sufijo " + Matrícula" que ya llevara, que se vuelve a añadir solo si
+  // sigue marcada la casilla).
+  const matriculaOriginal = Number(r.importe_matricula) || 0;
+  const importeBase = Number(r.importe) - matriculaOriginal;
+  const conceptoOriginal = r.incluye_matricula
+    ? r.concepto.replace(/ \+ Matrícula$/, '')
+    : r.concepto;
   abrirModal(`
   <h2>Editar recibo R-${String(r.referencia).padStart(5, '0')} — ${e(r.alumnos?.nombre || '')}</h2>
   <p class="ayuda">Añade el extra (se suma solo al importe y al concepto) o toca el concepto
@@ -3191,8 +3218,13 @@ function modalEditarRecibo(r) {
     <label>Descripción del extra
       <input id="er-extra-desc" placeholder="ej. 2 horas extra"></label>
     <label>Concepto<input id="er-concepto" value="${e(r.concepto)}"></label>
-    <label>Importe total (€)<input id="er-importe" type="number" min="0" step="0.01" value="${importeOriginal}"></label>
+    <label>Importe total (€)<input id="er-importe" type="number" min="0" step="0.01" value="${Number(r.importe)}"></label>
   </div>
+  <label class="check-inline" style="margin-top:10px">
+    <input type="checkbox" id="er-matricula" ${r.incluye_matricula ? 'checked' : ''}> Añadir matrícula (aparte, va a Ingresos &gt; Matrícula)
+  </label>
+  <input id="er-importe-matricula" type="number" min="0" step="0.01" placeholder="Importe de la matrícula (€)"
+    value="${matriculaOriginal || ''}" style="${r.incluye_matricula ? '' : 'display:none'}; margin-top:6px">
   <p class="letras">La cantidad de: <strong id="er-letras"></strong>€</p>
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cancelar</button>
@@ -3205,18 +3237,27 @@ function modalEditarRecibo(r) {
   const $concepto = document.getElementById('er-concepto');
   const $importe = document.getElementById('er-importe');
   const $letras = document.getElementById('er-letras');
+  const $matriculaChk = document.getElementById('er-matricula');
+  const $matriculaImporte = document.getElementById('er-importe-matricula');
 
-  const desdeExtra = () => {
+  const recalcular = () => {
     const extra = Number($extra.value) || 0;
     const desc = $desc.value.trim();
-    $importe.value = importeOriginal + extra || '';
-    $concepto.value = conceptoOriginal + (extra && desc ? ' + ' + desc : '');
+    const conMatricula = $matriculaChk.checked;
+    const importeMatricula = conMatricula ? (Number($matriculaImporte.value) || 0) : 0;
+    $importe.value = (importeBase + extra + importeMatricula) || '';
+    $concepto.value = conceptoOriginal + (extra && desc ? ' + ' + desc : '') + (conMatricula ? ' + Matrícula' : '');
     $letras.textContent = importeALetras($importe.value || 0);
   };
-  $extra.oninput = desdeExtra;
-  $desc.oninput = desdeExtra;
+  $extra.oninput = recalcular;
+  $desc.oninput = recalcular;
   $importe.oninput = () => { $letras.textContent = importeALetras($importe.value || 0); };
-  $letras.textContent = importeALetras(importeOriginal);
+  $matriculaChk.onchange = () => {
+    $matriculaImporte.style.display = $matriculaChk.checked ? '' : 'none';
+    recalcular();
+  };
+  $matriculaImporte.oninput = recalcular;
+  $letras.textContent = importeALetras(Number(r.importe));
 
   document.getElementById('m-cancelar').onclick = cerrarModal;
   document.getElementById('er-guardar').onclick = async () => {
@@ -3226,12 +3267,16 @@ function modalEditarRecibo(r) {
       document.getElementById('m-msg').textContent = 'Concepto e importe son obligatorios.';
       return;
     }
+    const conMatricula = $matriculaChk.checked;
+    const importeMatricula = conMatricula ? (Number($matriculaImporte.value) || 0) : 0;
     const btn = document.getElementById('er-guardar');
     btn.disabled = true; btn.textContent = 'Guardando…';
     const { error } = await S.sb.from('recibos').update({
       concepto,
       importe,
       importe_letras: importeALetras(importe),
+      incluye_matricula: conMatricula,
+      importe_matricula: importeMatricula,
       pdf_path: null // el PDF viejo ya no vale: se regenera con los datos nuevos
     }).eq('id', r.id);
     if (error) {
@@ -3357,15 +3402,15 @@ function renderProfesores() {
       <td><strong>${e(p.nombre)}</strong>${p.es_admin ? ' <span class="chip activo">admin</span>' : ''}
         ${p.estado === 'baja' ? ' <span class="chip baja">baja</span>' : ''}</td>
       <td>${e(p.email)}</td>
-      <td>${p.es_admin ? '<small>Todas (administrador)</small>'
-        : asigs.map(a => {
+      <td>${asigs.length ? asigs.map(a => {
           const c = colorArea(a.nombre);
           return `<span class="chip-asig" style="background:${c.fondo}; border-left:3px solid ${c.borde}">${e(a.nombre)}</span>`;
-        }).join(' ') || '<small>Sin asignaturas (ve todas)</small>'}</td>
+        }).join(' ')
+        : (p.es_admin ? '<small>Todas (administrador)</small>' : '<small>Sin asignaturas (ve todas)</small>')}</td>
       <td class="acciones">
         ${p.estado === 'baja'
           ? `<button class="btn chico" data-reactivar-prof="${p.id}">Reactivar</button>`
-          : (p.id !== S.profesor.id && !p.es_admin
+          : (p.id !== S.profesor.id
             ? `<button class="btn chico liso" data-editar-prof="${p.id}">Editar</button>` : '')}
       </td>
     </tr>`;

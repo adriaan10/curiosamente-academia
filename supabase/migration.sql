@@ -1094,3 +1094,101 @@ $$;
 -- depender de que se hayan generado a la vez ni de quién los generó.
 
 alter publication supabase_realtime add table public.bajas_asignatura;
+
+-- Generación día 1, matrícula desde editar recibo, descuentos a 5€ fijos,
+-- admin que también da clase (04/09/2026).
+
+-- 1. Recibos automáticos al día 1 (antes día 3): más margen para revisar
+-- antes de mandarlos, ya que generar y enviar son pasos separados.
+select cron.unschedule('recibos-mensuales');
+select cron.schedule('recibos-mensuales', '0 6 1 1-6,10-12 *', 'select public.generar_recibos_mensuales()');
+-- El corte de "alta fuera de fecha" (recibosPendientesFueraDeFecha() en
+-- app.js) pasa de "alta.getDate() <= 3" a "<= 1" para ir a la par.
+
+-- 2. Matrícula desde "Editar recibo": sin cambios de esquema — solo usa las
+-- columnas incluye_matricula/importe_matricula que ya existían desde la
+-- generación. El trigger sincronizar_finanzas_recibo() (sin tocar) ya
+-- sincroniza solo cuando el estado pasa a 'pagado', leyendo lo que haya en
+-- ese momento en la fila — como "Editar recibo" solo existe para recibos
+-- todavía pendientes, la matrícula añadida aquí sincroniza sola con
+-- Ingresos > Matrícula en cuanto se marque pagado.
+
+-- 3. Descuentos a 5€ fijos: el de varias asignaturas pasa de "5€ × nº de
+-- asignaturas" a 5€ fijo; el de hermano sigue en 5€ pero ahora solo se lo
+-- lleva UNO del grupo (el de id más bajo, incluyéndose a sí mismo) en vez
+-- de cada hermano por separado — ahora que se mandan en un recibo conjunto
+-- (ver recibosHermanosDe() en app.js), restarlo a cada uno lo contaría 2 o
+-- 3 veces en el total. Importante: exige que haya un hermano ACTIVO de
+-- verdad antes de designar a nadie — la primera versión de este cambio
+-- tenía un bug donde cualquier alumno con apellido (aunque fuera hijo
+-- único) se llevaba el descuento por ser "el único de su grupo de 1".
+-- (uuid no tiene función min() agregada en Postgres: se usa
+-- "order by id limit 1" en su lugar.)
+create or replace function public.calcular_descuentos_alumno(p_alumno_id uuid)
+returns table (
+  base numeric, n_asignaturas integer, descuento_multi numeric,
+  descuento_hermano numeric, descuento_extra numeric, total numeric
+)
+language plpgsql stable security definer set search_path = public
+as $$
+declare
+  v_base numeric; v_n integer; v_apellidos text;
+  v_tiene_hermano boolean := false;
+  v_min_id uuid; v_es_designado boolean := false;
+  v_descuento_extra numeric;
+begin
+  select count(*), sum(m.tarifa) into v_n, v_base
+  from public.matriculas m where m.alumno_id = p_alumno_id and m.tipo_tarifa = 'mes';
+
+  select a.apellidos, a.descuento_extra into v_apellidos, v_descuento_extra
+  from public.alumnos a where a.id = p_alumno_id;
+
+  if v_apellidos is not null and trim(v_apellidos) <> '' then
+    select exists (
+      select 1 from public.alumnos a2
+      where a2.id <> p_alumno_id and a2.estado = 'activo' and a2.apellidos is not null
+        and public.nombre_normalizado(a2.apellidos) = public.nombre_normalizado(v_apellidos)
+    ) into v_tiene_hermano;
+
+    if v_tiene_hermano then
+      select a2.id into v_min_id
+      from public.alumnos a2
+      where a2.estado = 'activo' and a2.apellidos is not null
+        and public.nombre_normalizado(a2.apellidos) = public.nombre_normalizado(v_apellidos)
+      order by a2.id
+      limit 1;
+      v_es_designado := (v_min_id = p_alumno_id);
+    end if;
+  end if;
+
+  return query select
+    v_base, coalesce(v_n, 0),
+    case when coalesce(v_n, 0) >= 2 then 5::numeric else 0::numeric end,
+    case when v_es_designado then 5::numeric else 0::numeric end,
+    coalesce(v_descuento_extra, 0),
+    case when v_base is null then null
+      else greatest(0, v_base
+        - (case when coalesce(v_n, 0) >= 2 then 5::numeric else 0::numeric end)
+        - (case when v_es_designado then 5::numeric else 0::numeric end)
+        - coalesce(v_descuento_extra, 0))
+    end;
+end;
+$$;
+-- Mirrors en el cliente actualizados a la vez: modalRecibo() y
+-- modalReciboBulk() (descMulti sin multiplicar por nº de asignaturas), y
+-- nueva esHermanoDesignado(alumno) en app.js junto a tieneHermano(), mismo
+-- criterio (exige tieneHermano() real primero, luego id más bajo del grupo).
+
+-- 4. Admin que también da clase: no hace falta ningún cambio de esquema ni
+-- de RLS (ya permitía que un admin tuviera profesor_asignaturas reales) —
+-- el bloqueo era puramente de interfaz en renderProfesores() (app.js): el
+-- botón "Editar" estaba oculto para cualquier fila es_admin=true, así que
+-- era imposible asignarle asignaturas reales desde la app; y la columna de
+-- asignaturas decía siempre "Todas (administrador)" aunque tuviera filas
+-- reales en profesor_asignaturas. Arreglado mostrando las asignaturas
+-- reales cuando existen (igual que a un profesor normal) y habilitando el
+-- botón Editar también para admins (salvo la propia fila, como ya era para
+-- todo el mundo). De paso, la tarjeta "clases hoy" de Inicio ya no depende
+-- del filtro compartido S.filtros.profesor (que podía colar las clases de
+-- OTRO profesor si se había tocado ese filtro en otra pestaña) — calcula
+-- siempre las clases de quien ha entrado, directamente por profesor_id.
