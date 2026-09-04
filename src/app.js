@@ -44,6 +44,13 @@ const e = escapeHtml;
 // ---------------------------------------------------------------- arranque
 
 async function init() {
+  // Aviso de "sin conexión" ya desde el login: si no hay adaptador de red
+  // en absoluto, es instantáneo. La vuelta a "conectado" NO se decide aquí
+  // (puede haber wifi sin internet de verdad) — de eso se encarga el canal
+  // de tiempo real, ver iniciarTiempoReal().
+  window.addEventListener('offline', marcarDesconectado);
+  window.addEventListener('online', () => { /* solo informativo; la reconexión real la confirma el canal */ });
+
   // Si ya hay una versión descargada esperando (el proceso principal la
   // recuerda aunque haya terminado antes de que esta ventana cargara), se
   // avisa antes que nada; si llega mientras se usa la app, el aviso salta en
@@ -90,6 +97,8 @@ async function cargarTodo() {
   S.profesor = prof.data;
   // Si el profesor fue dado de baja con la sesión aún abierta, se le expulsa.
   if (S.profesor?.estado === 'baja') {
+    detenerTiempoReal();
+    detenerControlInactividad();
     await S.sb.auth.signOut();
     S.session = null;
     S.profesor = null;
@@ -114,6 +123,7 @@ async function cargarTodo() {
   backupAutomatico();
   window.api.getRecibosDir(); // crea la carpeta de recibos de este equipo si no existía aún
   iniciarTiempoReal();
+  iniciarControlInactividad();
 }
 
 // ---------------------------------------------------------------- tiempo real
@@ -150,7 +160,14 @@ function iniciarTiempoReal() {
   // en vez de esperar a que alguien cierre y vuelva a abrir la app.
   canal = canal.on('postgres_changes', { event: '*', schema: 'public', table: 'app_version' },
     () => window.api.comprobarActualizacionesAhora());
-  canal.subscribe();
+  // El estado de este canal es también la señal de "hay conexión de verdad
+  // con Supabase" (no solo con la red local) para la pantalla de "Sin
+  // conexión": la librería reconecta sola con reintentos, así que basta con
+  // escuchar cuándo lo consigue o lo pierde, sin sondear nada por nuestra cuenta.
+  canal.subscribe((status) => {
+    if (status === 'SUBSCRIBED') marcarConectado();
+    else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') marcarDesconectado();
+  });
   canalTiempoReal = canal;
 }
 
@@ -158,6 +175,25 @@ function detenerTiempoReal() {
   if (canalTiempoReal) S.sb.removeChannel(canalTiempoReal);
   canalTiempoReal = null;
   clearTimeout(timerRecargaTiempoReal);
+}
+
+// Cierra la sesión sola si nadie toca nada durante 20 minutos, para no
+// dejar la app abierta indefinidamente en un ordenador compartido.
+const INACTIVIDAD_MS = 20 * 60 * 1000;
+const EVENTOS_ACTIVIDAD = ['mousemove', 'keydown', 'click', 'scroll'];
+let timerInactividad = null;
+
+function reiniciarTimerInactividad() {
+  clearTimeout(timerInactividad);
+  timerInactividad = setTimeout(() => cerrarSesion('Sesión cerrada por inactividad.'), INACTIVIDAD_MS);
+}
+function iniciarControlInactividad() {
+  EVENTOS_ACTIVIDAD.forEach(ev => document.addEventListener(ev, reiniciarTimerInactividad));
+  reiniciarTimerInactividad();
+}
+function detenerControlInactividad() {
+  clearTimeout(timerInactividad);
+  EVENTOS_ACTIVIDAD.forEach(ev => document.removeEventListener(ev, reiniciarTimerInactividad));
 }
 
 // Varios cambios pueden llegar seguidos (ej. un envío de recibos en lote): se
@@ -197,6 +233,7 @@ async function recargarTrasCambioRemoto() {
     const propia = S.profesores.find(p => p.id === S.profesor.id);
     if (propia?.estado === 'baja') {
       detenerTiempoReal();
+      detenerControlInactividad();
       await S.sb.auth.signOut();
       S.session = null;
       S.profesor = null;
@@ -353,6 +390,38 @@ function renderSetup() {
 
 // Pantalla completa que obliga a actualizar: se dispara en cuanto el proceso
 // principal avisa de que ya hay una versión descargada y lista para instalar.
+// Bloqueo por desconexión: en vez de dejar navegar por una app que va a
+// fallar en cada acción sin internet, se tapa todo con un aviso claro
+// hasta que vuelva la conexión — sola, sin tener que recargar nada.
+let conectado = true;
+
+function mostrarPantallaSinConexion() {
+  $app().innerHTML = `
+  <div class="centrado">
+    <div class="tarjeta login">
+      ${logoHtml()}
+      <p class="sub">tu centro de estudios</p>
+      <h2>Sin conexión</h2>
+      <p class="ayuda">Se ha perdido la conexión a internet. La app se recupera sola en cuanto vuelva.</p>
+    </div>
+  </div>`;
+}
+
+function marcarDesconectado() {
+  if (!conectado) return; // ya se sabía, no repintar de más
+  conectado = false;
+  mostrarPantallaSinConexion();
+}
+
+function marcarConectado() {
+  if (conectado) return;
+  conectado = true;
+  // Puede haberse perdido algo mientras tanto: recarga todo si hay sesión;
+  // si no, vuelve al login tal cual.
+  if (S.session) cargarTodo().then(renderMain).catch(() => {});
+  else renderLogin();
+}
+
 function mostrarPantallaActualizacion(version) {
   $app().innerHTML = `
   <div class="centrado">
@@ -466,13 +535,21 @@ function renderMain() {
   <div id="modal-raiz"></div>
   <div id="toast"></div>`;
   document.querySelectorAll('.tab').forEach(b => b.onclick = () => { S.vista = b.dataset.v; renderMain(); });
-  document.getElementById('logout').onclick = async () => {
-    detenerTiempoReal();
-    await S.sb.auth.signOut();
-    S.session = null; S.profesor = null;
-    renderLogin();
-  };
+  document.getElementById('logout').onclick = () => cerrarSesion();
   renderVistaActual();
+}
+
+// Compartido por el botón "Salir" y el cierre automático por inactividad.
+async function cerrarSesion(mensaje) {
+  detenerTiempoReal();
+  detenerControlInactividad();
+  await S.sb.auth.signOut();
+  S.session = null; S.profesor = null;
+  renderLogin();
+  if (mensaje) setTimeout(() => {
+    const m = document.getElementById('msg');
+    if (m) m.textContent = mensaje;
+  }, 0);
 }
 
 // Repinta solo la pestaña actual (sin reconstruir cabecera/menú), usada tanto

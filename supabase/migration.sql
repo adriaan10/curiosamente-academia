@@ -1288,3 +1288,18 @@ alter table public.recibos
 -- Estado: "50€ de 60€ cobrados". Al marcar "✓ Cobrado" de verdad, se
 -- limpia `importe_parcial` a null (ya no hace falta, el recibo pasa a
 -- cobrado por el total).
+
+-- Bloqueo sin conexión + cierre de sesión por inactividad (04/09/2026).
+-- Cambio 100% del lado cliente (src/app.js), sin tocar esquema ni RLS —
+-- se registra aquí solo como referencia del historial de la app:
+-- - "Sin conexión": se reutiliza el canal de tiempo real que ya estaba
+--   abierto (iniciarTiempoReal()) en vez de sondear Supabase — su estado
+--   ('SUBSCRIBED' / 'CHANNEL_ERROR' / 'TIMED_OUT') es la señal de verdad
+--   de si hay conexión con el servidor, combinado con el evento del
+--   sistema 'offline' para detectar al instante la falta de red local.
+--   mostrarPantallaSinConexion() bloquea toda la app (mismo patrón que la
+--   pantalla de actualización obligatoria) hasta que se reconecta sola.
+-- - Cierre de sesión a los 20 minutos sin actividad (mousemove/keydown/
+--   click/scroll): nueva cerrarSesion(mensaje), que reutiliza el propio
+--   botón "Salir" y también los cierres automáticos por baja de profesor
+--   que ya existían.
