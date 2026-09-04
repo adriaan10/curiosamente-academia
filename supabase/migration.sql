@@ -1192,3 +1192,82 @@ $$;
 -- del filtro compartido S.filtros.profesor (que podía colar las clases de
 -- OTRO profesor si se había tocado ese filtro en otra pestaña) — calcula
 -- siempre las clases de quien ha entrado, directamente por profesor_id.
+
+-- Cuentas de Efectivo y Banco en Ingresos y gastos (04/09/2026).
+
+-- Cuenta donde cae/sale el dinero. NULO en filas antiguas (antes de esta
+-- función) a propósito: no se fuerza un valor adivinado sobre historial
+-- que de verdad no sabemos si fue efectivo o banco.
+alter table public.finanzas_movimientos
+  add column cuenta text check (cuenta in ('efectivo', 'banco'));
+
+-- Con qué se cobró este recibo — se copia a la Mensualidad/Matrícula que
+-- genere el trigger de sincronización.
+alter table public.recibos
+  add column cuenta text check (cuenta in ('efectivo', 'banco'));
+
+-- Saldo de partida de cada cuenta — tabla propia de 2 filas como mucho, en
+-- vez de una fila "falsa" en finanzas_movimientos (probado y descartado en
+-- el diseño: cualquier categoría nueva que aparezca en esa tabla se cuela
+-- sola como columna más en categoriasConExtras() y se suma en TODOS los
+-- totales existentes, incluida la vista "Todo" y el Excel anual — y el
+-- botón de borrar movimiento de siempre la borraría sin ningún aviso
+-- especial. Con tabla propia, nada de eso puede pasar).
+create table public.cuentas_saldo_inicial (
+  cuenta text primary key check (cuenta in ('efectivo', 'banco')),
+  importe numeric not null default 0,
+  fecha date not null default current_date,
+  actualizado_por uuid references public.profesores(id),
+  actualizado_en timestamptz not null default now()
+);
+alter table public.cuentas_saldo_inicial enable row level security;
+create policy "cuentas_saldo_inicial_admin" on public.cuentas_saldo_inicial
+  for all to authenticated using (public.is_admin()) with check (public.is_admin());
+alter publication supabase_realtime add table public.cuentas_saldo_inicial;
+
+-- El trigger de sincronización pasa la cuenta del recibo a los movimientos
+-- automáticos que genera (Mensualidad/Matrícula) — igual que siempre,
+-- solo añadiendo `cuenta` a los dos insert.
+create or replace function public.sincronizar_finanzas_recibo()
+returns trigger language plpgsql security definer set search_path = public
+as $$
+begin
+  if new.estado = 'pagado' and old.estado is distinct from 'pagado' then
+    if (new.importe - new.importe_matricula) > 0 then
+      insert into public.finanzas_movimientos (tipo, categoria, importe, fecha, descripcion, origen, recibo_id, cuenta)
+      values ('ingreso', 'Mensualidad', new.importe - new.importe_matricula,
+        coalesce(new.fecha_pago::date, current_date), 'Recibo R-' || lpad(new.referencia::text, 5, '0'), 'automatico', new.id, new.cuenta);
+    end if;
+    if new.incluye_matricula and new.importe_matricula > 0 then
+      insert into public.finanzas_movimientos (tipo, categoria, importe, fecha, descripcion, origen, recibo_id, cuenta)
+      values ('ingreso', 'Matrícula', new.importe_matricula,
+        coalesce(new.fecha_pago::date, current_date), 'Recibo R-' || lpad(new.referencia::text, 5, '0'), 'automatico', new.id, new.cuenta);
+    end if;
+  elsif old.estado = 'pagado' and new.estado is distinct from 'pagado' then
+    delete from public.finanzas_movimientos where recibo_id = new.id and origen = 'automatico';
+  end if;
+  return new;
+end;
+$$;
+
+-- Resumen del lado app.js (no hay más migraciones que registrar):
+-- - TABLAS_TIEMPO_REAL gana 'cuentas_saldo_inicial'.
+-- - renderFinanzas(): tercer filtro "Todo | Efectivo | Banco"
+--   (S.cuentaFinanzas, por defecto 'todo' — pixel a pixel igual que antes
+--   si no se toca). Con una cuenta concreta elegida: tarjeta "Saldo
+--   actual" (saldoCuenta(), acumulado desde siempre, no por mes/curso) +
+--   botón "Fijar/Editar saldo inicial" (modalFijarSaldoInicial(), upsert
+--   por clave primaria en cuentas_saldo_inicial) + aviso de movimientos
+--   sin clasificar (cuenta null).
+-- - "✓ Pagado" pasa a "✓ Cobrado" y al pulsarlo pregunta Efectivo/Banco
+--   (modalElegirCuentaCobro(), reutilizado también para el botón "✎" que
+--   corrige la cuenta de un recibo ya cobrado sin tocar estado/fecha_pago
+--   — pensado para el caso de hermanos con padres separados, donde el
+--   lote de "cobrar juntos" puede forzar una cuenta que no aplica a los
+--   dos progenitores por igual). "↩ Pendiente" limpia `cuenta` a null.
+-- - Formulario manual de movimientos (modalCategoriaMovimientos) gana un
+--   radio Efectivo/Banco, por defecto Efectivo.
+-- - El sello "PAGADO" del PDF del recibo NO cambia (lo ve la familia,
+--   tiene sentido en su propio idioma) — el renombrado a "Cobrado" es
+--   solo interfaz interna de gestión; el valor `estado='pagado'` en base
+--   de datos tampoco cambia.

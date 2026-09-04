@@ -27,6 +27,7 @@ const S = {
   bajasAsignatura: [],
   finanzas: [],
   finanzasCategorias: [],
+  cuentasSaldoInicial: [],
   vista: 'inicio',
   vistaRecibos: 'pendientes',
   mesRecibos: '',
@@ -108,7 +109,7 @@ async function cargarTodo() {
   await Promise.all([
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
     cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
-    cargarFinanzas(), cargarFinanzasCategorias()
+    cargarFinanzas(), cargarFinanzasCategorias(), cargarCuentasSaldoInicial()
   ]);
   backupAutomatico();
   window.api.getRecibosDir(); // crea la carpeta de recibos de este equipo si no existía aún
@@ -130,7 +131,8 @@ async function cargarTodo() {
 const TABLAS_TIEMPO_REAL = [
   'alumnos', 'matriculas', 'clases', 'clase_horarios', 'clase_alumnos', 'clase_excepciones',
   'recibos', 'notas', 'profesor_horario', 'cambios_horario', 'reactivaciones_alumno', 'bajas_asignatura',
-  'finanzas_movimientos', 'finanzas_categorias', 'profesores', 'asignaturas', 'profesor_asignaturas'
+  'finanzas_movimientos', 'finanzas_categorias', 'profesores', 'asignaturas', 'profesor_asignaturas',
+  'cuentas_saldo_inicial'
 ];
 
 let canalTiempoReal = null;
@@ -172,7 +174,7 @@ async function recargarTrasCambioRemoto() {
     S.sb.from('profesor_asignaturas').select('*'),
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
     cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
-    cargarFinanzas(), cargarFinanzasCategorias()
+    cargarFinanzas(), cargarFinanzasCategorias(), cargarCuentasSaldoInicial()
   ]);
   // Si alguna de estas tres falla (un hipo de red, el token de sesión
   // renovándose justo en ese momento…) no se pisa lo que ya había: hacerlo
@@ -253,6 +255,14 @@ async function cargarFinanzasCategorias() {
   const { data, error } = await S.sb.from('finanzas_categorias').select('*');
   if (error) return avisar('Error cargando categorías: ' + error.message, true);
   S.finanzasCategorias = data || [];
+}
+
+// Saldo de partida de Efectivo/Banco (como mucho 2 filas, una por cuenta).
+async function cargarCuentasSaldoInicial() {
+  if (!S.profesor?.es_admin) { S.cuentasSaldoInicial = []; return; }
+  const { data, error } = await S.sb.from('cuentas_saldo_inicial').select('*');
+  if (error) return avisar('Error cargando saldos iniciales: ' + error.message, true);
+  S.cuentasSaldoInicial = data || [];
 }
 
 async function cargarHorarioTrabajo() {
@@ -564,7 +574,7 @@ function renderInicio() {
       ${pagadosPorEnviar.length ? `
       <div class="portada-card alerta" id="pc-pagados-enviar">
         <div class="pc-num">${pagadosPorEnviar.length}</div>
-        <div class="pc-titulo">recibo${pagadosPorEnviar.length === 1 ? '' : 's'} pagado${pagadosPorEnviar.length === 1 ? '' : 's'} por enviar</div>
+        <div class="pc-titulo">recibo${pagadosPorEnviar.length === 1 ? '' : 's'} cobrado${pagadosPorEnviar.length === 1 ? '' : 's'} por enviar</div>
         <div class="pc-detalle">Un profesor ha marcado un pago: manda el justificante</div>
       </div>` : ''}
       ${fichasIncompletas.length ? `
@@ -2836,6 +2846,22 @@ function estadoRecibo(r, pagados) {
     : { clase: 'envio-no', texto: 'Cobrado y por enviar' };
 }
 
+// Modal pequeño de "¿efectivo o banco?", reutilizado tanto al marcar un
+// recibo cobrado como al corregir la cuenta de uno ya cobrado.
+function modalElegirCuentaCobro(titulo, mensaje, onElegir) {
+  abrirModal(`
+  <h2>${e(titulo)}</h2>
+  <p class="ayuda">${mensaje}</p>
+  <div class="pie-modal columna">
+    <button class="btn primario" id="ec-efectivo">💶 Efectivo</button>
+    <button class="btn primario" id="ec-banco">🏦 Banco</button>
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+  </div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('ec-efectivo').onclick = () => onElegir('efectivo');
+  document.getElementById('ec-banco').onclick = () => onElegir('banco');
+}
+
 function filasRecibos(lista, esAdmin, pagados, seleccionables) {
   return `<table>
     <thead><tr>
@@ -2855,6 +2881,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
       <td><strong>${formatoImporte(r.importe)}€</strong></td>
       ${esAdmin ? `<td>${e(r.profesores?.nombre || '')}</td>` : ''}
       <td><span class="chip ${estado.clase}">${estado.texto}</span>
+        ${pagados && r.cuenta ? `<span class="chip activo">${r.cuenta === 'banco' ? 'Banco' : 'Efectivo'}</span>` : ''}
         ${r.progenitor ? `<span class="chip envio-si" title="Recibo repartido entre los dos progenitores">${r.progenitor === 'madre' ? 'Madre' : 'Padre'}</span>` : ''}
         ${hermanos.length ? `<span class="chip activo" title="Junto con: ${e(hermanos.map(h => h.alumnos?.nombre || '').join(', '))}">👪 Recibo hermanos</span>` : ''}
         ${r.estado_whatsapp === 'fallido' ? '<span class="chip wa-fallido" title="WhatsApp no pudo entregarlo: revisa el teléfono">Fallido</span>'
@@ -2863,8 +2890,9 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
           : ''}</td>
       <td class="acciones">
         ${pagados
-          ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>` : '')
-          : `<button class="btn chico pagar" data-pagar="${r.id}">✓ Pagado</button>
+          ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>
+             <button class="btn chico liso" data-editar-cuenta="${r.id}" title="Corregir efectivo/banco">✎</button>` : '')
+          : `<button class="btn chico pagar" data-pagar="${r.id}">✓ Cobrado</button>
              ${esAdmin ? `<button class="btn chico liso" data-wa="${r.id}">WhatsApp</button>` : ''}
              <button class="btn chico liso" data-editar-recibo="${r.id}" title="Editar recibo">✏️</button>`}
         <button class="btn chico liso" data-pdf="${r.id}">PDF</button>
@@ -2939,7 +2967,7 @@ function renderRecibos() {
     const mensajeVacio = sub === 'pagados-enviar'
       ? 'No hay justificantes de pago por enviar este mes. 🎉'
       : 'No hay recibos por enviar este mes. 🎉';
-    const etiquetaLista = sub === 'pagados-enviar' ? 'pagado' : 'por enviar';
+    const etiquetaLista = sub === 'pagados-enviar' ? 'cobrado' : 'por enviar';
     cuerpo = listaEnviable.length === 0
       ? `<div class="vacio">${mensajeVacio}</div>`
       : `<h3 class="mes-seccion">${tituloMes(S.mesRecibos)}
@@ -2950,9 +2978,9 @@ function renderRecibos() {
   } else if (sub === 'pagados') {
     const total = pagados.reduce((s, r) => s + Number(r.importe), 0);
     cuerpo = pagados.length === 0
-      ? `<div class="vacio">Todavía no hay recibos pagados este mes.</div>`
+      ? `<div class="vacio">Todavía no hay recibos cobrados este mes.</div>`
       : `<h3 class="mes-seccion">${tituloMes(S.mesRecibos)}
-          <small>${pagados.length} pagado${pagados.length === 1 ? '' : 's'}${esAdmin ? ` · ${formatoImporte(total)}€` : ''}</small>
+          <small>${pagados.length} cobrado${pagados.length === 1 ? '' : 's'}${esAdmin ? ` · ${formatoImporte(total)}€` : ''}</small>
           <button class="btn chico" id="rc-descargar-mes">⬇ Descargar todos los PDF</button></h3>
         ${filasRecibos(pagados, esAdmin, true)}`;
   } else {
@@ -3024,24 +3052,49 @@ function renderRecibos() {
     modalEnvioMasivo(seleccion, tipoEnviable);
   };
 
-  document.querySelectorAll('[data-pagar]').forEach(b => b.onclick = async () => {
+  document.querySelectorAll('[data-pagar]').forEach(b => b.onclick = () => {
     const r = S.recibos.find(x => x.id === b.dataset.pagar);
     if (!r) return;
-    // Hermanos con recibo del mismo mes aún sin pagar: se cobran a la vez,
+    // Hermanos con recibo del mismo mes aún sin cobrar: se cobran a la vez,
     // como una sola gestión familiar (se mandaron juntos, se cobran juntos).
+    // Limitación conocida: si alguno de esos hermanos tiene padres separados,
+    // esto también une sus dos recibos (madre/padre) al mismo lote — para
+    // corregir la cuenta de uno solo después, está el botón "✎" de la fila.
     const hermanos = recibosHermanosDe(r).filter(h => h.estado !== 'pagado');
     const nombres = [r, ...hermanos].map(x => x.alumnos?.nombre || 'este alumno').join(' y ');
-    if (!confirm(`¿Estás seguro de que quieres marcar como PAGADO el recibo de ${nombres}${hermanos.length ? ' (recibo hermanos)' : ''} (${formatoImporte(r.importe)}€, ${r.concepto})?`)) return;
     const ids = [r.id, ...hermanos.map(h => h.id)];
-    const { error } = await S.sb.from('recibos').update({ estado: 'pagado', fecha_pago: new Date().toISOString() })
-      .in('id', ids);
-    if (error) return avisar('Error al marcar como pagado: ' + error.message, true);
-    await cargarRecibos();
-    renderRecibos();
-    // El envío del justificante ya no es automático: solo el admin lo manda,
-    // desde la pestaña "Pagados por enviar" (así cualquier profesor puede
-    // marcar el pago sin depender de tener acceso a WhatsApp).
-    avisar('Marcado como pagado.');
+    modalElegirCuentaCobro('Marcar como cobrado',
+      `¿Cómo se ha cobrado el recibo de ${e(nombres)}${hermanos.length ? ' (recibo hermanos)' : ''} (${formatoImporte(r.importe)}€, ${e(r.concepto)})?`,
+      async (cuenta) => {
+        const { error } = await S.sb.from('recibos')
+          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta })
+          .in('id', ids);
+        cerrarModal();
+        if (error) return avisar('Error al marcar como cobrado: ' + error.message, true);
+        await cargarRecibos();
+        renderRecibos();
+        // El envío del justificante ya no es automático: solo el admin lo manda,
+        // desde la pestaña "Pagados por enviar" (así cualquier profesor puede
+        // marcar el pago sin depender de tener acceso a WhatsApp).
+        avisar('Marcado como cobrado.');
+      });
+  });
+  document.querySelectorAll('[data-editar-cuenta]').forEach(b => b.onclick = () => {
+    const r = S.recibos.find(x => x.id === b.dataset.editarCuenta);
+    if (!r) return;
+    modalElegirCuentaCobro('Corregir cuenta de cobro',
+      `¿En qué cuenta se cobró de verdad el recibo de ${e(r.alumnos?.nombre || '')} (${formatoImporte(r.importe)}€, ${e(r.concepto)})? Esto solo corrige en qué cuenta se contabiliza — no cambia el estado ni la fecha de cobro.`,
+      async (cuenta) => {
+        const { error: errorRecibo } = await S.sb.from('recibos').update({ cuenta }).eq('id', r.id);
+        if (errorRecibo) { cerrarModal(); return avisar('Error: ' + errorRecibo.message, true); }
+        const { error: errorFinanzas } = await S.sb.from('finanzas_movimientos').update({ cuenta })
+          .eq('recibo_id', r.id).eq('origen', 'automatico');
+        cerrarModal();
+        if (errorFinanzas) return avisar('Se corrigió el recibo, pero no Ingresos y gastos: ' + errorFinanzas.message, true);
+        await Promise.all([cargarRecibos(), cargarFinanzas()]);
+        renderRecibos();
+        avisar('Cuenta corregida.');
+      });
   });
   document.querySelectorAll('[data-despagar]').forEach(b => b.onclick = async () => {
     const r = S.recibos.find(x => x.id === b.dataset.despagar);
@@ -3050,7 +3103,7 @@ function renderRecibos() {
     const nombres = [r, ...hermanos].map(x => x.alumnos?.nombre || 'este alumno').join(' y ');
     if (!confirm(`¿Estás seguro de que quieres volver a dejar PENDIENTE el recibo de ${nombres} (${formatoImporte(r.importe)}€, ${r.concepto})?`)) return;
     const ids = [r.id, ...hermanos.map(h => h.id)];
-    const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null })
+    const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null, cuenta: null })
       .in('id', ids);
     if (error) return avisar('Error: ' + error.message, true);
     await cargarRecibos();
@@ -3104,7 +3157,7 @@ function renderRecibosPorAlumno() {
   const filas = alumnos.map(a => {
     const recibo = S.recibos.find(r => r.alumno_id === a.id && claveMes(r.fecha_emision) === S.mesRecibos);
     const chip = !recibo ? '<span class="chip baja">sin recibo</span>'
-      : recibo.estado === 'pagado' ? '<span class="chip pagado">pagado</span>'
+      : recibo.estado === 'pagado' ? '<span class="chip pagado">cobrado</span>'
       : '<span class="chip pendiente">pendiente</span>';
     const chipHermanos = recibo && recibosHermanosDe(recibo).length ? ' <span class="chip activo" title="Recibo hermanos">👪</span>' : '';
     const acciones = !recibo
@@ -3747,17 +3800,28 @@ function nombreCortoMes(claveMes) {
   return MESES[Number(claveMes.split('-')[1]) - 1].slice(0, 3);
 }
 
-function totalCategoriaMes(tipo, categoria, claveMes) {
+function totalCategoriaMes(tipo, categoria, claveMes, cuenta = null) {
   return S.finanzas
-    .filter(m => m.tipo === tipo && m.categoria === categoria && claveMesFecha(m.fecha) === claveMes)
+    .filter(m => m.tipo === tipo && m.categoria === categoria && claveMesFecha(m.fecha) === claveMes
+      && (!cuenta || m.cuenta === cuenta))
     .reduce((s, m) => s + Number(m.importe), 0);
 }
 
-function totalTipoEnMeses(tipo, clavesMes) {
+function totalTipoEnMeses(tipo, clavesMes, cuenta = null) {
   const set = new Set(clavesMes);
   return S.finanzas
-    .filter(m => m.tipo === tipo && set.has(claveMesFecha(m.fecha)))
+    .filter(m => m.tipo === tipo && set.has(claveMesFecha(m.fecha)) && (!cuenta || m.cuenta === cuenta))
     .reduce((s, m) => s + Number(m.importe), 0);
+}
+
+// Saldo acumulado de una cuenta (Efectivo/Banco): el saldo de partida que
+// fijó el admin más todo lo que se le haya sumado/restado desde siempre —
+// no está acotado a un mes ni a un curso, es "cuánto hay ahora mismo".
+function saldoCuenta(cuenta) {
+  const inicial = Number(S.cuentasSaldoInicial.find(c => c.cuenta === cuenta)?.importe) || 0;
+  return S.finanzas
+    .filter(m => m.cuenta === cuenta)
+    .reduce((s, m) => s + (m.tipo === 'ingreso' ? Number(m.importe) : -Number(m.importe)), inicial);
 }
 
 // Categorías fijas de la lista + cualquier categoría suelta que ya tenga movimientos
@@ -3818,6 +3882,10 @@ function renderFinanzas() {
   if (!S.profesor?.es_admin) return renderAjustes();
   const tipo = S.vistaFinanzas === 'gastos' ? 'gasto' : 'ingreso';
   const modo = S.modoFinanzas || 'mes';
+  const cuenta = S.cuentaFinanzas || 'todo';
+  // null = sin filtrar (vista "Todo", igual que siempre); si no, acota
+  // categorías/totales a una sola cuenta.
+  const filtroCuenta = cuenta === 'todo' ? null : cuenta;
   const categorias = categoriasConExtras(tipo);
 
   let cuerpoTabla, barraNav, periodoMeses;
@@ -3842,7 +3910,7 @@ function renderFinanzas() {
     const cursoSiguiente = `${inicioActual + 1}-${inicioActual + 2}`;
     periodoMeses = meses;
 
-    const totalPorMes = meses.map(mc => categorias.reduce((s, c) => s + totalCategoriaMes(tipo, c, mc), 0));
+    const totalPorMes = meses.map(mc => categorias.reduce((s, c) => s + totalCategoriaMes(tipo, c, mc, filtroCuenta), 0));
     const totalGeneral = totalPorMes.reduce((s, x) => s + x, 0);
 
     barraNav = `
@@ -3861,7 +3929,7 @@ function renderFinanzas() {
       <thead><tr><th>Categoría</th>${meses.map(mc => `<th>${nombreCortoMes(mc)}</th>`).join('')}<th>Total</th></tr></thead>
       <tbody>
         ${categorias.map(cat => {
-          const valores = meses.map(mc => totalCategoriaMes(tipo, cat, mc));
+          const valores = meses.map(mc => totalCategoriaMes(tipo, cat, mc, filtroCuenta));
           const totalFila = valores.reduce((s, x) => s + x, 0);
           return `<tr>
             <td>${e(cat)}</td>
@@ -3885,7 +3953,7 @@ function renderFinanzas() {
     if (!S.mesFinanzas || !meses.includes(S.mesFinanzas)) S.mesFinanzas = mesActual;
     periodoMeses = [S.mesFinanzas];
 
-    const totalGeneral = categorias.reduce((s, c) => s + totalCategoriaMes(tipo, c, S.mesFinanzas), 0);
+    const totalGeneral = categorias.reduce((s, c) => s + totalCategoriaMes(tipo, c, S.mesFinanzas, filtroCuenta), 0);
     const esElMasReciente = S.mesFinanzas === meses[0];
     const esElMasAntiguo = S.mesFinanzas === meses[meses.length - 1];
 
@@ -3903,7 +3971,7 @@ function renderFinanzas() {
       <thead><tr><th>Categoría</th><th>Total del mes</th></tr></thead>
       <tbody>
         ${categorias.map(cat => {
-          const v = totalCategoriaMes(tipo, cat, S.mesFinanzas);
+          const v = totalCategoriaMes(tipo, cat, S.mesFinanzas, filtroCuenta);
           return `<tr class="celda-fin" data-cat="${e(cat)}" data-mes="${S.mesFinanzas}">
             <td>${e(cat)}</td>
             <td>${v ? `<strong>${formatoImporte(v)}€</strong>` : '<span class="ayuda">— (toca para añadir)</span>'}</td>
@@ -3914,9 +3982,16 @@ function renderFinanzas() {
     </table></div>`;
   }
 
-  const totalIngresosPeriodo = totalTipoEnMeses('ingreso', periodoMeses);
-  const totalGastosPeriodo = totalTipoEnMeses('gasto', periodoMeses);
+  const totalIngresosPeriodo = totalTipoEnMeses('ingreso', periodoMeses, filtroCuenta);
+  const totalGastosPeriodo = totalTipoEnMeses('gasto', periodoMeses, filtroCuenta);
   const etiquetaPeriodo = modo === 'anual' ? `Curso ${S.cursoFinanzas}` : tituloMes(S.mesFinanzas);
+
+  // Solo con una cuenta concreta elegida (no en "Todo") tiene sentido un
+  // saldo acumulado — es "cuánto hay ahora", no depende del mes/curso que
+  // se esté mirando.
+  const sinClasificar = filtroCuenta ? S.finanzas.filter(m => m.cuenta == null) : [];
+  const totalSinClasificar = sinClasificar.reduce((s, m) => s + Number(m.importe), 0);
+  const saldoInicialCuenta = filtroCuenta ? S.cuentasSaldoInicial.find(c => c.cuenta === filtroCuenta) : null;
 
   document.getElementById('contenido').innerHTML = `
   <div class="barra">
@@ -3927,6 +4002,11 @@ function renderFinanzas() {
     <div class="segmentos">
       <button class="seg ${modo === 'mes' ? 'activo' : ''}" data-modo-fin="mes">Mes</button>
       <button class="seg ${modo === 'anual' ? 'activo' : ''}" data-modo-fin="anual">Año completo</button>
+    </div>
+    <div class="segmentos">
+      <button class="seg ${cuenta === 'todo' ? 'activo' : ''}" data-cuenta-fin="todo">Todo</button>
+      <button class="seg ${cuenta === 'efectivo' ? 'activo' : ''}" data-cuenta-fin="efectivo">Efectivo</button>
+      <button class="seg ${cuenta === 'banco' ? 'activo' : ''}" data-cuenta-fin="banco">Banco</button>
     </div>
     <button class="btn liso" id="fin-anadir-categoria">+ Añadir columna</button>
     <span class="flex1"></span>
@@ -3948,15 +4028,27 @@ function renderFinanzas() {
       <div class="pc-titulo">balance</div>
       <div class="pc-detalle">${etiquetaPeriodo}</div>
     </div>
+    ${filtroCuenta ? `
+    <div class="portada-card estatica">
+      <div class="pc-num">${formatoImporte(saldoCuenta(filtroCuenta))}€</div>
+      <div class="pc-titulo">saldo actual</div>
+      <div class="pc-detalle">
+        <button class="btn chico liso" id="fin-saldo-inicial" style="margin:0">${saldoInicialCuenta ? 'Editar' : 'Fijar'} saldo inicial</button>
+      </div>
+    </div>` : ''}
   </div>
+  ${filtroCuenta && sinClasificar.length ? `<p class="ayuda">⚠ ${sinClasificar.length} movimiento${sinClasificar.length === 1 ? '' : 's'} sin clasificar (${formatoImporte(totalSinClasificar)}€) de antes de esta función, no incluido${sinClasificar.length === 1 ? '' : 's'} en este saldo.</p>` : ''}
   <p class="ayuda">Toca cualquier categoría para ver sus movimientos de ese mes y añadir uno nuevo.</p>
   ${cuerpoTabla}`;
 
   document.querySelectorAll('[data-tipo-fin]').forEach(b => b.onclick = () => { S.vistaFinanzas = b.dataset.tipoFin; renderFinanzas(); });
   document.querySelectorAll('[data-modo-fin]').forEach(b => b.onclick = () => { S.modoFinanzas = b.dataset.modoFin; renderFinanzas(); });
+  document.querySelectorAll('[data-cuenta-fin]').forEach(b => b.onclick = () => { S.cuentaFinanzas = b.dataset.cuentaFin; renderFinanzas(); });
   document.getElementById('fin-anadir-categoria').onclick = () => modalAnadirCategoriaFinanzas(tipo);
   document.querySelectorAll('.celda-fin[data-cat]').forEach(el => el.onclick = () =>
     modalCategoriaMovimientos(tipo, el.dataset.cat, el.dataset.mes));
+  const $fijarSaldo = document.getElementById('fin-saldo-inicial');
+  if ($fijarSaldo) $fijarSaldo.onclick = () => modalFijarSaldoInicial(filtroCuenta);
 
   if (modo === 'anual') {
     document.getElementById('fin-curso').onchange = (ev) => { S.cursoFinanzas = ev.target.value; renderFinanzas(); };
@@ -4023,6 +4115,49 @@ function modalAnadirCategoriaFinanzas(tipo) {
   };
 }
 
+// Saldo de partida de Efectivo o Banco — se guarda en su propia tabla
+// (cuentas_saldo_inicial, como mucho 2 filas) en vez de como un movimiento
+// más, para que nunca aparezca colado como categoría en las tablas ni en
+// el Excel anual, y no se pueda borrar sin querer con el botón de borrar
+// movimiento de siempre.
+function modalFijarSaldoInicial(cuenta) {
+  const actual = S.cuentasSaldoInicial.find(c => c.cuenta === cuenta);
+  const yaHabia = Boolean(actual);
+  const movs = S.finanzas.filter(m => m.cuenta === cuenta);
+  const totalMovs = movs.reduce((s, m) => s + (m.tipo === 'ingreso' ? Number(m.importe) : -Number(m.importe)), 0);
+  const nombreCuenta = cuenta === 'banco' ? 'Banco' : 'Efectivo';
+
+  abrirModal(`
+  <h2>${yaHabia ? 'Editar' : 'Fijar'} saldo inicial — ${nombreCuenta}</h2>
+  ${yaHabia ? `<p class="ayuda">⚠ Ya hay ${movs.length} movimiento${movs.length === 1 ? '' : 's'} registrado${movs.length === 1 ? '' : 's'}
+    en ${nombreCuenta} desde que se fijó este saldo (${formatoImporte(totalMovs)}€ en total).
+    Cambiarlo ahora recalcula el saldo actual, pero no toca esos movimientos.</p>` : ''}
+  <div class="grid2">
+    <label>Fecha<input id="si-fecha" type="date" value="${e(actual?.fecha || new Date().toISOString().slice(0, 10))}"></label>
+    <label>Importe (€)<input id="si-importe" type="number" step="0.01" value="${actual?.importe ?? ''}"></label>
+  </div>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+    <button class="btn primario" id="si-guardar">Guardar</button>
+  </div>
+  <p id="m-msg" class="error"></p>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('si-guardar').onclick = async () => {
+    const importe = Number(document.getElementById('si-importe').value);
+    const fecha = document.getElementById('si-fecha').value;
+    if (Number.isNaN(importe)) return avisar('Pon un importe válido.', true);
+    if (!fecha) return avisar('Elige una fecha.', true);
+    const { error } = await S.sb.from('cuentas_saldo_inicial').upsert({
+      cuenta, importe, fecha, actualizado_por: S.profesor.id, actualizado_en: new Date().toISOString()
+    });
+    if (error) return avisar('Error: ' + error.message, true);
+    await cargarCuentasSaldoInicial();
+    cerrarModal();
+    renderFinanzas();
+    avisar('Saldo inicial guardado.');
+  };
+}
+
 // Movimientos de una categoría en un mes concreto: verlos, borrarlos, y añadir uno nuevo.
 function modalCategoriaMovimientos(tipo, categoria, claveMes) {
   const lista = S.finanzas
@@ -4040,14 +4175,15 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes) {
     ${esPersonalizada ? '<button class="btn chico liso peligro" id="fc-borrar-categoria" style="margin-left:10px">🗑 Eliminar esta categoría</button>' : ''}</p>
   ${lista.length === 0 ? '<p class="ayuda">Sin movimientos todavía.</p>' : `
   <div class="tabla-wrap"><table>
-    <thead><tr><th>Fecha</th><th>Importe</th><th>Descripción</th><th></th></tr></thead>
+    <thead><tr><th>Fecha</th><th>Importe</th><th>Cuenta</th><th>Descripción</th><th></th></tr></thead>
     <tbody>
     ${lista.map(m => `<tr>
       <td>${e(fmtFecha(m.fecha))}</td>
       <td><strong>${formatoImporte(m.importe)}€</strong></td>
+      <td>${m.cuenta ? `<span class="chip activo">${m.cuenta === 'banco' ? 'Banco' : 'Efectivo'}</span>` : '<small class="ayuda">sin clasificar</small>'}</td>
       <td><small>${e(m.descripcion || '')}</small></td>
       <td class="acciones">${m.origen === 'automatico'
-        ? '<small class="ayuda" title="Viene de un recibo pagado; para quitarlo, deshaz el pago en Recibos">ligado a un recibo</small>'
+        ? '<small class="ayuda" title="Viene de un recibo cobrado; para quitarlo, deshaz el cobro en Recibos">ligado a un recibo</small>'
         : `<button class="btn chico liso peligro" data-borrar-fin="${m.id}">✕</button>`}</td>
     </tr>`).join('')}
     </tbody>
@@ -4058,6 +4194,12 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes) {
     <label>Importe (€)<input id="fc-importe" type="number" min="0" step="0.01"></label>
     <label>Descripción<input id="fc-descripcion"></label>
   </div>
+  <label class="check-inline">
+    <input type="radio" name="fc-cuenta" id="fc-cuenta-efectivo" checked> Efectivo
+  </label>
+  <label class="check-inline">
+    <input type="radio" name="fc-cuenta" id="fc-cuenta-banco"> Banco
+  </label>
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cerrar</button>
     <button class="btn primario" id="fc-guardar">Añadir</button>
@@ -4095,11 +4237,13 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes) {
     const fecha = document.getElementById('fc-fecha').value;
     if (!importe || importe <= 0) return avisar('El importe tiene que ser mayor que 0.', true);
     if (!fecha) return avisar('Elige una fecha.', true);
+    const cuentaElegida = document.getElementById('fc-cuenta-banco').checked ? 'banco' : 'efectivo';
     const { error } = await S.sb.from('finanzas_movimientos').insert({
       tipo, categoria, importe, fecha,
       descripcion: document.getElementById('fc-descripcion').value.trim() || null,
       origen: 'manual',
-      creado_por: S.profesor.id
+      creado_por: S.profesor.id,
+      cuenta: cuentaElegida
     });
     if (error) return avisar('Error: ' + error.message, true);
     await cargarFinanzas();
