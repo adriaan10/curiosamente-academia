@@ -2862,6 +2862,38 @@ function modalElegirCuentaCobro(titulo, mensaje, onElegir) {
   document.getElementById('ec-banco').onclick = () => onElegir('banco');
 }
 
+// Anotación de "han pagado parte, no todo" — puramente visual/informativa:
+// no toca estado ni Ingresos y gastos, solo deja constancia de cuánto han
+// dado ya para que el personal lo vea de un vistazo. El recibo sigue en
+// Pendiente de cobrar hasta que se marque "✓ Cobrado" de verdad con el
+// resto (ahí sí se contabiliza el total, por la cuenta que se elija).
+function modalPagoIncompleto(r) {
+  abrirModal(`
+  <h2>Pago incompleto — ${e(r.alumnos?.nombre || '')}</h2>
+  <p class="ayuda">Solo es una nota para que se vea a simple vista cuánto han pagado ya de este recibo
+  (${formatoImporte(r.importe)}€ en total). No cambia el estado ni mueve nada en Ingresos y gastos —
+  eso pasa cuando se marque "✓ Cobrado" con el resto.</p>
+  <label>¿Cuánto han pagado? (€)<input id="pi-importe" type="number" min="0.01" step="0.01" value="${r.importe_parcial ?? ''}"></label>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+    <button class="btn primario" id="pi-guardar">Guardar</button>
+  </div>
+  <p id="m-msg" class="error"></p>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('pi-guardar').onclick = async () => {
+    const importe = Number(document.getElementById('pi-importe').value);
+    const msg = document.getElementById('m-msg');
+    if (!importe || importe <= 0) { msg.textContent = 'Pon un importe mayor que 0.'; return; }
+    if (importe >= Number(r.importe)) { msg.textContent = `Tiene que ser menos que el total del recibo (${formatoImporte(r.importe)}€) — si ya han pagado todo, usa "✓ Cobrado".`; return; }
+    const { error } = await S.sb.from('recibos').update({ importe_parcial: importe }).eq('id', r.id);
+    if (error) { msg.textContent = 'Error: ' + error.message; return; }
+    await cargarRecibos();
+    cerrarModal();
+    renderRecibos();
+    avisar('Anotado.');
+  };
+}
+
 function filasRecibos(lista, esAdmin, pagados, seleccionables) {
   return `<table>
     <thead><tr>
@@ -2882,6 +2914,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
       ${esAdmin ? `<td>${e(r.profesores?.nombre || '')}</td>` : ''}
       <td><span class="chip ${estado.clase}">${estado.texto}</span>
         ${pagados && r.cuenta ? `<span class="chip activo">${r.cuenta === 'banco' ? 'Banco' : 'Efectivo'}</span>` : ''}
+        ${!pagados && r.importe_parcial ? `<span class="chip envio-no">${formatoImporte(r.importe_parcial)}€ de ${formatoImporte(r.importe)}€ cobrados</span>` : ''}
         ${r.progenitor ? `<span class="chip envio-si" title="Recibo repartido entre los dos progenitores">${r.progenitor === 'madre' ? 'Madre' : 'Padre'}</span>` : ''}
         ${hermanos.length ? `<span class="chip activo" title="Junto con: ${e(hermanos.map(h => h.alumnos?.nombre || '').join(', '))}">👪 Recibo hermanos</span>` : ''}
         ${r.estado_whatsapp === 'fallido' ? '<span class="chip wa-fallido" title="WhatsApp no pudo entregarlo: revisa el teléfono">Fallido</span>'
@@ -2893,6 +2926,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
           ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>
              <button class="btn chico liso" data-editar-cuenta="${r.id}" title="Corregir efectivo/banco">✎</button>` : '')
           : `<button class="btn chico pagar" data-pagar="${r.id}">✓ Cobrado</button>
+             <button class="btn chico liso" data-pago-incompleto="${r.id}" title="Anotar que han pagado solo una parte">Pago incompleto</button>
              ${esAdmin ? `<button class="btn chico liso" data-wa="${r.id}">WhatsApp</button>` : ''}
              <button class="btn chico liso" data-editar-recibo="${r.id}" title="Editar recibo">✏️</button>`}
         <button class="btn chico liso" data-pdf="${r.id}">PDF</button>
@@ -3067,7 +3101,7 @@ function renderRecibos() {
       `¿Cómo se ha cobrado el recibo de ${e(nombres)}${hermanos.length ? ' (recibo hermanos)' : ''} (${formatoImporte(r.importe)}€, ${e(r.concepto)})?`,
       async (cuenta) => {
         const { error } = await S.sb.from('recibos')
-          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta })
+          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta, importe_parcial: null })
           .in('id', ids);
         cerrarModal();
         if (error) return avisar('Error al marcar como cobrado: ' + error.message, true);
@@ -3078,6 +3112,11 @@ function renderRecibos() {
         // marcar el pago sin depender de tener acceso a WhatsApp).
         avisar('Marcado como cobrado.');
       });
+  });
+  document.querySelectorAll('[data-pago-incompleto]').forEach(b => b.onclick = () => {
+    const r = S.recibos.find(x => x.id === b.dataset.pagoIncompleto);
+    if (!r) return;
+    modalPagoIncompleto(r);
   });
   document.querySelectorAll('[data-editar-cuenta]').forEach(b => b.onclick = () => {
     const r = S.recibos.find(x => x.id === b.dataset.editarCuenta);

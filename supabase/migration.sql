@@ -1271,3 +1271,20 @@ $$;
 --   tiene sentido en su propio idioma) — el renombrado a "Cobrado" es
 --   solo interfaz interna de gestión; el valor `estado='pagado'` en base
 --   de datos tampoco cambia.
+
+-- "Pago incompleto" — nota visual, no un sistema real de pagos parciales
+-- (04/09/2026). A veces pagan menos de lo que toca (60€ de recibo, dan
+-- 50€) y no se puede dar por cobrado hasta que llegue el resto. En vez de
+-- montar un sistema completo de pagos parciales (tabla de pagos, repartir
+-- Mensualidad/Matrícula a prorrata, tocar el disparador de sincronización,
+-- rehacer el cobro conjunto de hermanos...), de momento es solo una nota:
+-- no cambia `estado` ni toca Ingresos y gastos para nada — eso solo pasa
+-- cuando se marca "✓ Cobrado" de verdad por el total, como siempre.
+alter table public.recibos
+  add column importe_parcial numeric check (importe_parcial is null or importe_parcial < importe);
+-- app.js: botón "Pago incompleto" junto a "✓ Cobrado" en cada recibo
+-- pendiente → modalPagoIncompleto() pide el importe ya pagado (rechaza
+-- >= importe del recibo) y lo guarda ahí. Chip naranja en la columna de
+-- Estado: "50€ de 60€ cobrados". Al marcar "✓ Cobrado" de verdad, se
+-- limpia `importe_parcial` a null (ya no hace falta, el recibo pasa a
+-- cobrado por el total).
