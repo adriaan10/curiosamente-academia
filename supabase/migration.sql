@@ -1303,3 +1303,99 @@ alter table public.recibos
 --   click/scroll): nueva cerrarSesion(mensaje), que reutiliza el propio
 --   botón "Salir" y también los cierres automáticos por baja de profesor
 --   que ya existían.
+
+-- Un admin puede hacer/quitar administrador a otros profesores (05/09/2026).
+-- cambiar_admin_profesor(p_profesor, p_es_admin): security definer, solo
+-- ejecutable si quien llama ya es admin (public.is_admin()); nunca se puede
+-- usar sobre uno mismo (mismo criterio que cambiar_estado_profesor() con la
+-- baja), para no quedarte sin permisos a medio cambio.
+--
+-- proteger_es_admin(): disparador BEFORE UPDATE en profesores que cierra un
+-- hueco que ya existía antes de esto — la política profesores_update deja a
+-- cualquier profesor tocar SU PROPIA fila (para poder cambiarse contraseña,
+-- teléfono, etc.), pero no distinguía columnas: sin este disparador, un
+-- profesor normal podría llamar directo a la API REST y ponerse
+-- es_admin=true él mismo. Ahora tocar es_admin solo cuela si quien hace el
+-- update ya es admin (la función de arriba, al ser security definer, sigue
+-- pudiendo hacerlo con el permiso del que la llamó).
+--
+-- app.js: modalEditarProfesor() añade un botón "Hacer administrador" /
+-- "Quitar administrador" (no aparece en la fila de uno mismo, igual que
+-- "Editar" ya no aparecía). Como cambiar el admin de alguien puede dejar
+-- desactualizados datos ya cargados en su sesión (finanzas, gestión de
+-- profesores...), en vez de intentar parchear el estado en caliente,
+-- recargarTrasCambioRemoto() detecta que su propio es_admin cambió y le
+-- fuerza una pantalla de "reinicia la app" (mostrarPantallaReinicioAdmin())
+-- con un botón que hace window.api.restartApp() → IPC 'app:restart' en
+-- main.js → app.relaunch() + app.exit(0), arranque limpio con los permisos
+-- nuevos ya aplicados desde el login.
+
+-- Categorías de Ingresos/Gastos por cuenta y borrables del todo (05/09/2026).
+-- finanzas_categorias gana una columna `cuenta` (efectivo/banco/NULL="las
+-- dos"): cada categoría vive solo en Efectivo, solo en Banco, o en las dos.
+-- Las categorías "de fábrica" (Luz, Alquiler, Matrícula...) que antes vivían
+-- a fuego en app.js (CATEGORIAS_INGRESO/CATEGORIAS_GASTO) se siembran aquí
+-- como filas normales (cuenta=NULL) para que el admin las pueda borrar o
+-- mover de cuenta igual que las que crea él — ya no hay ninguna protegida.
+alter table public.finanzas_categorias
+  add column cuenta text check (cuenta in ('efectivo', 'banco'));
+insert into public.finanzas_categorias (tipo, categoria) values
+  ('ingreso', 'Matrícula'), ('ingreso', 'Mensualidad'), ('ingreso', 'Tasas'),
+  ('ingreso', 'Cursos'), ('ingreso', 'Talleres'), ('ingreso', 'Impuestos'),
+  ('gasto', 'Luz'), ('gasto', 'Internet'), ('gasto', 'Fotocopiadora'),
+  ('gasto', 'Alquiler'), ('gasto', 'Autónomo'), ('gasto', 'Nóminas banco'),
+  ('gasto', 'Seguridad Social'), ('gasto', 'Nóminas efectivo'), ('gasto', 'Seguro'),
+  ('gasto', 'Otros'), ('gasto', 'Limpieza'), ('gasto', 'Agua'), ('gasto', 'Impuestos'),
+  ('gasto', 'Requerimientos legales'), ('gasto', 'Asesoría'), ('gasto', 'IA'),
+  ('gasto', 'Material'), ('gasto', 'Nómina nuestra'), ('gasto', 'Gasto efectivo'),
+  ('gasto', 'Gasto banco')
+on conflict (tipo, categoria) do nothing;
+-- app.js: categoriasConExtras(tipo, cuentaFiltro) filtra por cuenta cuando
+-- se está en Efectivo o Banco (las de "las dos" y las sueltas sin fila en la
+-- tabla siempre se ven, para no esconder dinero); en Todo salen todas.
+-- modalAnadirCategoriaFinanzas() pregunta dónde se usa la columna nueva.
+-- modalCategoriaMovimientos() ya no oculta el botón de borrar para ninguna
+-- categoría (antes solo las personalizadas lo tenían).
+
+-- Avisos de Inicio: no duplicar acciones entre dos admins (05/09/2026).
+-- Con Adrián y Judith como admins activos, si uno resuelve un aviso
+-- (completa una ficha sin precio, marca visto un cambio de horario/
+-- reactivación/baja de asignatura, genera un recibo fuera de fecha) mientras
+-- el otro tiene esa misma lista abierta en un modal, hace falta que se
+-- entere en vivo de quién lo hizo, en vez de dejarle repetir la acción.
+alter table public.cambios_horario
+  add column visto_por uuid references public.profesores(id),
+  add column visto_en timestamptz;
+alter table public.reactivaciones_alumno
+  add column visto_por uuid references public.profesores(id),
+  add column visto_en timestamptz;
+alter table public.bajas_asignatura
+  add column visto_por uuid references public.profesores(id),
+  add column visto_en timestamptz;
+alter table public.matriculas
+  add column actualizado_por uuid references public.profesores(id),
+  add column actualizado_en timestamptz;
+-- Estas tres tablas ya tenían profesor_id (quien ORIGINÓ el evento, un
+-- profesor normal) — con la FK nueva a profesores, el embed de
+-- cargarCambiosHorario()/cargarReactivaciones()/cargarBajasAsignatura()
+-- (app.js) tuvo que pasar de "profesores(nombre)" a
+-- "profesores!profesor_id(nombre)" para no quedar ambiguo ante PostgREST.
+--
+-- app.js: avisoAbierto (variable de módulo) + refrescarAvisoAbierto()
+-- guardan qué aviso-modal está abierto ahora mismo; recargarTrasCambioRemoto()
+-- lo llama en vez de saltarse el repintado cuando hay uno de estos abierto
+-- (cualquier OTRO modal se sigue comportando exactamente igual que antes —
+-- abrirModal() limpia avisoAbierto en cuanto se abre cualquier modal nuevo,
+-- así que un modalAlumno/modalRecibo abierto desde un aviso nunca puede ser
+-- sustituido por un refresco de otro admin). Fila resuelta por otro admin:
+-- sin botón de acción, "✓ Hecho/Visto por X" + un "Quitar" que solo limpia
+-- la vista local (el aviso ya está resuelto de verdad, no toca la BD). Fila
+-- resuelta por el propio admin que tiene el modal abierto: desaparece sin
+-- avisar. No hace falta ninguna tabla de "visto por cada admin": todos los
+-- avisos son derivados en vivo de los datos actuales, así que en cuanto se
+-- resuelve algo de verdad deja de salir en cualquier lista fresca.
+--
+-- Extra, no pedido pero barato: el botón "Generar recibo" (altas fuera de
+-- fecha) hace una comprobación de última hora antes de insertar, para
+-- cerrar la ventana de duplicado real si los dos admins lo pulsan casi a
+-- la vez para el mismo alumno.

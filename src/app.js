@@ -148,6 +148,12 @@ const TABLAS_TIEMPO_REAL = [
 let canalTiempoReal = null;
 let timerRecargaTiempoReal = null;
 
+// Aviso de Inicio actualmente mostrado en un modal (fichas sin precio,
+// cambios de horario, altas fuera de fecha, reactivaciones, bajas de
+// asignatura) — { tipo, ids } — o null si no hay ninguno abierto. Lo limpia
+// abrirModal() en cuanto se abre CUALQUIER otro modal (ver más abajo).
+let avisoAbierto = null;
+
 function iniciarTiempoReal() {
   if (canalTiempoReal) return; // ya está en marcha, no crear otro canal duplicado
   let canal = S.sb.channel('cambios-academia');
@@ -244,19 +250,42 @@ async function recargarTrasCambioRemoto() {
       }, 0);
       return;
     }
+    // Un cambio de es_admin a mitad de sesión deja desactualizado demasiado
+    // (finanzas cargadas o no, gestión de profesores visible o no...) para
+    // parchearlo en caliente: mejor forzar un reinicio limpio, como con la
+    // baja de arriba, en vez de arriesgarse a que la app se quede rara.
+    if (propia && propia.es_admin !== S.profesor.es_admin) {
+      const esAdminNuevo = propia.es_admin;
+      detenerTiempoReal();
+      detenerControlInactividad();
+      mostrarPantallaReinicioAdmin(esAdminNuevo);
+      return;
+    }
     if (propia) S.profesor = propia;
   }
 
   // No interrumpir con un repintado completo si hay una ficha/modal abierta:
   // se vería la pantalla de golpe y se perdería lo que se estuviera editando.
+  // Excepción: un aviso de Inicio (fichas sin precio, cambios de horario...)
+  // abierto en modal SÍ se refresca en su sitio — es solo una lista de
+  // solo-lectura + botones, sin nada que se pueda estar escribiendo, y así
+  // un admin no se queda mirando una fila ya resuelta por el otro sin saberlo.
   const modal = document.getElementById('modal-raiz');
-  if (modal && modal.innerHTML.trim()) return;
+  if (modal && modal.innerHTML.trim()) {
+    refrescarAvisoAbierto();
+    return;
+  }
   renderVistaActual();
 }
 
 async function cargarCambiosHorario() {
+  // profesores!profesor_id: ahora que la tabla tiene una SEGUNDA FK a
+  // profesores (visto_por, para saber quién marcó el aviso como visto), hay
+  // que decir cuál de las dos relaciones es "profesores(nombre)" o
+  // PostgREST la da por ambigua. Esta sigue siendo el profesor que ORIGINÓ
+  // el cambio, no quien lo revisó.
   const { data, error } = await S.sb.from('cambios_horario')
-    .select('*, alumnos(nombre), profesores(nombre)')
+    .select('*, alumnos(nombre), profesores!profesor_id(nombre)')
     .order('fecha', { ascending: false });
   if (error) return avisar('Error cargando modificaciones: ' + error.message, true);
   S.cambiosHorario = data || [];
@@ -264,7 +293,7 @@ async function cargarCambiosHorario() {
 
 async function cargarReactivaciones() {
   const { data, error } = await S.sb.from('reactivaciones_alumno')
-    .select('*, alumnos(nombre), profesores(nombre)')
+    .select('*, alumnos(nombre), profesores!profesor_id(nombre)')
     .order('fecha', { ascending: false });
   if (error) return avisar('Error cargando reactivaciones: ' + error.message, true);
   S.reactivaciones = data || [];
@@ -272,7 +301,7 @@ async function cargarReactivaciones() {
 
 async function cargarBajasAsignatura() {
   const { data, error } = await S.sb.from('bajas_asignatura')
-    .select('*, alumnos(nombre), profesores(nombre), asignaturas(nombre)')
+    .select('*, alumnos(nombre), profesores!profesor_id(nombre), asignaturas(nombre)')
     .order('fecha', { ascending: false });
   if (error) return avisar('Error cargando bajas de asignatura: ' + error.message, true);
   S.bajasAsignatura = data || [];
@@ -405,6 +434,27 @@ function mostrarPantallaSinConexion() {
       <p class="ayuda">Se ha perdido la conexión a internet. La app se recupera sola en cuanto vuelva.</p>
     </div>
   </div>`;
+}
+
+// Pantalla completa (igual de bloqueante que la de "Sin conexión") cuando un
+// admin te acaba de hacer o quitar administrador mientras tenías la app
+// abierta: en vez de intentar parchear en caliente todo lo que depende de
+// es_admin (finanzas, gestión de profesores...), se fuerza un reinicio limpio.
+function mostrarPantallaReinicioAdmin(esAdminNuevo) {
+  $app().innerHTML = `
+  <div class="centrado">
+    <div class="tarjeta login">
+      ${logoHtml()}
+      <p class="sub">tu centro de estudios</p>
+      <h2>Tus permisos han cambiado</h2>
+      <p class="ayuda">${esAdminNuevo
+        ? 'Un administrador te acaba de dar permisos de administrador.'
+        : 'Un administrador te acaba de quitar los permisos de administrador.'}
+      Reinicia la app para que se apliquen bien.</p>
+      <button class="btn primario" id="btn-reiniciar-admin" style="margin-top:14px; width:100%">Reiniciar ahora</button>
+    </div>
+  </div>`;
+  document.getElementById('btn-reiniciar-admin').onclick = () => window.api.restartApp();
 }
 
 function marcarDesconectado() {
@@ -733,43 +783,152 @@ function recibosPendientesFueraDeFecha() {
   });
 }
 
+// ---- Avisos de Inicio: helpers compartidos para refrescarlos en vivo ----
+// Con dos admins, si uno resuelve un aviso mientras el otro tiene la misma
+// lista abierta en un modal, ese modal se queda con la foto fija del
+// momento en que se abrió. avisoAbierto + refrescarAvisoAbierto() (más
+// abajo) hacen que, en cuanto llega el cambio por tiempo real, esa fila
+// concreta se sustituya por un "✓ Hecho/Visto por X" sin botón de acción —
+// así no se puede repetir una acción que el otro ya hizo.
+
+// Fila ya resuelta por OTRO admin: sin botón de acción, con quién lo hizo.
+// "Quitar" solo limpia la vista de quien la está mirando ahora — el aviso ya
+// está resuelto de verdad, no hay nada que tocar en la base de datos.
+function filaAvisoResuelto(id, etiquetaHtml, nombreQuien) {
+  return `<li data-item="${e(String(id))}">${etiquetaHtml}
+    <br><span class="chip envio-si">✓ Hecho por ${e(nombreQuien)}</span>
+    <button class="btn chico liso" data-quitar-aviso="1">Quitar</button></li>`;
+}
+function activarQuitarAviso() {
+  document.querySelectorAll('[data-quitar-aviso]').forEach(b => b.onclick = () => b.closest('[data-item]')?.remove());
+}
+function nombreProfesor(id) {
+  return S.profesores.find(p => p.id === id)?.nombre || 'otro admin';
+}
+
+function filaAltaFueraDeFecha(a) {
+  return `<li data-item="${a.id}">
+    <button class="btn chico" data-generar="${a.id}">Generar recibo</button>
+    &nbsp;${e(a.nombre)} <small>· alta ${fmtFecha(a.fecha_alta)}</small>
+  </li>`;
+}
+function activarBotonesAltasFueraDeFecha() {
+  document.querySelectorAll('[data-generar]').forEach(b => b.onclick = async () => {
+    const alumno = S.alumnos.find(a => a.id === b.dataset.generar);
+    // Última comprobación antes de generar: si el otro admin lo generó justo
+    // antes de que este clic llegara, no duplicar el recibo.
+    const periodoActual = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+    const { data: recibosAlumno } = await S.sb.from('recibos').select('id, periodos').eq('alumno_id', alumno.id);
+    if ((recibosAlumno || []).some(r => (r.periodos || []).includes(periodoActual))) {
+      await cargarRecibos();
+      cerrarModal();
+      if (S.vista === 'inicio') renderInicio();
+      return avisar('Ya se generó el recibo de este alumno (lo hizo el otro admin).', true);
+    }
+    cerrarModal();
+    modalRecibo(alumno);
+  });
+}
 function modalRecibosFueraDeFecha(lista) {
   abrirModal(`
   <h2>Recibos para generar a mano</h2>
   <p class="ayuda">Se dieron de alta después del día 1, así que el envío automático de este mes
   ya no los recogió. Genera su recibo con el botón y listo.</p>
-  <ul class="detalle-alumnos">
-    ${lista.map(a => `<li>
-      <button class="btn chico" data-generar="${a.id}">Generar recibo</button>
-      &nbsp;${e(a.nombre)} <small>· alta ${fmtFecha(a.fecha_alta)}</small>
-    </li>`).join('')}
+  <ul class="detalle-alumnos" id="av-altas">
+    ${lista.map(filaAltaFueraDeFecha).join('')}
   </ul>
   <div class="pie-modal"><button class="btn liso" id="m-cancelar">Cerrar</button></div>`);
+  avisoAbierto = { tipo: 'altas', ids: lista.map(a => a.id) };
   document.getElementById('m-cancelar').onclick = cerrarModal;
-  document.querySelectorAll('[data-generar]').forEach(b => b.onclick = () => {
-    cerrarModal();
-    modalRecibo(S.alumnos.find(a => a.id === b.dataset.generar));
-  });
+  activarBotonesAltasFueraDeFecha();
 }
 
 // Alumnos con matrícula sin precio: no se generan recibos hasta completarla.
+function filaFichaIncompleta(alumno, matricula) {
+  return `<li data-item="${alumno.id}|${matricula.asignatura_id}">
+    <button class="btn chico" data-completar="${alumno.id}">Completar</button>
+    &nbsp;${e(alumno.nombre)} <small>· ${e(matricula.asignaturas?.nombre || '')}</small>
+  </li>`;
+}
+function activarBotonesFichasIncompletas() {
+  document.querySelectorAll('[data-completar]').forEach(b => b.onclick = () => {
+    cerrarModal();
+    modalAlumno(S.alumnos.find(a => a.id === b.dataset.completar));
+  });
+}
 function modalFichasIncompletas(lista) {
   abrirModal(`
   <h2>Fichas sin precio</h2>
   <p class="ayuda">Estos alumnos tienen alguna asignatura sin tarifa fijada — no se les generará
   recibo hasta que se complete.</p>
-  <ul class="detalle-alumnos">
-    ${lista.map(({ alumno, matricula }) => `<li>
-      <button class="btn chico" data-completar="${alumno.id}">Completar</button>
-      &nbsp;${e(alumno.nombre)} <small>· ${e(matricula.asignaturas?.nombre || '')}</small>
-    </li>`).join('')}
+  <ul class="detalle-alumnos" id="av-fichas">
+    ${lista.map(({ alumno, matricula }) => filaFichaIncompleta(alumno, matricula)).join('')}
   </ul>
   <div class="pie-modal"><button class="btn liso" id="m-cancelar">Cerrar</button></div>`);
+  avisoAbierto = { tipo: 'fichas', ids: lista.map(({ alumno, matricula }) => `${alumno.id}|${matricula.asignatura_id}`) };
   document.getElementById('m-cancelar').onclick = cerrarModal;
-  document.querySelectorAll('[data-completar]').forEach(b => b.onclick = () => {
-    cerrarModal();
-    modalAlumno(S.alumnos.find(a => a.id === b.dataset.completar));
-  });
+  activarBotonesFichasIncompletas();
+}
+
+// Refresca en su sitio el aviso que se tenga abierto (si hay uno) cuando
+// llega un cambio en tiempo real de OTRO admin, en vez de dejarlo con la
+// foto fija de cuando se abrió. La llama recargarTrasCambioRemoto().
+function refrescarAvisoAbierto() {
+  if (!avisoAbierto) return;
+  const cont = document.getElementById('av-' + avisoAbierto.tipo);
+  if (!cont) { avisoAbierto = null; return; } // el modal ya no es este aviso
+
+  if (avisoAbierto.tipo === 'fichas') {
+    cont.innerHTML = avisoAbierto.ids.map(id => {
+      const [alumnoId, asigId] = id.split('|');
+      const alumno = S.alumnos.find(a => a.id === alumnoId);
+      const matricula = alumno?.matriculas?.find(m => String(m.asignatura_id) === asigId);
+      if (!alumno || !matricula) return '';
+      if (matricula.tarifa == null) return filaFichaIncompleta(alumno, matricula);
+      if (matricula.actualizado_por === S.profesor.id) return '';
+      return filaAvisoResuelto(id,
+        `${e(alumno.nombre)} <small>· ${e(matricula.asignaturas?.nombre || '')}</small>`,
+        nombreProfesor(matricula.actualizado_por));
+    }).join('');
+    activarBotonesFichasIncompletas();
+    activarQuitarAviso();
+    return;
+  }
+
+  if (avisoAbierto.tipo === 'altas') {
+    const periodoActual = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+    const pendientesIds = new Set(recibosPendientesFueraDeFecha().map(a => a.id));
+    cont.innerHTML = avisoAbierto.ids.map(id => {
+      const alumno = S.alumnos.find(a => a.id === id);
+      if (!alumno) return '';
+      if (pendientesIds.has(id)) return filaAltaFueraDeFecha(alumno);
+      const recibo = S.recibos.find(r => r.alumno_id === id && (r.periodos || []).includes(periodoActual));
+      if (!recibo || recibo.profesor_id === S.profesor.id) return '';
+      return filaAvisoResuelto(id, `${e(alumno.nombre)} <small>· alta ${fmtFecha(alumno.fecha_alta)}</small>`,
+        nombreProfesor(recibo.profesor_id));
+    }).join('');
+    activarBotonesAltasFueraDeFecha();
+    activarQuitarAviso();
+    return;
+  }
+
+  // cambios / reactivaciones / bajas comparten la misma forma: una tabla en
+  // S con visto/visto_por, y un "Editar ficha" que abre modalAlumno.
+  const CONFIG = {
+    cambios: { arr: S.cambiosHorario, etiqueta: etiquetaCambioHorario, fila: filaCambioHorario, activar: activarBotonesCambiosHorario },
+    reactivaciones: { arr: S.reactivaciones, etiqueta: etiquetaReactivacion, fila: filaReactivacion, activar: activarBotonesReactivaciones },
+    bajas: { arr: S.bajasAsignatura, etiqueta: etiquetaBajaAsignatura, fila: filaBajaAsignatura, activar: activarBotonesBajasAsignatura }
+  }[avisoAbierto.tipo];
+  if (!CONFIG) return;
+  cont.innerHTML = avisoAbierto.ids.map(id => {
+    const fila = CONFIG.arr.find(x => x.id === id);
+    if (!fila) return '';
+    if (!fila.visto) return CONFIG.fila(fila);
+    if (fila.visto_por === S.profesor.id) return '';
+    return filaAvisoResuelto(id, CONFIG.etiqueta(fila), nombreProfesor(fila.visto_por));
+  }).join('');
+  CONFIG.activar();
+  activarQuitarAviso();
 }
 
 // ---------------------------------------------------------------- alumnos
@@ -801,6 +960,19 @@ function colorArea(nombreAsignatura) {
   if (n.startsWith('Matemáticas')) return { fondo: '#DCEBFA', borde: '#3D7DC8' };
   if (n.startsWith('Física')) return { fondo: '#DFF2E4', borde: '#2E9E5B' };
   return { fondo: '#EFEFF2', borde: '#8E8E93' };
+}
+
+// Teléfono a mostrar en el listado de alumnos: el normal si lo hay; si no y
+// tiene padres separados, los dos (madre y padre) para que no quede vacío.
+function telefonosParaLista(a) {
+  if (a.telefono || a.tutor_telefono) return a.telefono || a.tutor_telefono;
+  if (a.padres_separados) {
+    const partes = [];
+    if (a.madre_telefono) partes.push(`M: ${a.madre_telefono}`);
+    if (a.padre_telefono) partes.push(`P: ${a.padre_telefono}`);
+    return partes.join(' · ');
+  }
+  return '';
 }
 
 function chipAsignatura(m, extraHtml = '') {
@@ -871,7 +1043,7 @@ function renderAlumnos() {
       <td><strong>${e(a.nombre)}</strong>${a.tutor_nombre ? `<br><small>Tutor: ${e(a.tutor_nombre)}</small>` : ''}</td>
       <td>${(a.matriculas || []).map(m => chipAsignatura(m)).join(' ')
         || '<small>Sin asignaturas</small>'}</td>
-      <td>${e(a.telefono || a.tutor_telefono || '')}</td>
+      <td>${e(telefonosParaLista(a))}</td>
       <td><span class="chip ${a.estado}">${a.estado}</span></td>
       <td class="acciones">
         <button class="btn chico" data-recibo="${a.id}">Recibo</button>
@@ -1158,7 +1330,11 @@ function modalAlumno(alumno) {
         asignatura_id: Number(m.asignatura_id),
         tarifa: (m.tarifa === '' || m.tarifa == null) ? null : Number(m.tarifa),
         tipo_tarifa: m.tipo_tarifa,
-        horas_semana: m.horas_semana ? Number(m.horas_semana) : null
+        horas_semana: m.horas_semana ? Number(m.horas_semana) : null,
+        // Quién completó/tocó el precio: para poder avisar en vivo "Hecho por
+        // X" al otro admin si tenía la lista de "fichas sin precio" abierta.
+        actualizado_por: S.profesor.id,
+        actualizado_en: new Date().toISOString()
       };
       const { error } = m.id
         ? await S.sb.from('matriculas').update(datos).eq('id', m.id)
@@ -1359,126 +1535,153 @@ function modalModificaciones() {
 }
 
 // Vista para el administrador de los cambios de horas que no ha revisado aún.
-function modalModificacionesSinVer(lista) {
-  abrirModal(`
-  <h2>Modificación horas alumnos sin revisar</h2>
-  <ul class="detalle-alumnos" style="columns:1">
-    ${lista.map(c => `<li>
-      <strong>${e(c.alumnos?.nombre || '')}</strong> — ${c.horas_antes ?? '—'} → ${c.horas_despues} h/sem
-      <br><small>${e(c.profesores?.nombre || '')} · ${fmtFecha(String(c.fecha).slice(0, 10))}</small>
-      <br>
-      <button class="btn chico" data-editar-cambio="${c.id}" data-alumno-cambio="${c.alumno_id}">Editar ficha</button>
-      <button class="btn chico liso" data-visto-cambio="${c.id}">✓ Visto</button>
-    </li>`).join('')}
-  </ul>
-  <div class="pie-modal">
-    <button class="btn liso" id="m-cancelar">Cerrar sin marcar</button>
-    <button class="btn primario" id="md-marcar-vistas">Marcar todas como vistas</button>
-  </div>`);
-  document.getElementById('m-cancelar').onclick = cerrarModal;
-  document.getElementById('md-marcar-vistas').onclick = async () => {
-    await S.sb.from('cambios_horario').update({ visto: true }).in('id', lista.map(c => c.id));
-    await cargarCambiosHorario();
-    cerrarModal();
-    if (S.vista === 'inicio') renderInicio();
-    avisar('Modificaciones marcadas como vistas.');
-  };
+function etiquetaCambioHorario(c) {
+  return `<strong>${e(c.alumnos?.nombre || '')}</strong> — ${c.horas_antes ?? '—'} → ${c.horas_despues} h/sem
+    <br><small>${e(c.profesores?.nombre || '')} · ${fmtFecha(String(c.fecha).slice(0, 10))}</small>`;
+}
+function filaCambioHorario(c) {
+  return `<li data-item="${c.id}">${etiquetaCambioHorario(c)}
+    <br>
+    <button class="btn chico" data-editar-cambio="${c.id}" data-alumno-cambio="${c.alumno_id}">Editar ficha</button>
+    <button class="btn chico liso" data-visto-cambio="${c.id}">✓ Visto</button>
+  </li>`;
+}
+function activarBotonesCambiosHorario() {
   document.querySelectorAll('[data-visto-cambio]').forEach(b => b.onclick = async () => {
-    await S.sb.from('cambios_horario').update({ visto: true }).eq('id', b.dataset.vistoCambio);
+    await S.sb.from('cambios_horario').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).eq('id', b.dataset.vistoCambio);
     await cargarCambiosHorario();
     cerrarModal();
     if (S.vista === 'inicio') renderInicio();
     avisar('Marcado como visto.');
   });
   document.querySelectorAll('[data-editar-cambio]').forEach(b => b.onclick = async () => {
-    await S.sb.from('cambios_horario').update({ visto: true }).eq('id', b.dataset.editarCambio);
+    await S.sb.from('cambios_horario').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).eq('id', b.dataset.editarCambio);
     await cargarCambiosHorario();
     cerrarModal();
     modalAlumno(S.alumnos.find(a => a.id === b.dataset.alumnoCambio));
   });
 }
-
-// Alumnos que un profesor (no la admin) ha reactivado: ella puede entrar a
-// corregir la ficha (nivel, precio, horas…) o simplemente marcarlo como visto.
-function modalReactivacionesSinVer(lista) {
+function modalModificacionesSinVer(lista) {
   abrirModal(`
-  <h2>Alumnos reactivados por profesores</h2>
-  <ul class="detalle-alumnos" style="columns:1">
-    ${lista.map(r => `<li>
-      <strong>${e(r.alumnos?.nombre || '')}</strong>
-      <br><small>Reactivado por ${e(r.profesores?.nombre || '')} · ${fmtFecha(String(r.fecha).slice(0, 10))}</small>
-      <br>
-      <button class="btn chico" data-editar-reactivacion="${r.id}" data-alumno-reactivacion="${r.alumno_id}">Editar ficha</button>
-      <button class="btn chico liso" data-visto-reactivacion="${r.id}">✓ Visto</button>
-    </li>`).join('')}
+  <h2>Modificación horas alumnos sin revisar</h2>
+  <ul class="detalle-alumnos" id="av-cambios" style="columns:1">
+    ${lista.map(filaCambioHorario).join('')}
   </ul>
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cerrar sin marcar</button>
-    <button class="btn primario" id="rv-marcar-vistas">Marcar todas como vistas</button>
+    <button class="btn primario" id="md-marcar-vistas">Marcar todas como vistas</button>
   </div>`);
+  avisoAbierto = { tipo: 'cambios', ids: lista.map(c => c.id) };
   document.getElementById('m-cancelar').onclick = cerrarModal;
-  document.getElementById('rv-marcar-vistas').onclick = async () => {
-    await S.sb.from('reactivaciones_alumno').update({ visto: true }).in('id', lista.map(r => r.id));
-    await cargarReactivaciones();
+  document.getElementById('md-marcar-vistas').onclick = async () => {
+    await S.sb.from('cambios_horario').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).in('id', lista.map(c => c.id));
+    await cargarCambiosHorario();
     cerrarModal();
     if (S.vista === 'inicio') renderInicio();
-    avisar('Reactivaciones marcadas como vistas.');
+    avisar('Modificaciones marcadas como vistas.');
   };
+  activarBotonesCambiosHorario();
+}
+
+// Alumnos que un profesor (no la admin) ha reactivado: ella puede entrar a
+// corregir la ficha (nivel, precio, horas…) o simplemente marcarlo como visto.
+function etiquetaReactivacion(r) {
+  return `<strong>${e(r.alumnos?.nombre || '')}</strong>
+    <br><small>Reactivado por ${e(r.profesores?.nombre || '')} · ${fmtFecha(String(r.fecha).slice(0, 10))}</small>`;
+}
+function filaReactivacion(r) {
+  return `<li data-item="${r.id}">${etiquetaReactivacion(r)}
+    <br>
+    <button class="btn chico" data-editar-reactivacion="${r.id}" data-alumno-reactivacion="${r.alumno_id}">Editar ficha</button>
+    <button class="btn chico liso" data-visto-reactivacion="${r.id}">✓ Visto</button>
+  </li>`;
+}
+function activarBotonesReactivaciones() {
   document.querySelectorAll('[data-visto-reactivacion]').forEach(b => b.onclick = async () => {
-    await S.sb.from('reactivaciones_alumno').update({ visto: true }).eq('id', b.dataset.vistoReactivacion);
+    await S.sb.from('reactivaciones_alumno').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).eq('id', b.dataset.vistoReactivacion);
     await cargarReactivaciones();
     cerrarModal();
     if (S.vista === 'inicio') renderInicio();
     avisar('Marcado como visto.');
   });
   document.querySelectorAll('[data-editar-reactivacion]').forEach(b => b.onclick = async () => {
-    await S.sb.from('reactivaciones_alumno').update({ visto: true }).eq('id', b.dataset.editarReactivacion);
+    await S.sb.from('reactivaciones_alumno').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).eq('id', b.dataset.editarReactivacion);
     await cargarReactivaciones();
     cerrarModal();
     modalAlumno(S.alumnos.find(a => a.id === b.dataset.alumnoReactivacion));
   });
 }
+function modalReactivacionesSinVer(lista) {
+  abrirModal(`
+  <h2>Alumnos reactivados por profesores</h2>
+  <ul class="detalle-alumnos" id="av-reactivaciones" style="columns:1">
+    ${lista.map(filaReactivacion).join('')}
+  </ul>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cerrar sin marcar</button>
+    <button class="btn primario" id="rv-marcar-vistas">Marcar todas como vistas</button>
+  </div>`);
+  avisoAbierto = { tipo: 'reactivaciones', ids: lista.map(r => r.id) };
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('rv-marcar-vistas').onclick = async () => {
+    await S.sb.from('reactivaciones_alumno').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).in('id', lista.map(r => r.id));
+    await cargarReactivaciones();
+    cerrarModal();
+    if (S.vista === 'inicio') renderInicio();
+    avisar('Reactivaciones marcadas como vistas.');
+  };
+  activarBotonesReactivaciones();
+}
 
 // Alumnos que un profesor (no la admin) ha dado de baja de UNA asignatura:
 // la admin puede entrar a revisar el precio (puede que ya no le corresponda
 // el descuento por varias asignaturas) o simplemente marcarlo como visto.
-function modalBajasAsignaturaSinVer(lista) {
-  abrirModal(`
-  <h2>Bajas de asignatura sin revisar</h2>
-  <ul class="detalle-alumnos" style="columns:1">
-    ${lista.map(b => `<li>
-      <strong>${e(b.alumnos?.nombre || '')}</strong> — baja de ${e(b.asignaturas?.nombre || '')}
-      <br><small>${e(b.profesores?.nombre || '')} · ${fmtFecha(String(b.fecha).slice(0, 10))}</small>
-      <br>
-      <button class="btn chico" data-editar-baja-asig="${b.id}" data-alumno-baja-asig="${b.alumno_id}">Editar ficha</button>
-      <button class="btn chico liso" data-visto-baja-asig="${b.id}">✓ Visto</button>
-    </li>`).join('')}
-  </ul>
-  <div class="pie-modal">
-    <button class="btn liso" id="m-cancelar">Cerrar sin marcar</button>
-    <button class="btn primario" id="ba-marcar-vistas">Marcar todas como vistas</button>
-  </div>`);
-  document.getElementById('m-cancelar').onclick = cerrarModal;
-  document.getElementById('ba-marcar-vistas').onclick = async () => {
-    await S.sb.from('bajas_asignatura').update({ visto: true }).in('id', lista.map(b => b.id));
-    await cargarBajasAsignatura();
-    cerrarModal();
-    if (S.vista === 'inicio') renderInicio();
-    avisar('Bajas de asignatura marcadas como vistas.');
-  };
+function etiquetaBajaAsignatura(b) {
+  return `<strong>${e(b.alumnos?.nombre || '')}</strong> — baja de ${e(b.asignaturas?.nombre || '')}
+    <br><small>${e(b.profesores?.nombre || '')} · ${fmtFecha(String(b.fecha).slice(0, 10))}</small>`;
+}
+function filaBajaAsignatura(b) {
+  return `<li data-item="${b.id}">${etiquetaBajaAsignatura(b)}
+    <br>
+    <button class="btn chico" data-editar-baja-asig="${b.id}" data-alumno-baja-asig="${b.alumno_id}">Editar ficha</button>
+    <button class="btn chico liso" data-visto-baja-asig="${b.id}">✓ Visto</button>
+  </li>`;
+}
+function activarBotonesBajasAsignatura() {
   document.querySelectorAll('[data-visto-baja-asig]').forEach(b => b.onclick = async () => {
-    await S.sb.from('bajas_asignatura').update({ visto: true }).eq('id', b.dataset.vistoBajaAsig);
+    await S.sb.from('bajas_asignatura').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).eq('id', b.dataset.vistoBajaAsig);
     await cargarBajasAsignatura();
     cerrarModal();
     if (S.vista === 'inicio') renderInicio();
     avisar('Marcado como visto.');
   });
   document.querySelectorAll('[data-editar-baja-asig]').forEach(b => b.onclick = async () => {
-    await S.sb.from('bajas_asignatura').update({ visto: true }).eq('id', b.dataset.editarBajaAsig);
+    await S.sb.from('bajas_asignatura').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).eq('id', b.dataset.editarBajaAsig);
     await cargarBajasAsignatura();
     cerrarModal();
     modalAlumno(S.alumnos.find(a => a.id === b.dataset.alumnoBajaAsig));
   });
+}
+function modalBajasAsignaturaSinVer(lista) {
+  abrirModal(`
+  <h2>Bajas de asignatura sin revisar</h2>
+  <ul class="detalle-alumnos" id="av-bajas" style="columns:1">
+    ${lista.map(filaBajaAsignatura).join('')}
+  </ul>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cerrar sin marcar</button>
+    <button class="btn primario" id="ba-marcar-vistas">Marcar todas como vistas</button>
+  </div>`);
+  avisoAbierto = { tipo: 'bajas', ids: lista.map(b => b.id) };
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('ba-marcar-vistas').onclick = async () => {
+    await S.sb.from('bajas_asignatura').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).in('id', lista.map(b => b.id));
+    await cargarBajasAsignatura();
+    cerrarModal();
+    if (S.vista === 'inicio') renderInicio();
+    avisar('Bajas de asignatura marcadas como vistas.');
+  };
+  activarBotonesBajasAsignatura();
 }
 
 async function exportarAlumnosCsv() {
@@ -2447,6 +2650,7 @@ async function crearRecibo(alumno, { concepto, importe, recibiDe, fechaEmision, 
     fechaEmision, recibiDe,
     cantidadLetras: letras,
     concepto,
+    desglose: desgloseDeRecibo(concepto, importe, importeMatricula) || undefined,
     totalCifra: formatoImporte(importe),
     referencia,
     logoPngBase64: S.logoBase64
@@ -2484,6 +2688,19 @@ async function crearRecibos(alumno, opts) {
   return [madre, padre];
 }
 
+// Si el recibo lleva matrícula aparte, se desglosa en el PDF en dos líneas
+// (mes y matrícula, cada una con su precio) en vez de una sola de "Concepto:".
+// Sin matrícula se deja tal cual, como toda la vida.
+function desgloseDeRecibo(concepto, importe, importeMatricula) {
+  if (!importeMatricula) return null;
+  const base = String(concepto || '').replace(/ \+ Matrícula$/, '');
+  const importeBase = Number(importe) - Number(importeMatricula);
+  return [
+    `${base} — ${formatoImporte(importeBase)}€`,
+    `Matrícula — ${formatoImporte(importeMatricula)}€`
+  ];
+}
+
 // Teléfono/nombre a usar para un recibo concreto: si es de un progenitor
 // (padres separados), el suyo; si no, la cadena de siempre.
 function telefonoDeRecibo(recibo) {
@@ -2497,6 +2714,14 @@ function destinatarioDeRecibo(recibo) {
   if (recibo.progenitor === 'madre') return a.madre_nombre || a.tutor_nombre || a.nombre || '';
   if (recibo.progenitor === 'padre') return a.padre_nombre || a.tutor_nombre || a.nombre || '';
   return a.facturacion_nombre || a.tutor_nombre || a.nombre || '';
+}
+
+// El concepto interno de un recibo de padres separados lleva "(Madre · 33%)"
+// / "(Padre · 67%)" para poder distinguirlos en la app — pero eso es un
+// detalle interno que no debe salir en el mensaje de WhatsApp que lee la
+// familia, así que se quita solo de cara al envío.
+function conceptoSinProgenitor(concepto) {
+  return String(concepto || '').replace(/\s*\((?:Madre|Padre)\s*·\s*\d+%\)\s*$/, '');
 }
 
 function modalReciboListo(recibos) {
@@ -2581,6 +2806,7 @@ async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
       recibiDe: destinatario,
       cantidadLetras: letras,
       concepto: recibo.concepto,
+      desglose: desgloseDeRecibo(recibo.concepto, recibo.importe, recibo.importe_matricula) || undefined,
       totalCifra: formatoImporte(recibo.importe),
       referencia: 'R-' + String(recibo.referencia).padStart(5, '0'),
       logoPngBase64: S.logoBase64,
@@ -2593,7 +2819,7 @@ async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
         tipo,
         telefono: tel,
         nombre: destinatario.split(' ')[0] || destinatario,
-        concepto: recibo.concepto,
+        concepto: conceptoSinProgenitor(recibo.concepto),
         importe: formatoImporte(recibo.importe),
         pdfBase64: bytesABase64(bytes),
         nombreArchivo: nombreArchivoRecibo(alumno.nombre || 'alumno', recibo.concepto, esPago)
@@ -2625,9 +2851,9 @@ async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
 // Recibo conjunto de hermanos: un solo PDF con el desglose de cada uno y un
 // solo envío por WhatsApp al teléfono de la familia. Al terminar, marca
 // TODOS los recibos incluidos como enviados (no solo el que lo disparó).
-// La plantilla de WhatsApp solo admite 3 parámetros de texto fijos (nombre,
-// concepto, importe) — el desglose completo va en el PDF adjunto; el
-// "concepto" del mensaje es un resumen compacto y el importe es la suma.
+// La plantilla de WhatsApp solo admite 2 parámetros de texto fijos (nombre,
+// concepto) — el desglose completo con los importes va en el PDF adjunto;
+// el "concepto" del mensaje solo lleva los nombres de los hermanos incluidos.
 async function enviarPorWhatsAppApiConjunto(recibos, tipo = 'recibo') {
   const esPago = tipo === 'pago';
   const primero = recibos[0];
@@ -2635,8 +2861,10 @@ async function enviarPorWhatsAppApiConjunto(recibos, tipo = 'recibo') {
   if (!telefonoWa(tel)) return { ok: false, error: 'sin teléfono válido' };
   const destinatario = destinatarioDeRecibo(primero);
   const total = recibos.reduce((s, r) => s + Number(r.importe), 0);
+  // Solo nombres + concepto de cada hermano, para que se sepa quiénes van
+  // incluidos — sin el importe de cada uno, que solo se ve dentro del PDF.
   const conceptoCombinado = recibos
-    .map(r => `${(r.alumnos?.nombre || '').split(' ')[0]}: ${r.concepto} (${formatoImporte(r.importe)}€)`)
+    .map(r => `${(r.alumnos?.nombre || '').split(' ')[0]}: ${conceptoSinProgenitor(r.concepto)}`)
     .join(' + ');
 
   try {
@@ -2869,9 +3097,10 @@ async function regenerarPdf(r) {
   }
   const bytes = await generarReciboPdf({
     fechaEmision: (r.fecha_emision || '').split('-').reverse().join('/'),
-    recibiDe: r.alumnos?.facturacion_nombre || r.alumnos?.tutor_nombre || r.alumnos?.nombre || '',
+    recibiDe: destinatarioDeRecibo(r),
     cantidadLetras: letras,
     concepto: r.concepto,
+    desglose: desgloseDeRecibo(r.concepto, r.importe, r.importe_matricula) || undefined,
     totalCifra: formatoImporte(r.importe),
     referencia: 'R-' + String(r.referencia).padStart(5, '0'),
     logoPngBase64: S.logoBase64
@@ -2991,7 +3220,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
       ${esAdmin ? `<td>${e(r.profesores?.nombre || '')}</td>` : ''}
       <td><span class="chip ${estado.clase}">${estado.texto}</span>
         ${pagados && r.cuenta ? `<span class="chip activo">${r.cuenta === 'banco' ? 'Banco' : 'Efectivo'}</span>` : ''}
-        ${!pagados && r.importe_parcial ? `<span class="chip envio-no">${formatoImporte(r.importe_parcial)}€ de ${formatoImporte(r.importe)}€ cobrados</span>` : ''}
+        ${!pagados && r.importe_parcial ? `<span class="chip pago-parcial">${formatoImporte(r.importe_parcial)}€ de ${formatoImporte(r.importe)}€ cobrados</span>` : ''}
         ${r.progenitor ? `<span class="chip envio-si" title="Recibo repartido entre los dos progenitores">${r.progenitor === 'madre' ? 'Madre' : 'Padre'}</span>` : ''}
         ${hermanos.length ? `<span class="chip activo" title="Junto con: ${e(hermanos.map(h => h.alumnos?.nombre || '').join(', '))}">👪 Recibo hermanos</span>` : ''}
         ${r.estado_whatsapp === 'fallido' ? '<span class="chip wa-fallido" title="WhatsApp no pudo entregarlo: revisa el teléfono">Fallido</span>'
@@ -3340,9 +3569,10 @@ async function descargarPdfsMes(claveM, lista, boton) {
       }
       const bytes = await generarReciboPdf({
         fechaEmision: (r.fecha_emision || '').split('-').reverse().join('/'),
-        recibiDe: r.alumnos?.facturacion_nombre || r.alumnos?.tutor_nombre || r.alumnos?.nombre || '',
+        recibiDe: destinatarioDeRecibo(r),
         cantidadLetras: letras,
         concepto: r.concepto,
+        desglose: desgloseDeRecibo(r.concepto, r.importe, r.importe_matricula) || undefined,
         totalCifra: formatoImporte(r.importe),
         referencia: 'R-' + String(r.referencia).padStart(5, '0'),
         logoPngBase64: S.logoBase64
@@ -3730,6 +3960,11 @@ function modalEditarProfesor(prof) {
   <p class="ayuda">${e(prof.email)}</p>
   <h3 class="seccion">Asignaturas que imparte</h3>
   ${bloqueAsignaturas(marcadas)}
+  <h3 class="seccion">Permisos</h3>
+  <p class="ayuda">${prof.es_admin
+    ? 'Es <strong>administrador</strong>: ve y gestiona todo (alumnos, recibos, finanzas y profesores).'
+    : 'Profesor normal: solo ve sus propias asignaturas y alumnos.'}</p>
+  <button class="btn liso" id="p-admin">${prof.es_admin ? 'Quitar administrador' : 'Hacer administrador'}</button>
   <h3 class="seccion">Cambiar contraseña (opcional)</h3>
   <label>Nueva contraseña (mín. 8; en blanco = no cambiar)<input id="p-pass"></label>
   <div class="pie-modal">
@@ -3741,6 +3976,22 @@ function modalEditarProfesor(prof) {
   <p id="m-msg" class="error"></p>`);
 
   activarCreacionAsignatura();
+  document.getElementById('p-admin').onclick = async () => {
+    const nuevo = !prof.es_admin;
+    const msg = nuevo
+      ? `¿Hacer administrador a ${prof.nombre}? Podrá ver y gestionar todo: alumnos, recibos, finanzas y profesores. Si tiene la app abierta, se le pedirá reiniciarla.`
+      : `¿Quitar el admin a ${prof.nombre}? Dejará de ver finanzas y la gestión de profesores, y solo verá sus propias asignaturas. Si tiene la app abierta, se le pedirá reiniciarla.`;
+    if (!confirm(msg)) return;
+    const { error } = await S.sb.rpc('cambiar_admin_profesor', { p_profesor: prof.id, p_es_admin: nuevo });
+    if (error) {
+      document.getElementById('m-msg').textContent = 'Error: ' + error.message;
+      return;
+    }
+    cerrarModal();
+    await cargarTodo();
+    renderProfesores();
+    avisar(`${prof.nombre} ${nuevo ? 'ya es administrador' : 'ya no es administrador'}.`);
+  };
   document.getElementById('p-baja').onclick = async () => {
     if (!confirm(`¿Dar de baja a ${prof.nombre}? No podrá volver a entrar en la app hasta que lo reactives. Sus recibos, clases y datos se conservan.`)) return;
     const { error } = await S.sb.rpc('cambiar_estado_profesor', { p_profesor: prof.id, p_estado: 'baja' });
@@ -3877,11 +4128,6 @@ function modalCambiarTarifaAsignatura(asignaturaId, tipoTarifa) {
 
 // ---------------------------------------------------------------- ingresos y gastos (solo admin)
 
-const CATEGORIAS_INGRESO = ['Matrícula', 'Mensualidad', 'Tasas', 'Cursos', 'Talleres', 'Impuestos'];
-const CATEGORIAS_GASTO = ['Luz', 'Internet', 'Fotocopiadora', 'Alquiler', 'Autónomo', 'Nóminas banco',
-  'Seguridad Social', 'Nóminas efectivo', 'Seguro', 'Otros', 'Limpieza', 'Agua', 'Impuestos',
-  'Requerimientos legales', 'Asesoría', 'IA', 'Material', 'Nómina nuestra', 'Gasto efectivo', 'Gasto banco'];
-
 function claveMesFecha(fechaIso) {
   return String(fechaIso || '').slice(0, 7);
 }
@@ -3940,14 +4186,23 @@ function saldoCuenta(cuenta) {
     .reduce((s, m) => s + (m.tipo === 'ingreso' ? Number(m.importe) : -Number(m.importe)), inicial);
 }
 
-// Categorías fijas de la lista + cualquier categoría suelta que ya tenga movimientos
-// (por ejemplo, datos antiguos) para no esconder dinero que no encaje en la lista.
-function categoriasConExtras(tipo) {
-  const fijas = tipo === 'gasto' ? CATEGORIAS_GASTO : CATEGORIAS_INGRESO;
-  const propias = S.finanzasCategorias.filter(c => c.tipo === tipo).map(c => c.categoria);
+// Todas las categorías (ya no hay "fijas" protegidas en el código: el admin
+// puede borrar o crear cualquiera) + cualquier categoría suelta que ya tenga
+// movimientos (por ejemplo, datos antiguos) para no esconder dinero que no
+// esté en la tabla. Con un filtro de cuenta (Efectivo/Banco), solo entran
+// las categorías marcadas para esa cuenta o para "las dos" (cuenta null);
+// las sueltas se muestran siempre, para no esconder dinero. En "Todo"
+// (cuentaFiltro null) salen todas, sea cual sea su cuenta.
+function categoriasConExtras(tipo, cuentaFiltro = null) {
+  const propias = S.finanzasCategorias.filter(c => c.tipo === tipo);
+  const cuentaDe = new Map(propias.map(c => [c.categoria, c.cuenta || null]));
   const usadas = [...new Set(S.finanzas.filter(m => m.tipo === tipo).map(m => m.categoria))];
-  const extra = [...propias, ...usadas].filter((c, i, arr) => !fijas.includes(c) && arr.indexOf(c) === i);
-  return [...fijas, ...extra];
+  const todas = [...propias.map(c => c.categoria), ...usadas].filter((c, i, arr) => arr.indexOf(c) === i);
+  if (!cuentaFiltro) return todas;
+  return todas.filter(c => {
+    const cta = cuentaDe.has(c) ? cuentaDe.get(c) : null;
+    return !cta || cta === cuentaFiltro;
+  });
 }
 
 function fechaPorDefectoParaMes(claveMes) {
@@ -4002,7 +4257,7 @@ function renderFinanzas() {
   // null = sin filtrar (vista "Todo", igual que siempre); si no, acota
   // categorías/totales a una sola cuenta.
   const filtroCuenta = cuenta === 'todo' ? null : cuenta;
-  const categorias = categoriasConExtras(tipo);
+  const categorias = categoriasConExtras(tipo, filtroCuenta);
 
   let cuerpoTabla, barraNav, periodoMeses;
 
@@ -4160,7 +4415,7 @@ function renderFinanzas() {
   document.querySelectorAll('[data-tipo-fin]').forEach(b => b.onclick = () => { S.vistaFinanzas = b.dataset.tipoFin; renderFinanzas(); });
   document.querySelectorAll('[data-modo-fin]').forEach(b => b.onclick = () => { S.modoFinanzas = b.dataset.modoFin; renderFinanzas(); });
   document.querySelectorAll('[data-cuenta-fin]').forEach(b => b.onclick = () => { S.cuentaFinanzas = b.dataset.cuentaFin; renderFinanzas(); });
-  document.getElementById('fin-anadir-categoria').onclick = () => modalAnadirCategoriaFinanzas(tipo);
+  document.getElementById('fin-anadir-categoria').onclick = () => modalAnadirCategoriaFinanzas(tipo, cuenta);
   document.querySelectorAll('.celda-fin[data-cat]').forEach(el => el.onclick = () =>
     modalCategoriaMovimientos(tipo, el.dataset.cat, el.dataset.mes));
   const $fijarSaldo = document.getElementById('fin-saldo-inicial');
@@ -4203,13 +4458,26 @@ function renderFinanzas() {
 }
 
 // Nueva columna (categoría) para Ingresos o Gastos, a mano — se guarda en
-// finanzas_categorias y se suma a las fijas de siempre en categoriasConExtras().
-function modalAnadirCategoriaFinanzas(tipo) {
+// finanzas_categorias. `cuentaActual` es la pestaña (todo/efectivo/banco)
+// desde la que se abrió el botón, solo para preseleccionar el radio de
+// cuenta (si estás mirando Efectivo, lo lógico es que la nueva columna sea
+// de Efectivo, pero se puede cambiar).
+function modalAnadirCategoriaFinanzas(tipo, cuentaActual = 'todo') {
   abrirModal(`
   <h2>Añadir columna — ${tipo === 'gasto' ? 'Gastos' : 'Ingresos'}</h2>
   <p class="ayuda">Se añade como una categoría más, igual que las que ya hay, y aparecerá también en la vista de
   curso completo.</p>
   <label>Nombre de la categoría<input id="fc-nombre" placeholder="ej. Formación"></label>
+  <label>¿Dónde se usa?</label>
+  <label class="check-inline">
+    <input type="radio" name="fc-cat-cuenta" id="fc-cat-todo" ${cuentaActual !== 'efectivo' && cuentaActual !== 'banco' ? 'checked' : ''}> Las dos (Efectivo y Banco)
+  </label>
+  <label class="check-inline">
+    <input type="radio" name="fc-cat-cuenta" id="fc-cat-efectivo" ${cuentaActual === 'efectivo' ? 'checked' : ''}> Solo Efectivo
+  </label>
+  <label class="check-inline">
+    <input type="radio" name="fc-cat-cuenta" id="fc-cat-banco" ${cuentaActual === 'banco' ? 'checked' : ''}> Solo Banco
+  </label>
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cancelar</button>
     <button class="btn primario" id="fc-guardar">Añadir</button>
@@ -4222,7 +4490,9 @@ function modalAnadirCategoriaFinanzas(tipo) {
     if (!nombre) { msg.textContent = 'Escribe un nombre.'; return; }
     const yaExiste = categoriasConExtras(tipo).some(c => c.toLowerCase() === nombre.toLowerCase());
     if (yaExiste) { msg.textContent = 'Ya hay una categoría con ese nombre.'; return; }
-    const { error } = await S.sb.from('finanzas_categorias').insert({ tipo, categoria: nombre });
+    const cuentaCat = document.getElementById('fc-cat-efectivo').checked ? 'efectivo'
+      : document.getElementById('fc-cat-banco').checked ? 'banco' : null;
+    const { error } = await S.sb.from('finanzas_categorias').insert({ tipo, categoria: nombre, cuenta: cuentaCat });
     if (error) { msg.textContent = 'Error: ' + error.message; return; }
     await cargarFinanzasCategorias();
     cerrarModal();
@@ -4280,15 +4550,11 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes) {
     .filter(m => m.tipo === tipo && m.categoria === categoria && claveMesFecha(m.fecha) === claveMes)
     .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
   const total = lista.reduce((s, m) => s + Number(m.importe), 0);
-  // Solo las columnas que el admin haya añadido a mano se pueden borrar del
-  // todo (las fijas del código no, ni las "sueltas" que ya venían de datos
-  // antiguos sin haberlas creado desde aquí).
-  const esPersonalizada = S.finanzasCategorias.some(c => c.tipo === tipo && c.categoria === categoria);
 
   abrirModal(`
   <h2>${e(categoria)} — ${tituloMes(claveMes)}</h2>
   <p class="ayuda">Total del mes: <strong>${formatoImporte(total)}€</strong>
-    ${esPersonalizada ? '<button class="btn chico liso peligro" id="fc-borrar-categoria" style="margin-left:10px">🗑 Eliminar esta categoría</button>' : ''}</p>
+    <button class="btn chico liso peligro" id="fc-borrar-categoria" style="margin-left:10px">🗑 Eliminar esta categoría</button></p>
   ${lista.length === 0 ? '<p class="ayuda">Sin movimientos todavía.</p>' : `
   <div class="tabla-wrap"><table>
     <thead><tr><th>Fecha</th><th>Importe</th><th>Cuenta</th><th>Descripción</th><th></th></tr></thead>
@@ -4562,7 +4828,16 @@ function conFocoPreservado(fn) {
 
 // ---------------------------------------------------------------- modal y toast
 
+// `avisoAbierto` (ver más abajo) recuerda qué aviso de Inicio está mostrado
+// ahora mismo, para poder refrescarlo en vivo. Se limpia aquí, en el único
+// sitio por el que pasan TODOS los modales de la app sin excepción: así,
+// abra lo que abra un botón de un aviso ("Completar" → modalAlumno, "Editar
+// ficha" → modalAlumno, "Generar recibo" → modalRecibo...), el aviso queda
+// invalidado automáticamente sin tener que acordarse de limpiarlo a mano en
+// cada sitio — y un modal de edición normal nunca puede confundirse con uno
+// de aviso ni ser sustituido por un refresco en tiempo real de otro admin.
 function abrirModal(html) {
+  avisoAbierto = null;
   document.getElementById('modal-raiz').innerHTML =
     `<div class="velo"><div class="modal">${html}</div></div>`;
   document.querySelector('.velo').onclick = (ev) => { if (ev.target.classList.contains('velo')) cerrarModal(); };

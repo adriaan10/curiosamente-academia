@@ -199,3 +199,10 @@ ipcMain.on('actualizacion:instalar', () => autoUpdater.quitAndInstall());
 // Aviso instantáneo por Supabase Realtime (tabla app_version): en vez de
 // esperar a la próxima apertura, se relanza la comprobación ya mismo.
 ipcMain.on('actualizacion:comprobar-ahora', () => comprobarActualizaciones());
+// Reinicio completo del proceso: se usa cuando a alguien le cambian los
+// permisos de administrador mientras tiene la app abierta, para que arranque
+// limpia con los permisos nuevos en vez de dejar la sesión a medias.
+ipcMain.on('app:restart', () => {
+  app.relaunch();
+  app.exit(0);
+});
