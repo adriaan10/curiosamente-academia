@@ -97,11 +97,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          # El .blockmap y latest-mac.yml son lo que necesitará la
-          # auto-actualización cuando la app esté firmada (el .blockmap permite
-          # descargar solo lo que cambia). Se suben si existen.
+          # El .dmg es solo para instalar a mano; electron-updater en Mac usa
+          # el .zip para aplicar la actualización de verdad (Squirrel.Mac no
+          # sabe instalar desde un .dmg) — sin él, latest-mac.yml apunta a un
+          # archivo que nunca se descarga y la app nunca se autoactualiza en
+          # Mac aunque esté firmada. El .blockmap permite descargar solo lo
+          # que cambia. Se suben todos los que existan.
           ARCHIVOS=(dist/*.dmg)
-          for extra in dist/*.dmg.blockmap dist/latest-mac.yml; do
+          for extra in dist/*.dmg.blockmap dist/*.zip dist/latest-mac.yml; do
             [ -f "$extra" ] && ARCHIVOS+=("$extra")
           done
           echo "Subiendo a $TAG: ${ARCHIVOS[*]}"

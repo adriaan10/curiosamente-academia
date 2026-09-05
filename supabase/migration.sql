@@ -1474,3 +1474,17 @@ alter table public.alumnos
 -- en cuanto los lee (sin bloquear el pintado de la pantalla) si los
 -- encuentra guardados — pensado sobre todo para entrar más rápido después
 -- del cierre de sesión por inactividad (20 min), que no se toca.
+
+-- Autoactualización en Mac de verdad, no solo firmada (05/09/2026). Ya
+-- estaba firmada y notarizada desde antes, pero seguía sin autoactualizarse:
+-- package.json solo generaba .dmg en mac.target, y electron-updater (vía
+-- Squirrel.Mac) necesita un .zip para poder APLICAR la actualización — el
+-- .dmg sirve para instalar a mano, pero Squirrel.Mac no sabe instalar desde
+-- ahí. Sin el .zip, latest-mac.yml quedaba apuntando a un archivo que nunca
+-- se descargaba y el chequeo nunca encontraba nada que aplicar, por firmada
+-- que estuviera la app. Arreglado añadiendo target "zip" junto al "dmg" en
+-- package.json (build.mac.target) y subiendo también el .zip a la versión
+-- publicada en .github/workflows/compilar-mac.yml (antes solo subía el
+-- .dmg/.blockmap/latest-mac.yml). El usuario sigue descargando el .dmg de
+-- siempre para instalar a mano; el .zip es invisible, solo lo usa el propio
+-- autoupdater.

@@ -1,6 +1,6 @@
 {
   "name": "curiosamente-app",
-  "version": "1.11.0",
+  "version": "1.11.1",
   "description": "App de escritorio de gestión de alumnos y recibos para Academia Curiosamente",
   "main": "main.js",
   "scripts": {
@@ -35,6 +35,10 @@
       "target": [
         {
           "target": "dmg",
+          "arch": ["arm64"]
+        },
+        {
+          "target": "zip",
           "arch": ["arm64"]
         }
       ],
