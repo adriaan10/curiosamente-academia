@@ -1448,3 +1448,29 @@ alter table public.alumnos
 -- madre, padre) ahora se ven como "612 345 678" en vez de "612345678"
 -- (formatearTelefono() en app.js, solo visual — se sigue guardando sin
 -- espacios con quitarEspacios() al leer el campo para guardar).
+
+-- Clases: más colores, aforo tope al crear, buscador de alumnos; Ajustes
+-- recortado para profesores (05/09/2026). Todo 100% cliente, sin esquema:
+-- - COLORES_CLASE pasa de 10 a 25 tonos (con muchas clases se repetían).
+-- - modalClase(): al CREAR (clase == null) no deja marcar más alumnos de
+--   los que diga el aforo elegido en ese momento (sube el aforo y deja
+--   marcar más); al EDITAR una clase ya existente no hay tope, para poder
+--   meter más si hace falta.
+-- - Buscador por nombre sobre la lista de alumnos al apuntar a una clase
+--   (input #c-buscar-alumno), sin quitar el scroll de toda la vida.
+-- - renderAjustes(): "Copia de seguridad" y "Envío por WhatsApp" pasan a
+--   verse solo si es_admin — un profesor normal solo ve su carpeta de
+--   recibos y su horario de trabajo (que ya podía editar).
+
+-- "Recordar sesión en este ordenador" (05/09/2026). Nada de Supabase — 100%
+-- local, en main.js. Checkbox nueva en el login: si se marca, el email y la
+-- contraseña se guardan en credenciales.json (userData, aparte de
+-- config.json) con la contraseña cifrada vía safeStorage de Electron —
+-- ligada a la cuenta de Windows/macOS de quien la guardó, así que copiar
+-- ese archivo a otro ordenador o abrirlo con otro usuario del sistema no
+-- sirve de nada. Se guarda solo DESPUÉS de un login correcto (nunca se
+-- recuerda una contraseña equivocada); si se desmarca y se entra, se borra
+-- lo que hubiera guardado. renderLogin() rellena el email/contraseña solos
+-- en cuanto los lee (sin bloquear el pintado de la pantalla) si los
+-- encuentra guardados — pensado sobre todo para entrar más rápido después
+-- del cierre de sesión por inactividad (20 min), que no se toca.

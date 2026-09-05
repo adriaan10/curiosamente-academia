@@ -18,5 +18,8 @@ contextBridge.exposeInMainWorld('api', {
   onActualizacionLista: (cb) => ipcRenderer.on('actualizacion:lista', (_e, version) => cb(version)),
   instalarActualizacion: () => ipcRenderer.send('actualizacion:instalar'),
   comprobarActualizacionesAhora: () => ipcRenderer.send('actualizacion:comprobar-ahora'),
-  restartApp: () => ipcRenderer.send('app:restart')
+  restartApp: () => ipcRenderer.send('app:restart'),
+  guardarCredenciales: (email, password) => ipcRenderer.invoke('credenciales:guardar', { email, password }),
+  cargarCredenciales: () => ipcRenderer.invoke('credenciales:cargar'),
+  borrarCredenciales: () => ipcRenderer.invoke('credenciales:borrar')
 });

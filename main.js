@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { autoUpdater } = require('electron-updater');
@@ -60,6 +60,37 @@ function recibosDir() {
   return dir;
 }
 
+// "Recordar sesión en este ordenador": guarda el email tal cual, y la
+// contraseña cifrada con safeStorage (ligada a la cuenta de Windows/macOS de
+// quien la guardó — nadie puede leerla ni copiando el archivo a otro
+// ordenador ni entrando con otro usuario del sistema). Aparte de
+// config.json a propósito, para no mezclar un dato sensible con ajustes
+// normales que no lo son.
+function credencialesPath() {
+  return path.join(app.getPath('userData'), 'credenciales.json');
+}
+
+function guardarCredenciales(email, password) {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  const cifrada = safeStorage.encryptString(password).toString('base64');
+  fs.writeFileSync(credencialesPath(), JSON.stringify({ email, password: cifrada }), 'utf8');
+  return true;
+}
+
+function cargarCredenciales() {
+  try {
+    const { email, password } = JSON.parse(fs.readFileSync(credencialesPath(), 'utf8'));
+    if (!email || !password) return null;
+    return { email, password: safeStorage.decryptString(Buffer.from(password, 'base64')) };
+  } catch {
+    return null; // sin credenciales guardadas, o no se pudieron descifrar (ej. otro usuario del sistema)
+  }
+}
+
+function borrarCredenciales() {
+  try { fs.unlinkSync(credencialesPath()); } catch { /* ya no había nada que borrar */ }
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1200,
@@ -96,6 +127,10 @@ app.on('window-all-closed', () => {
 // ---- IPC ----
 
 ipcMain.handle('config:get', () => readConfig());
+
+ipcMain.handle('credenciales:guardar', (_e, { email, password }) => guardarCredenciales(email, password));
+ipcMain.handle('credenciales:cargar', () => cargarCredenciales());
+ipcMain.handle('credenciales:borrar', () => { borrarCredenciales(); });
 
 ipcMain.handle('config:set', (_e, partial) => {
   const cfg = { ...readConfig(), ...partial };

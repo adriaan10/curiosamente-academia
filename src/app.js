@@ -530,6 +530,9 @@ function renderLogin() {
           <button type="button" class="ver-pass" id="ver-pass" title="Ver contraseña">👁</button>
         </span>
       </label>
+      <label class="check-inline" style="margin-top:6px">
+        <input type="checkbox" id="login-recordar"> Recordar sesión en este ordenador
+      </label>
       <button class="btn primario" id="login-btn">Entrar</button>
       <p id="msg" class="error"></p>
     </div>
@@ -541,9 +544,20 @@ function renderLogin() {
     ev.currentTarget.textContent = visible ? '👁' : '🙈';
     $pass.focus();
   };
+  // Si se guardó el email/contraseña la última vez ("Recordar sesión"), se
+  // rellenan solos en cuanto llegan (lectura local, casi instantánea) — no
+  // hace falta esperar a esto para pintar la pantalla de login.
+  window.api.cargarCredenciales().then((cred) => {
+    const $email = document.getElementById('login-email');
+    if (!cred || !$email) return;
+    $email.value = cred.email;
+    $pass.value = cred.password;
+    document.getElementById('login-recordar').checked = true;
+  });
   const entrar = async () => {
     const email = document.getElementById('login-email').value.trim();
     const password = document.getElementById('login-pass').value;
+    const recordar = document.getElementById('login-recordar').checked;
     const btn = document.getElementById('login-btn');
     btn.disabled = true; btn.textContent = 'Entrando…';
     const { data, error } = await S.sb.auth.signInWithPassword({ email, password });
@@ -555,6 +569,10 @@ function renderLogin() {
             : error.message;
       return;
     }
+    // Se guarda/borra DESPUÉS de confirmar que el login es correcto: así
+    // nunca se recuerda una contraseña equivocada.
+    if (recordar) await window.api.guardarCredenciales(email, password);
+    else await window.api.borrarCredenciales();
     S.session = data.session;
     try {
       await cargarTodo();
@@ -1872,9 +1890,14 @@ function clasesFiltradas() {
   return S.clases.filter(c => !S.filtros.profesor || c.profesor_id === S.filtros.profesor);
 }
 
-// Colores disponibles para las clases (cada clase elige el suyo).
+// Colores disponibles para las clases (cada clase elige el suyo). Con muchas
+// clases creadas, 10 se quedaban cortos y se repetían demasiado — ampliado
+// a un abanico más grande de tonos para que se puedan distinguir bien.
 const COLORES_CLASE = ['#F28C28', '#3D7DC8', '#2E9E5B', '#8E5BBF', '#C8506A',
-  '#C2A61B', '#2E9E9E', '#D96C3C', '#5B6ABF', '#4E9E2E'];
+  '#C2A61B', '#2E9E9E', '#D96C3C', '#5B6ABF', '#4E9E2E',
+  '#B0479A', '#1F8A9E', '#A64B2A', '#6B8E23', '#C0392B',
+  '#2C6E8C', '#8E6BC8', '#3E9E7A', '#B87333', '#5C6BC0',
+  '#9E3E6B', '#4A9E9E', '#8A9E2E', '#9E6B2E', '#6E4E9E'];
 
 // Color de una clase: el elegido por el usuario o, si no, uno fijo según la asignatura.
 function colorClase(clase) {
@@ -2168,6 +2191,7 @@ function modalClase(clase) {
   <div id="c-horarios"></div>
   <button class="btn chico" id="c-add-horario">+ Añadir día</button>
   <h3 class="seccion">Alumnos apuntados</h3>
+  <input id="c-buscar-alumno" placeholder="Buscar por nombre…" style="margin-bottom:8px">
   <div id="c-alumnos" class="lista-alumnos"></div>
   <div class="pie-modal">
     ${clase ? '<button class="btn liso peligro" id="c-borrar">Borrar clase</button>' : ''}
@@ -2215,22 +2239,36 @@ function modalClase(clase) {
     cont.querySelectorAll('[data-h-quitar]').forEach(b => b.onclick = () => { hs.splice(Number(b.dataset.hQuitar), 1); pintarHorarios(); });
   };
 
+  // El aforo tope solo se aplica al CREAR (clase == null): si es una clase ya
+  // existente, el profesor la edita y mete a quien haga falta sin límite.
+  const aforoActual = () => Number(document.getElementById('c-aforo').value) || 1;
   const pintarAlumnos = () => {
     const pid = profesorActual();
-    const candidatos = S.alumnos.filter(a => a.estado === 'activo' && matriculasDeProfesor(a, pid).length > 0);
+    const termino = (document.getElementById('c-buscar-alumno')?.value || '').trim().toLowerCase();
+    const candidatos = S.alumnos.filter(a => a.estado === 'activo' && matriculasDeProfesor(a, pid).length > 0
+      && (!termino || a.nombre.toLowerCase().includes(termino)));
     document.getElementById('c-alumnos').innerHTML = candidatos.length === 0
-      ? '<p class="ayuda">Este profesor no tiene alumnos activos en sus asignaturas todavía.</p>'
+      ? `<p class="ayuda">${termino ? 'Ningún alumno coincide con la búsqueda.' : 'Este profesor no tiene alumnos activos en sus asignaturas todavía.'}</p>`
       : candidatos.map(a => `
         <label class="mes"><input type="checkbox" data-c-alumno="${a.id}" ${marcados.has(a.id) ? 'checked' : ''}>
         ${e(a.nombre)} <small>· ${e(matriculasDeProfesor(a, pid).map(m => m.asignaturas?.nombre).join(', '))}</small></label>`).join('');
     document.querySelectorAll('[data-c-alumno]').forEach(ch => ch.onchange = () => {
-      if (ch.checked) marcados.add(ch.dataset.cAlumno);
-      else marcados.delete(ch.dataset.cAlumno);
+      if (ch.checked) {
+        if (!clase && marcados.size >= aforoActual()) {
+          ch.checked = false;
+          avisar(`El aforo es de ${aforoActual()}. Sube el aforo si necesitas apuntar a más.`, true);
+          return;
+        }
+        marcados.add(ch.dataset.cAlumno);
+      } else {
+        marcados.delete(ch.dataset.cAlumno);
+      }
     });
   };
 
   pintarHorarios();
   pintarAlumnos();
+  document.getElementById('c-buscar-alumno').oninput = pintarAlumnos;
   const selProf = document.getElementById('c-prof');
   if (selProf) selProf.onchange = () => {
     marcados.clear();
@@ -4814,6 +4852,7 @@ async function renderAjustes() {
     <p class="ayuda">Los PDF se guardan en:<br><code>${e(dir)}</code></p>
     <button class="btn" id="aj-carpeta">Cambiar carpeta…</button>
 
+    ${S.profesor?.es_admin ? `
     <h3>Copia de seguridad</h3>
     <p class="ayuda">Los datos viven en Supabase (nube), compartidos por todos los equipos de la academia.
     Además, cada día al abrir la app se guarda automáticamente una copia local en
@@ -4822,7 +4861,7 @@ async function renderAjustes() {
 
     <h3>Envío por WhatsApp</h3>
     <p class="ayuda" id="aj-wa-estado">Comprobando…</p>
-    <button class="btn chico" id="aj-wa-probar">Comprobar de nuevo</button>
+    <button class="btn chico" id="aj-wa-probar">Comprobar de nuevo</button>` : ''}
 
     <h3>${S.profesor?.es_admin ? 'Horario de trabajo' : 'Mi horario de trabajo'}</h3>
     <p class="ayuda">Indica qué días y horas ${S.profesor?.es_admin ? 'trabaja cada profesor' : 'trabajas'}.
@@ -4868,7 +4907,8 @@ async function renderAjustes() {
     }
   };
   comprobarWhatsApp();
-  document.getElementById('aj-wa-probar').onclick = comprobarWhatsApp;
+  const btnWaProbar = document.getElementById('aj-wa-probar');
+  if (btnWaProbar) btnWaProbar.onclick = comprobarWhatsApp;
 
   // Tramos de horario de trabajo en edición local (día + hora inicio + hora fin).
   // El admin puede elegir de quién los edita; un profesor normal solo ve los suyos.
