@@ -25,6 +25,7 @@ const S = {
   cambiosHorario: [],
   reactivaciones: [],
   bajasAsignatura: [],
+  avisosDescartados: [],
   finanzas: [],
   finanzasCategorias: [],
   cuentasSaldoInicial: [],
@@ -118,7 +119,7 @@ async function cargarTodo() {
   await Promise.all([
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
     cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
-    cargarFinanzas(), cargarFinanzasCategorias(), cargarCuentasSaldoInicial()
+    cargarFinanzas(), cargarFinanzasCategorias(), cargarCuentasSaldoInicial(), cargarAvisosDescartados()
   ]);
   backupAutomatico();
   window.api.getRecibosDir(); // crea la carpeta de recibos de este equipo si no existía aún
@@ -142,7 +143,7 @@ const TABLAS_TIEMPO_REAL = [
   'alumnos', 'matriculas', 'clases', 'clase_horarios', 'clase_alumnos', 'clase_excepciones',
   'recibos', 'notas', 'profesor_horario', 'cambios_horario', 'reactivaciones_alumno', 'bajas_asignatura',
   'finanzas_movimientos', 'finanzas_categorias', 'profesores', 'asignaturas', 'profesor_asignaturas',
-  'cuentas_saldo_inicial'
+  'cuentas_saldo_inicial', 'avisos_descartados'
 ];
 
 let canalTiempoReal = null;
@@ -216,7 +217,7 @@ async function recargarTrasCambioRemoto() {
     S.sb.from('profesor_asignaturas').select('*'),
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
     cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
-    cargarFinanzas(), cargarFinanzasCategorias(), cargarCuentasSaldoInicial()
+    cargarFinanzas(), cargarFinanzasCategorias(), cargarCuentasSaldoInicial(), cargarAvisosDescartados()
   ]);
   // Si alguna de estas tres falla (un hipo de red, el token de sesión
   // renovándose justo en ese momento…) no se pisa lo que ya había: hacerlo
@@ -305,6 +306,16 @@ async function cargarBajasAsignatura() {
     .order('fecha', { ascending: false });
   if (error) return avisar('Error cargando bajas de asignatura: ' + error.message, true);
   S.bajasAsignatura = data || [];
+}
+
+// Avisos que este admin ya ha descartado a mano ("Marcar visto" sobre algo
+// que resolvió OTRO admin) — la RLS ya limita esta tabla a las filas del
+// propio admin, así que no hace falta filtrar por profesor_id aquí.
+async function cargarAvisosDescartados() {
+  if (!S.profesor?.es_admin) { S.avisosDescartados = []; return; }
+  const { data, error } = await S.sb.from('avisos_descartados').select('*');
+  if (error) return avisar('Error cargando avisos descartados: ' + error.message, true);
+  S.avisosDescartados = data || [];
 }
 
 // Solo el administrador ve/gestiona finanzas (RLS ya lo restringe también).
@@ -648,15 +659,11 @@ function renderInicio() {
   // mandar el justificante — solo el admin tiene acceso al envío.
   const esAdmin = S.profesor?.es_admin;
   const daClases = S.profesor?.da_clases !== false;
-  const fichasIncompletas = esAdmin
-    ? S.alumnos.flatMap(al => (al.matriculas || [])
-        .filter(m => m.tarifa == null)
-        .map(m => ({ alumno: al, matricula: m })))
-    : [];
-  const modificacionesSinVer = esAdmin ? S.cambiosHorario.filter(c => !c.visto) : [];
-  const altasFueraDeFecha = esAdmin ? recibosPendientesFueraDeFecha() : [];
-  const reactivacionesSinVer = esAdmin ? S.reactivaciones.filter(r => !r.visto) : [];
-  const bajasAsignaturaSinVer = esAdmin ? S.bajasAsignatura.filter(b => !b.visto) : [];
+  const fichasIncompletas = esAdmin ? fichasParaAdmin() : [];
+  const modificacionesSinVer = esAdmin ? cambiosParaAdmin() : [];
+  const altasFueraDeFecha = esAdmin ? altasFueraDeFechaParaAdmin() : [];
+  const reactivacionesSinVer = esAdmin ? reactivacionesParaAdmin() : [];
+  const bajasAsignaturaSinVer = esAdmin ? bajasAsignaturaParaAdmin() : [];
   const pagadosPorEnviar = esAdmin
     ? S.recibos.filter(r => r.estado === 'pagado' && !r.fecha_envio_whatsapp_pago)
     : [];
@@ -763,50 +770,150 @@ function renderInicio() {
 // Alumnos dados de alta este mes DESPUÉS del día 1 (fuera de la generación
 // automática) que ya tienen precio fijado pero todavía no tienen recibo de
 // este mes: hay que generárselo a mano una vez.
-function recibosPendientesFueraDeFecha() {
+// Mes actual en formato 'YYYY-MM', para comparar con recibos.periodos.
+function periodoActualClave() {
   const hoy = new Date();
-  // En julio y agosto no hay generación automática de recibos (receso de
-  // verano, ver generar_recibos_mensuales() en el servidor), así que no tiene
-  // sentido avisar de "se quedó fuera del envío automático" en esos meses —
-  // nadie tiene recibo automático esos meses, se den de alta cuando se den de alta.
-  if ([6, 7, 8].includes(hoy.getMonth())) return [];
-  const periodoActual = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}`;
-  return S.alumnos.filter(a => {
-    if (a.estado !== 'activo' || !a.fecha_alta) return false;
-    const alta = new Date(a.fecha_alta + 'T00:00:00');
-    if (alta.getFullYear() !== hoy.getFullYear() || alta.getMonth() !== hoy.getMonth()) return false;
-    if (alta.getDate() <= 1) return false;
-    const tienePrecio = (a.matriculas || []).some(m => m.tipo_tarifa === 'mes' && m.tarifa != null);
-    if (!tienePrecio) return false;
-    const yaTieneRecibo = S.recibos.some(r => r.alumno_id === a.id && (r.periodos || []).includes(periodoActual));
-    return !yaTieneRecibo;
-  });
+  return `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}`;
 }
 
-// ---- Avisos de Inicio: helpers compartidos para refrescarlos en vivo ----
-// Con dos admins, si uno resuelve un aviso mientras el otro tiene la misma
-// lista abierta en un modal, ese modal se queda con la foto fija del
-// momento en que se abrió. avisoAbierto + refrescarAvisoAbierto() (más
-// abajo) hacen que, en cuanto llega el cambio por tiempo real, esa fila
-// concreta se sustituya por un "✓ Hecho/Visto por X" sin botón de acción —
-// así no se puede repetir una acción que el otro ya hizo.
-
-// Fila ya resuelta por OTRO admin: sin botón de acción, con quién lo hizo.
-// "Quitar" solo limpia la vista de quien la está mirando ahora — el aviso ya
-// está resuelto de verdad, no hay nada que tocar en la base de datos.
-function filaAvisoResuelto(id, etiquetaHtml, nombreQuien) {
-  return `<li data-item="${e(String(id))}">${etiquetaHtml}
-    <br><span class="chip envio-si">✓ Hecho por ${e(nombreQuien)}</span>
-    <button class="btn chico liso" data-quitar-aviso="1">Quitar</button></li>`;
+// ¿Este alumno pudo quedarse fuera del envío automático del mes? (alta tardía,
+// con precio ya puesto). No dice nada de si YA tiene recibo o no — eso se
+// mira aparte, para poder reusar este mismo criterio tanto para "todavía
+// pendiente" como para "ya se generó, pero por otro admin".
+function candidataAltaFueraDeFecha(a) {
+  const hoy = new Date();
+  // En julio, agosto y septiembre no hay generación automática de recibos
+  // (receso de verano, ver generar_recibos_mensuales() en el servidor), así
+  // que no tiene sentido avisar de "se quedó fuera del envío automático" en
+  // esos meses — nadie tiene recibo automático esos meses, se den de alta
+  // cuando se den de alta.
+  if ([6, 7, 8].includes(hoy.getMonth())) return false;
+  // Marcado como "empieza el próximo mes": no se le genera nada este mes a
+  // propósito, así que tampoco tiene sentido avisar de "se quedó fuera".
+  if (a.empieza_proximo_mes) return false;
+  if (a.estado !== 'activo' || !a.fecha_alta) return false;
+  const alta = new Date(a.fecha_alta + 'T00:00:00');
+  if (alta.getFullYear() !== hoy.getFullYear() || alta.getMonth() !== hoy.getMonth()) return false;
+  if (alta.getDate() <= 1) return false;
+  return (a.matriculas || []).some(m => m.tipo_tarifa === 'mes' && m.tarifa != null);
 }
-function activarQuitarAviso() {
-  document.querySelectorAll('[data-quitar-aviso]').forEach(b => b.onclick = () => b.closest('[data-item]')?.remove());
+// Recibo ya generado para este alumno en el mes actual (si lo hay).
+function reciboDelPeriodoActual(alumnoId) {
+  const periodoActual = periodoActualClave();
+  return S.recibos.find(r => r.alumno_id === alumnoId && (r.periodos || []).includes(periodoActual));
+}
+function recibosPendientesFueraDeFecha() {
+  return S.alumnos.filter(a => candidataAltaFueraDeFecha(a) && !reciboDelPeriodoActual(a.id));
+}
+
+// ---- Avisos de Inicio: no repetir una acción que ya hizo el otro admin ----
+// Un aviso resuelto (ficha ya con precio, cambio ya marcado visto, alta ya
+// con recibo...) sigue saliéndole a los admins que NO lo resolvieron, hasta
+// que cada uno lo descarta a mano ("Marcar visto") — sea cual sea el momento
+// en que entren (no basta con que tuvieran el modal abierto en el instante
+// exacto: avisos_descartados guarda quién ya lo ha visto, de verdad).
+
+function descartado(tipo, referencia) {
+  return S.avisosDescartados.some(d => d.tipo === tipo && d.referencia === String(referencia));
+}
+async function marcarDescartado(tipo, referencia) {
+  const { error } = await S.sb.from('avisos_descartados')
+    .insert({ tipo, referencia: String(referencia), profesor_id: S.profesor.id });
+  if (error) return avisar('Error: ' + error.message, true);
+  await cargarAvisosDescartados();
 }
 function nombreProfesor(id) {
   return S.profesores.find(p => p.id === id)?.nombre || 'otro admin';
 }
 
-function filaAltaFueraDeFecha(a) {
+// Fila ya resuelta por OTRO admin: sin botón de acción, con quién lo hizo, y
+// un "Marcar visto" que guarda el descarte para este admin (persiste: no
+// vuelve a salirle a él, siga o no abierto el modal, entre cuando entre).
+function filaAvisoResuelto(tipo, id, etiquetaHtml, nombreQuien) {
+  return `<li data-item="${e(String(id))}">${etiquetaHtml}
+    <br><span class="chip envio-si">✓ Hecho por ${e(nombreQuien)}</span>
+    <button class="btn chico liso" data-marcar-visto-tipo="${tipo}" data-marcar-visto-ref="${e(String(id))}">Marcar visto</button></li>`;
+}
+function activarMarcarVistoAviso() {
+  document.querySelectorAll('[data-marcar-visto-tipo]').forEach(b => b.onclick = async () => {
+    await marcarDescartado(b.dataset.marcarVistoTipo, b.dataset.marcarVistoRef);
+    b.closest('[data-item]')?.remove();
+    if (S.vista === 'inicio') renderInicio();
+  });
+}
+
+// ---- Fichas sin precio ----
+// Cada elemento: { alumno, matricula, resuelto }. resuelto=true cuando la
+// matrícula ya tiene precio, lo puso OTRO admin (no yo) y yo no lo he
+// descartado todavía — matriculas.actualizado_por solo se guarda cuando el
+// precio pasa de vacío a puesto (ver guardarFicha), así que no hay ruido de
+// ediciones normales de matrículas que siempre tuvieron precio.
+function fichasParaAdmin() {
+  const items = [];
+  for (const al of S.alumnos) {
+    for (const m of al.matriculas || []) {
+      if (m.tarifa == null) { items.push({ alumno: al, matricula: m, resuelto: false }); continue; }
+      const ref = `${al.id}|${m.asignatura_id}`;
+      if (m.actualizado_por && m.actualizado_por !== S.profesor.id && !descartado('ficha', ref)) {
+        items.push({ alumno: al, matricula: m, resuelto: true });
+      }
+    }
+  }
+  return items;
+}
+function filaFichaIncompleta({ alumno, matricula, resuelto }) {
+  const id = `${alumno.id}|${matricula.asignatura_id}`;
+  if (resuelto) {
+    return filaAvisoResuelto('ficha', id,
+      `${e(alumno.nombre)} <small>· ${e(matricula.asignaturas?.nombre || '')}</small>`,
+      nombreProfesor(matricula.actualizado_por));
+  }
+  return `<li data-item="${id}">
+    <button class="btn chico" data-completar="${alumno.id}">Completar</button>
+    &nbsp;${e(alumno.nombre)} <small>· ${e(matricula.asignaturas?.nombre || '')}</small>
+  </li>`;
+}
+function activarBotonesFichasIncompletas() {
+  document.querySelectorAll('[data-completar]').forEach(b => b.onclick = () => {
+    cerrarModal();
+    modalAlumno(S.alumnos.find(a => a.id === b.dataset.completar));
+  });
+}
+function modalFichasIncompletas(lista) {
+  abrirModal(`
+  <h2>Fichas sin precio</h2>
+  <p class="ayuda">Estos alumnos tienen alguna asignatura sin tarifa fijada — no se les generará
+  recibo hasta que se complete.</p>
+  <ul class="detalle-alumnos" id="av-fichas">
+    ${lista.map(filaFichaIncompleta).join('')}
+  </ul>
+  <div class="pie-modal"><button class="btn liso" id="m-cancelar">Cerrar</button></div>`);
+  avisoAbierto = { tipo: 'fichas', ids: lista.map(({ alumno, matricula }) => `${alumno.id}|${matricula.asignatura_id}`) };
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  activarBotonesFichasIncompletas();
+  activarMarcarVistoAviso();
+}
+
+// ---- Altas fuera de fecha ----
+// Cada elemento: { alumno, resuelto }. resuelto=true cuando ya hay recibo de
+// este mes, lo generó OTRO admin y yo no lo he descartado todavía.
+function altasFueraDeFechaParaAdmin() {
+  const pendientes = recibosPendientesFueraDeFecha().map(alumno => ({ alumno, resuelto: false }));
+  const resueltas = S.alumnos.filter(a => {
+    if (!candidataAltaFueraDeFecha(a)) return false;
+    const recibo = reciboDelPeriodoActual(a.id);
+    if (!recibo || recibo.profesor_id === S.profesor.id) return false;
+    return !descartado('alta_fuera_fecha', a.id);
+  }).map(alumno => ({ alumno, resuelto: true }));
+  return [...pendientes, ...resueltas];
+}
+function filaAltaFueraDeFecha({ alumno: a, resuelto }) {
+  if (resuelto) {
+    const recibo = reciboDelPeriodoActual(a.id);
+    return filaAvisoResuelto('alta_fuera_fecha', a.id,
+      `${e(a.nombre)} <small>· alta ${fmtFecha(a.fecha_alta)}</small>`,
+      nombreProfesor(recibo?.profesor_id));
+  }
   return `<li data-item="${a.id}">
     <button class="btn chico" data-generar="${a.id}">Generar recibo</button>
     &nbsp;${e(a.nombre)} <small>· alta ${fmtFecha(a.fecha_alta)}</small>
@@ -817,7 +924,7 @@ function activarBotonesAltasFueraDeFecha() {
     const alumno = S.alumnos.find(a => a.id === b.dataset.generar);
     // Última comprobación antes de generar: si el otro admin lo generó justo
     // antes de que este clic llegara, no duplicar el recibo.
-    const periodoActual = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+    const periodoActual = periodoActualClave();
     const { data: recibosAlumno } = await S.sb.from('recibos').select('id, periodos').eq('alumno_id', alumno.id);
     if ((recibosAlumno || []).some(r => (r.periodos || []).includes(periodoActual))) {
       await cargarRecibos();
@@ -838,97 +945,53 @@ function modalRecibosFueraDeFecha(lista) {
     ${lista.map(filaAltaFueraDeFecha).join('')}
   </ul>
   <div class="pie-modal"><button class="btn liso" id="m-cancelar">Cerrar</button></div>`);
-  avisoAbierto = { tipo: 'altas', ids: lista.map(a => a.id) };
+  avisoAbierto = { tipo: 'altas', ids: lista.map(({ alumno }) => alumno.id) };
   document.getElementById('m-cancelar').onclick = cerrarModal;
   activarBotonesAltasFueraDeFecha();
+  activarMarcarVistoAviso();
 }
 
-// Alumnos con matrícula sin precio: no se generan recibos hasta completarla.
-function filaFichaIncompleta(alumno, matricula) {
-  return `<li data-item="${alumno.id}|${matricula.asignatura_id}">
-    <button class="btn chico" data-completar="${alumno.id}">Completar</button>
-    &nbsp;${e(alumno.nombre)} <small>· ${e(matricula.asignaturas?.nombre || '')}</small>
-  </li>`;
+// ---- cambios de horario / reactivaciones / bajas de asignatura ----
+// Comparten forma: fila con visto/visto_por. Pendiente si !visto; resuelta
+// (para mí) si visto=true, lo marcó OTRO admin y yo no lo he descartado.
+function cambiosParaAdmin() {
+  return S.cambiosHorario.filter(c => !c.visto || (c.visto_por !== S.profesor.id && !descartado('cambio', c.id)));
 }
-function activarBotonesFichasIncompletas() {
-  document.querySelectorAll('[data-completar]').forEach(b => b.onclick = () => {
-    cerrarModal();
-    modalAlumno(S.alumnos.find(a => a.id === b.dataset.completar));
-  });
+function reactivacionesParaAdmin() {
+  return S.reactivaciones.filter(r => !r.visto || (r.visto_por !== S.profesor.id && !descartado('reactivacion', r.id)));
 }
-function modalFichasIncompletas(lista) {
-  abrirModal(`
-  <h2>Fichas sin precio</h2>
-  <p class="ayuda">Estos alumnos tienen alguna asignatura sin tarifa fijada — no se les generará
-  recibo hasta que se complete.</p>
-  <ul class="detalle-alumnos" id="av-fichas">
-    ${lista.map(({ alumno, matricula }) => filaFichaIncompleta(alumno, matricula)).join('')}
-  </ul>
-  <div class="pie-modal"><button class="btn liso" id="m-cancelar">Cerrar</button></div>`);
-  avisoAbierto = { tipo: 'fichas', ids: lista.map(({ alumno, matricula }) => `${alumno.id}|${matricula.asignatura_id}`) };
-  document.getElementById('m-cancelar').onclick = cerrarModal;
-  activarBotonesFichasIncompletas();
+function bajasAsignaturaParaAdmin() {
+  return S.bajasAsignatura.filter(b => !b.visto || (b.visto_por !== S.profesor.id && !descartado('baja_asignatura', b.id)));
 }
 
 // Refresca en su sitio el aviso que se tenga abierto (si hay uno) cuando
-// llega un cambio en tiempo real de OTRO admin, en vez de dejarlo con la
-// foto fija de cuando se abrió. La llama recargarTrasCambioRemoto().
+// llega un cambio en tiempo real, en vez de dejarlo con la foto fija de
+// cuando se abrió. La llama recargarTrasCambioRemoto().
 function refrescarAvisoAbierto() {
   if (!avisoAbierto) return;
   const cont = document.getElementById('av-' + avisoAbierto.tipo);
   if (!cont) { avisoAbierto = null; return; } // el modal ya no es este aviso
 
-  if (avisoAbierto.tipo === 'fichas') {
-    cont.innerHTML = avisoAbierto.ids.map(id => {
-      const [alumnoId, asigId] = id.split('|');
-      const alumno = S.alumnos.find(a => a.id === alumnoId);
-      const matricula = alumno?.matriculas?.find(m => String(m.asignatura_id) === asigId);
-      if (!alumno || !matricula) return '';
-      if (matricula.tarifa == null) return filaFichaIncompleta(alumno, matricula);
-      if (matricula.actualizado_por === S.profesor.id) return '';
-      return filaAvisoResuelto(id,
-        `${e(alumno.nombre)} <small>· ${e(matricula.asignaturas?.nombre || '')}</small>`,
-        nombreProfesor(matricula.actualizado_por));
-    }).join('');
-    activarBotonesFichasIncompletas();
-    activarQuitarAviso();
-    return;
-  }
-
-  if (avisoAbierto.tipo === 'altas') {
-    const periodoActual = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
-    const pendientesIds = new Set(recibosPendientesFueraDeFecha().map(a => a.id));
-    cont.innerHTML = avisoAbierto.ids.map(id => {
-      const alumno = S.alumnos.find(a => a.id === id);
-      if (!alumno) return '';
-      if (pendientesIds.has(id)) return filaAltaFueraDeFecha(alumno);
-      const recibo = S.recibos.find(r => r.alumno_id === id && (r.periodos || []).includes(periodoActual));
-      if (!recibo || recibo.profesor_id === S.profesor.id) return '';
-      return filaAvisoResuelto(id, `${e(alumno.nombre)} <small>· alta ${fmtFecha(alumno.fecha_alta)}</small>`,
-        nombreProfesor(recibo.profesor_id));
-    }).join('');
-    activarBotonesAltasFueraDeFecha();
-    activarQuitarAviso();
-    return;
-  }
-
-  // cambios / reactivaciones / bajas comparten la misma forma: una tabla en
-  // S con visto/visto_por, y un "Editar ficha" que abre modalAlumno.
-  const CONFIG = {
-    cambios: { arr: S.cambiosHorario, etiqueta: etiquetaCambioHorario, fila: filaCambioHorario, activar: activarBotonesCambiosHorario },
-    reactivaciones: { arr: S.reactivaciones, etiqueta: etiquetaReactivacion, fila: filaReactivacion, activar: activarBotonesReactivaciones },
-    bajas: { arr: S.bajasAsignatura, etiqueta: etiquetaBajaAsignatura, fila: filaBajaAsignatura, activar: activarBotonesBajasAsignatura }
-  }[avisoAbierto.tipo];
-  if (!CONFIG) return;
-  cont.innerHTML = avisoAbierto.ids.map(id => {
-    const fila = CONFIG.arr.find(x => x.id === id);
-    if (!fila) return '';
-    if (!fila.visto) return CONFIG.fila(fila);
-    if (fila.visto_por === S.profesor.id) return '';
-    return filaAvisoResuelto(id, CONFIG.etiqueta(fila), nombreProfesor(fila.visto_por));
-  }).join('');
-  CONFIG.activar();
-  activarQuitarAviso();
+  const FUENTES = {
+    fichas: () => fichasParaAdmin().filter(it => avisoAbierto.ids.includes(`${it.alumno.id}|${it.matricula.asignatura_id}`)),
+    altas: () => altasFueraDeFechaParaAdmin().filter(it => avisoAbierto.ids.includes(it.alumno.id)),
+    cambios: () => cambiosParaAdmin().filter(c => avisoAbierto.ids.includes(c.id)),
+    reactivaciones: () => reactivacionesParaAdmin().filter(r => avisoAbierto.ids.includes(r.id)),
+    bajas: () => bajasAsignaturaParaAdmin().filter(b => avisoAbierto.ids.includes(b.id))
+  };
+  const FILAS = {
+    fichas: filaFichaIncompleta, altas: filaAltaFueraDeFecha,
+    cambios: filaCambioHorario, reactivaciones: filaReactivacion, bajas: filaBajaAsignatura
+  };
+  const ACTIVAR = {
+    fichas: activarBotonesFichasIncompletas, altas: activarBotonesAltasFueraDeFecha,
+    cambios: activarBotonesCambiosHorario, reactivaciones: activarBotonesReactivaciones, bajas: activarBotonesBajasAsignatura
+  };
+  const fuente = FUENTES[avisoAbierto.tipo];
+  if (!fuente) return;
+  cont.innerHTML = fuente().map(FILAS[avisoAbierto.tipo]).join('');
+  ACTIVAR[avisoAbierto.tipo]();
+  activarMarcarVistoAviso();
 }
 
 // ---------------------------------------------------------------- alumnos
@@ -1040,7 +1103,7 @@ function renderAlumnos() {
     </tr></thead>
     <tbody>
     ${lista.map(a => `<tr class="${a.estado === 'baja' ? 'apagado' : ''}">
-      <td><strong>${e(a.nombre)}</strong>${a.tutor_nombre ? `<br><small>Tutor: ${e(a.tutor_nombre)}</small>` : ''}</td>
+      <td><strong>${e(a.nombre)}</strong>${a.tutor_nombre ? `<br><small>Tutor: ${e(a.tutor_nombre)}</small>` : ''}${a.empieza_proximo_mes ? '<br><small>⏳ Empieza el próximo mes</small>' : ''}</td>
       <td>${(a.matriculas || []).map(m => chipAsignatura(m)).join(' ')
         || '<small>Sin asignaturas</small>'}</td>
       <td>${e(telefonosParaLista(a))}</td>
@@ -1089,6 +1152,15 @@ function separarNombreApellidos(a) {
   return { nombre: partes[0] || '', apellidos: partes.slice(1).join(' ') };
 }
 
+// "612345678" -> "612 345 678", solo para que se lea mejor en la ficha — se
+// guarda siempre sin espacios (quitarEspacios() al leer el campo al guardar).
+function formatearTelefono(valor) {
+  return String(valor || '').replace(/\D/g, '').slice(0, 9).replace(/(\d{3})(?=\d)/g, '$1 ');
+}
+function quitarEspacios(valor) {
+  return String(valor || '').replace(/\s+/g, '');
+}
+
 function modalAlumno(alumno) {
   const esAdmin = S.profesor?.es_admin;
   const a = alumno || {};
@@ -1098,6 +1170,11 @@ function modalAlumno(alumno) {
   const ms = alumno ? misMatriculas(alumno).map(m => ({ ...m })) : [];
   const soloLectura = alumno ? (alumno.matriculas || []).filter(m => !ms.some(x => x.id === m.id)) : [];
   const idsOriginales = ms.map(m => m.id);
+  // Precio que tenía cada matrícula ANTES de abrir este modal — para saber,
+  // al guardar, si de verdad se acaba de completar una que estaba sin precio
+  // (y así avisar en tiempo real al otro admin) o si solo se ha tocado otra
+  // cosa de una matrícula que ya tenía precio de antes.
+  const tarifasOriginales = new Map(ms.map(m => [m.id, m.tarifa]));
   const nuevaMatricula = () => ({ id: null, asignatura_id: misAsignaturas()[0]?.id, tarifa: '', tipo_tarifa: 'mes', horas_semana: '' });
   if (!alumno) ms.push(nuevaMatricula());
 
@@ -1116,7 +1193,7 @@ function modalAlumno(alumno) {
     <label>Apellidos <small>(para detectar hermanos automáticamente)</small>
       <input id="a-apellidos" value="${e(nombreForm.apellidos)}" placeholder="ej. García López"></label>
     <label>Teléfono / WhatsApp (si es menor, el del padre/madre)
-      <input id="a-tel" value="${e(a.telefono || a.tutor_telefono || '')}" inputmode="numeric" maxlength="9" placeholder="9 dígitos"></label>
+      <input id="a-tel" value="${e(formatearTelefono(a.telefono || a.tutor_telefono))}" inputmode="numeric" maxlength="11" placeholder="612 345 678"></label>
     <label>Padre / madre / tutor (nombre y apellidos)
       <input id="a-tutor" value="${e(a.tutor_nombre || '')}" placeholder="El recibo irá a su nombre"></label>
     <label>Fecha de alta<input id="a-alta" type="date" value="${e(a.fecha_alta || new Date().toISOString().slice(0, 10))}"></label>
@@ -1126,15 +1203,19 @@ function modalAlumno(alumno) {
       <input id="a-descuento" type="number" min="0" step="0.01" value="${a.descuento_extra || ''}" placeholder="0" ${esAdmin ? '' : 'disabled'}></label>
   </div>
   <label class="check-inline" style="margin-top:10px">
+    <input type="checkbox" id="a-empieza-prox-mes" ${a.empieza_proximo_mes ? 'checked' : ''}>
+    Empieza el próximo mes — no generará recibo este mes; el día 1 del que viene entra solo
+  </label>
+  <label class="check-inline" style="margin-top:10px">
     <input type="checkbox" id="a-padres-sep" ${a.padres_separados ? 'checked' : ''}>
     Padres separados — repartir el recibo entre los dos, cada uno a su teléfono
   </label>
   <div id="a-padres-sep-bloque" style="${a.padres_separados ? '' : 'display:none'}; margin-top:8px">
     <div class="grid2">
       <label>Nombre de la madre<input id="a-madre-nombre" value="${e(a.madre_nombre || '')}"></label>
-      <label>Teléfono de la madre<input id="a-madre-tel" value="${e(a.madre_telefono || '')}" inputmode="numeric" maxlength="9" placeholder="9 dígitos"></label>
+      <label>Teléfono de la madre<input id="a-madre-tel" value="${e(formatearTelefono(a.madre_telefono))}" inputmode="numeric" maxlength="11" placeholder="612 345 678"></label>
       <label>Nombre del padre<input id="a-padre-nombre" value="${e(a.padre_nombre || '')}"></label>
-      <label>Teléfono del padre<input id="a-padre-tel" value="${e(a.padre_telefono || '')}" inputmode="numeric" maxlength="9" placeholder="9 dígitos"></label>
+      <label>Teléfono del padre<input id="a-padre-tel" value="${e(formatearTelefono(a.padre_telefono))}" inputmode="numeric" maxlength="11" placeholder="612 345 678"></label>
     </div>
     <label class="check-inline">
       <input type="radio" name="a-reparto" id="a-reparto-igual" ${Number(a.madre_porcentaje ?? 50) === 50 ? 'checked' : ''}> 50% / 50%
@@ -1204,13 +1285,13 @@ function modalAlumno(alumno) {
   pintarMatriculas();
   document.getElementById('a-add-mat').onclick = () => { ms.push(nuevaMatricula()); pintarMatriculas(); };
   document.getElementById('a-tel').oninput = (ev) => {
-    ev.target.value = ev.target.value.replace(/\D/g, '').slice(0, 9);
+    ev.target.value = formatearTelefono(ev.target.value);
   };
   document.getElementById('a-madre-tel').oninput = (ev) => {
-    ev.target.value = ev.target.value.replace(/\D/g, '').slice(0, 9);
+    ev.target.value = formatearTelefono(ev.target.value);
   };
   document.getElementById('a-padre-tel').oninput = (ev) => {
-    ev.target.value = ev.target.value.replace(/\D/g, '').slice(0, 9);
+    ev.target.value = formatearTelefono(ev.target.value);
   };
   document.getElementById('a-padres-sep').onchange = (ev) => {
     document.getElementById('a-padres-sep-bloque').style.display = ev.target.checked ? '' : 'none';
@@ -1272,13 +1353,14 @@ function modalAlumno(alumno) {
       // recibos, la búsqueda, etc. se sigue guardando junto, como siempre.
       nombre: [nombreSolo, apellidos].filter(Boolean).join(' '),
       apellidos,
-      telefono: v('a-tel') || null,
+      telefono: quitarEspacios(v('a-tel')) || null,
       tutor_nombre: v('a-tutor') || null,
       fecha_alta: v('a-alta') || null,
       facturacion_nombre: v('a-fact-nombre') || null,
       facturacion_direccion: v('a-fact-dir') || null,
       notas: v('a-notas') || null,
-      descuento_extra: esAdmin ? (Number(v('a-descuento')) || 0) : undefined
+      descuento_extra: esAdmin ? (Number(v('a-descuento')) || 0) : undefined,
+      empieza_proximo_mes: document.getElementById('a-empieza-prox-mes').checked
     };
     // Padres separados: si se desmarca, se limpian los datos del reparto (no
     // dejar configuración vieja colgando de una familia que ya no la usa).
@@ -1286,9 +1368,9 @@ function modalAlumno(alumno) {
     fila.padres_separados = padresSeparados;
     if (padresSeparados) {
       fila.madre_nombre = v('a-madre-nombre') || null;
-      fila.madre_telefono = v('a-madre-tel') || null;
+      fila.madre_telefono = quitarEspacios(v('a-madre-tel')) || null;
       fila.padre_nombre = v('a-padre-nombre') || null;
-      fila.padre_telefono = v('a-padre-tel') || null;
+      fila.padre_telefono = quitarEspacios(v('a-padre-tel')) || null;
       const repartoCustom = document.getElementById('a-reparto-custom').checked;
       fila.madre_porcentaje = repartoCustom ? Number(v('a-madre-pct')) || 50 : 50;
     } else {
@@ -1325,17 +1407,23 @@ function modalAlumno(alumno) {
     const borradas = idsOriginales.filter(id => !ms.some(m => m.id === id));
     if (borradas.length) await S.sb.from('matriculas').delete().in('id', borradas);
     for (const m of ms) {
+      const tarifaNueva = (m.tarifa === '' || m.tarifa == null) ? null : Number(m.tarifa);
       const datos = {
         alumno_id: alumnoId,
         asignatura_id: Number(m.asignatura_id),
-        tarifa: (m.tarifa === '' || m.tarifa == null) ? null : Number(m.tarifa),
+        tarifa: tarifaNueva,
         tipo_tarifa: m.tipo_tarifa,
-        horas_semana: m.horas_semana ? Number(m.horas_semana) : null,
-        // Quién completó/tocó el precio: para poder avisar en vivo "Hecho por
-        // X" al otro admin si tenía la lista de "fichas sin precio" abierta.
-        actualizado_por: S.profesor.id,
-        actualizado_en: new Date().toISOString()
+        horas_semana: m.horas_semana ? Number(m.horas_semana) : null
       };
+      // Solo se marca "quién lo completó" cuando de verdad se acaba de poner
+      // precio a una matrícula que no lo tenía — para que el aviso de
+      // "fichas sin precio" se entere de esta transición concreta, y no
+      // salga ruido cada vez que se toca cualquier otra cosa de una
+      // matrícula que ya tenía precio de antes.
+      if (m.id && tarifasOriginales.get(m.id) == null && tarifaNueva != null) {
+        datos.actualizado_por = S.profesor.id;
+        datos.actualizado_en = new Date().toISOString();
+      }
       const { error } = m.id
         ? await S.sb.from('matriculas').update(datos).eq('id', m.id)
         : await S.sb.from('matriculas').insert(datos);
@@ -1540,11 +1628,23 @@ function etiquetaCambioHorario(c) {
     <br><small>${e(c.profesores?.nombre || '')} · ${fmtFecha(String(c.fecha).slice(0, 10))}</small>`;
 }
 function filaCambioHorario(c) {
+  if (c.visto && c.visto_por !== S.profesor.id) {
+    return filaAvisoResuelto('cambio', c.id, etiquetaCambioHorario(c), nombreProfesor(c.visto_por));
+  }
   return `<li data-item="${c.id}">${etiquetaCambioHorario(c)}
     <br>
     <button class="btn chico" data-editar-cambio="${c.id}" data-alumno-cambio="${c.alumno_id}">Editar ficha</button>
     <button class="btn chico liso" data-visto-cambio="${c.id}">✓ Visto</button>
   </li>`;
+}
+// "Marcar todas": si de verdad estaba pendiente, la resuelve (visto=true);
+// si ya la había resuelto OTRO admin y solo me faltaba a mí, la descarta.
+async function resolverCambioHorario(c) {
+  if (!c.visto) {
+    await S.sb.from('cambios_horario').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).eq('id', c.id);
+  } else {
+    await marcarDescartado('cambio', c.id);
+  }
 }
 function activarBotonesCambiosHorario() {
   document.querySelectorAll('[data-visto-cambio]').forEach(b => b.onclick = async () => {
@@ -1574,13 +1674,14 @@ function modalModificacionesSinVer(lista) {
   avisoAbierto = { tipo: 'cambios', ids: lista.map(c => c.id) };
   document.getElementById('m-cancelar').onclick = cerrarModal;
   document.getElementById('md-marcar-vistas').onclick = async () => {
-    await S.sb.from('cambios_horario').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).in('id', lista.map(c => c.id));
-    await cargarCambiosHorario();
+    await Promise.all(lista.map(resolverCambioHorario));
+    await Promise.all([cargarCambiosHorario(), cargarAvisosDescartados()]);
     cerrarModal();
     if (S.vista === 'inicio') renderInicio();
     avisar('Modificaciones marcadas como vistas.');
   };
   activarBotonesCambiosHorario();
+  activarMarcarVistoAviso();
 }
 
 // Alumnos que un profesor (no la admin) ha reactivado: ella puede entrar a
@@ -1590,11 +1691,21 @@ function etiquetaReactivacion(r) {
     <br><small>Reactivado por ${e(r.profesores?.nombre || '')} · ${fmtFecha(String(r.fecha).slice(0, 10))}</small>`;
 }
 function filaReactivacion(r) {
+  if (r.visto && r.visto_por !== S.profesor.id) {
+    return filaAvisoResuelto('reactivacion', r.id, etiquetaReactivacion(r), nombreProfesor(r.visto_por));
+  }
   return `<li data-item="${r.id}">${etiquetaReactivacion(r)}
     <br>
     <button class="btn chico" data-editar-reactivacion="${r.id}" data-alumno-reactivacion="${r.alumno_id}">Editar ficha</button>
     <button class="btn chico liso" data-visto-reactivacion="${r.id}">✓ Visto</button>
   </li>`;
+}
+async function resolverReactivacion(r) {
+  if (!r.visto) {
+    await S.sb.from('reactivaciones_alumno').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).eq('id', r.id);
+  } else {
+    await marcarDescartado('reactivacion', r.id);
+  }
 }
 function activarBotonesReactivaciones() {
   document.querySelectorAll('[data-visto-reactivacion]').forEach(b => b.onclick = async () => {
@@ -1624,13 +1735,14 @@ function modalReactivacionesSinVer(lista) {
   avisoAbierto = { tipo: 'reactivaciones', ids: lista.map(r => r.id) };
   document.getElementById('m-cancelar').onclick = cerrarModal;
   document.getElementById('rv-marcar-vistas').onclick = async () => {
-    await S.sb.from('reactivaciones_alumno').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).in('id', lista.map(r => r.id));
-    await cargarReactivaciones();
+    await Promise.all(lista.map(resolverReactivacion));
+    await Promise.all([cargarReactivaciones(), cargarAvisosDescartados()]);
     cerrarModal();
     if (S.vista === 'inicio') renderInicio();
     avisar('Reactivaciones marcadas como vistas.');
   };
   activarBotonesReactivaciones();
+  activarMarcarVistoAviso();
 }
 
 // Alumnos que un profesor (no la admin) ha dado de baja de UNA asignatura:
@@ -1641,11 +1753,21 @@ function etiquetaBajaAsignatura(b) {
     <br><small>${e(b.profesores?.nombre || '')} · ${fmtFecha(String(b.fecha).slice(0, 10))}</small>`;
 }
 function filaBajaAsignatura(b) {
+  if (b.visto && b.visto_por !== S.profesor.id) {
+    return filaAvisoResuelto('baja_asignatura', b.id, etiquetaBajaAsignatura(b), nombreProfesor(b.visto_por));
+  }
   return `<li data-item="${b.id}">${etiquetaBajaAsignatura(b)}
     <br>
     <button class="btn chico" data-editar-baja-asig="${b.id}" data-alumno-baja-asig="${b.alumno_id}">Editar ficha</button>
     <button class="btn chico liso" data-visto-baja-asig="${b.id}">✓ Visto</button>
   </li>`;
+}
+async function resolverBajaAsignatura(b) {
+  if (!b.visto) {
+    await S.sb.from('bajas_asignatura').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).eq('id', b.id);
+  } else {
+    await marcarDescartado('baja_asignatura', b.id);
+  }
 }
 function activarBotonesBajasAsignatura() {
   document.querySelectorAll('[data-visto-baja-asig]').forEach(b => b.onclick = async () => {
@@ -1675,13 +1797,14 @@ function modalBajasAsignaturaSinVer(lista) {
   avisoAbierto = { tipo: 'bajas', ids: lista.map(b => b.id) };
   document.getElementById('m-cancelar').onclick = cerrarModal;
   document.getElementById('ba-marcar-vistas').onclick = async () => {
-    await S.sb.from('bajas_asignatura').update({ visto: true, visto_por: S.profesor.id, visto_en: new Date().toISOString() }).in('id', lista.map(b => b.id));
-    await cargarBajasAsignatura();
+    await Promise.all(lista.map(resolverBajaAsignatura));
+    await Promise.all([cargarBajasAsignatura(), cargarAvisosDescartados()]);
     cerrarModal();
     if (S.vista === 'inicio') renderInicio();
     avisar('Bajas de asignatura marcadas como vistas.');
   };
   activarBotonesBajasAsignatura();
+  activarMarcarVistoAviso();
 }
 
 async function exportarAlumnosCsv() {

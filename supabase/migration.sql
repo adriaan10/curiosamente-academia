@@ -1387,15 +1387,64 @@ alter table public.matriculas
 -- (cualquier OTRO modal se sigue comportando exactamente igual que antes —
 -- abrirModal() limpia avisoAbierto en cuanto se abre cualquier modal nuevo,
 -- así que un modalAlumno/modalRecibo abierto desde un aviso nunca puede ser
--- sustituido por un refresco de otro admin). Fila resuelta por otro admin:
--- sin botón de acción, "✓ Hecho/Visto por X" + un "Quitar" que solo limpia
--- la vista local (el aviso ya está resuelto de verdad, no toca la BD). Fila
--- resuelta por el propio admin que tiene el modal abierto: desaparece sin
--- avisar. No hace falta ninguna tabla de "visto por cada admin": todos los
--- avisos son derivados en vivo de los datos actuales, así que en cuanto se
--- resuelve algo de verdad deja de salir en cualquier lista fresca.
+-- sustituido por un refresco de otro admin).
 --
 -- Extra, no pedido pero barato: el botón "Generar recibo" (altas fuera de
 -- fecha) hace una comprobación de última hora antes de insertar, para
 -- cerrar la ventana de duplicado real si los dos admins lo pulsan casi a
 -- la vez para el mismo alumno.
+
+-- CORRECCIÓN al bloque de arriba (05/09/2026, mismo día): probado con Adrián
+-- y Judith de verdad, "no hace falta ninguna tabla" resultó ser un fallo —
+-- si Judith no tenía el modal ABIERTO en el instante exacto en que Adrián
+-- resolvía algo, al entrar después no veía nada (fichasIncompletas/etc. son
+-- derivadas en vivo, así que un aviso resuelto simplemente deja de existir
+-- para todo el mundo, no solo para quien lo resolvió). Hace falta que quien
+-- NO lo resolvió lo vea "Hecho por X" y lo descarte él mismo, entre cuando
+-- entre — así que sí hace falta persistirlo.
+create table public.avisos_descartados (
+  tipo text not null check (tipo in ('ficha','cambio','reactivacion','baja_asignatura','alta_fuera_fecha')),
+  referencia text not null,
+  profesor_id uuid not null references public.profesores(id),
+  descartado_en timestamptz not null default now(),
+  primary key (tipo, referencia, profesor_id)
+);
+alter table public.avisos_descartados enable row level security;
+create policy "avisos_descartados_propios" on public.avisos_descartados
+  for all to authenticated
+  using (public.is_admin() and profesor_id = auth.uid())
+  with check (public.is_admin() and profesor_id = auth.uid());
+alter publication supabase_realtime add table public.avisos_descartados;
+-- app.js: fichasParaAdmin()/altasFueraDeFechaParaAdmin()/cambiosParaAdmin()/
+-- reactivacionesParaAdmin()/bajasAsignaturaParaAdmin() sustituyen a los
+-- filtros en línea de renderInicio() — cada uno mezcla lo genuinamente
+-- pendiente con lo ya resuelto por OTRO admin que este admin todavía no ha
+-- descartado (descartado(tipo, referencia) mira avisosDescartados; el propio
+-- resolutor nunca ve su fila, se filtra directamente). El botón cambia de
+-- "Completar/✓ Visto" a "Marcar visto" (marcarDescartado(), inserta en
+-- avisos_descartados) en cuanto la fila ya está resuelta por otro.
+-- matriculas.actualizado_por/actualizado_en solo se rellenan cuando el
+-- precio pasa de vacío a puesto (guardarFicha() compara contra el valor que
+-- tenía la matrícula al abrir la ficha) — no en cualquier edición, para no
+-- generar aviso de "ficha completada" por tocar otra cosa de una matrícula
+-- que ya tenía precio de toda la vida.
+
+-- Alta "empieza el próximo mes" + teléfonos con espacios (05/09/2026).
+-- Un alumno dado de alta a mitad de mes puede empezar YA (recibo de este
+-- mes si le toca, como siempre) o EL PRÓXIMO MES: no se le genera nada este
+-- mes a propósito, y el día 1 del que viene el cron ya lo recoge solo,
+-- porque para entonces ya es un alumno activo con precio como cualquier
+-- otro. Lo puede marcar cualquier profesor al dar de alta (igual que la
+-- fecha de alta, no está restringido a admin); el admin solo tiene que
+-- completar el precio cuando le llegue el aviso de "ficha sin precio" de
+-- siempre, sin que le salte también el de "genera el recibo a mano".
+alter table public.alumnos
+  add column empieza_proximo_mes boolean not null default false;
+-- app.js: candidataAltaFueraDeFecha() (usada tanto por
+-- recibosPendientesFueraDeFecha() como por altasFueraDeFechaParaAdmin())
+-- devuelve false directamente si el alumno tiene esta columna a true.
+--
+-- Aparte, sin tocar esquema: los campos de teléfono de la ficha (alumno,
+-- madre, padre) ahora se ven como "612 345 678" en vez de "612345678"
+-- (formatearTelefono() en app.js, solo visual — se sigue guardando sin
+-- espacios con quitarEspacios() al leer el campo para guardar).
