@@ -22,7 +22,11 @@ permissions:
 
 jobs:
   compilar:
-    runs-on: macos-latest
+    # Fijado a una versión concreta (no "macos-latest"): la más reciente que
+    # ofrece GitHub tiene un bug conocido en el llavero temporal que rompe la
+    # firma de Apple con "SecKeychainUnlock" pase lo que pase en el
+    # certificado o la contraseña — ver conversación de depuración del 2026-09-05.
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v5
