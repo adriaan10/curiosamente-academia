@@ -159,11 +159,9 @@ Deno.serve(async (req) => {
     }
 
     // El orden de los datos debe coincidir con el de la plantilla aprobada:
-    //   recibo → {{1}} nombre, {{2}} concepto, {{3}} importe
-    //   pago   → {{1}} nombre, {{2}} importe, {{3}} concepto
-    const textos = p.tipo === 'pago'
-      ? [p.nombre, p.importe, p.concepto]
-      : [p.nombre, p.concepto, p.importe];
+    //   {{1}} nombre, {{2}} concepto (mes) — el importe ya no va como
+    //   parámetro de plantilla en ninguna de las dos (recibo y pago).
+    const textos = [p.nombre, p.concepto];
     componentes.push({
       type: 'body',
       parameters: textos.map((t) => ({ type: 'text', text: String(t ?? '') }))
