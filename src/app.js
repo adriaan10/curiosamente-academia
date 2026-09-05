@@ -2183,9 +2183,13 @@ function modalClase(clase) {
   </div>
   <p class="ayuda">Cuando el grupo llegue a su aforo, esa hora deja de salir como "hueco libre" en el horario.</p>
   <h3 class="seccion">Color de la clase</h3>
+  <p class="ayuda">Elige uno rápido de la paleta, o "Personalizado…" para cualquier color.</p>
   <div class="colores" id="c-colores">
     ${COLORES_CLASE.map(col => `<button type="button" class="color-swatch ${c.color === col ? 'elegido' : ''}"
       data-color="${col}" style="background:${col}" title="${col}"></button>`).join('')}
+    <label class="color-swatch color-personalizado" id="c-color-personalizado-etq" title="Personalizado…">
+      🎨<input type="color" id="c-color-personalizado" value="${e(c.color || '#F28C28')}">
+    </label>
   </div>
   <h3 class="seccion">Días y horas</h3>
   <div id="c-horarios"></div>
@@ -2215,10 +2219,17 @@ function modalClase(clase) {
   const profesorActual = () => (esAdmin ? document.getElementById('c-prof').value : S.profesor.id);
 
   let colorSel = c.color || null;
-  document.querySelectorAll('.color-swatch').forEach(sw => sw.onclick = () => {
+  document.querySelectorAll('.color-swatch[data-color]').forEach(sw => sw.onclick = () => {
     colorSel = sw.dataset.color;
-    document.querySelectorAll('.color-swatch').forEach(x => x.classList.toggle('elegido', x === sw));
+    document.querySelectorAll('.color-swatch[data-color]').forEach(x => x.classList.toggle('elegido', x === sw));
+    document.getElementById('c-color-personalizado').value = colorSel;
   });
+  document.getElementById('c-color-personalizado').oninput = (ev) => {
+    colorSel = ev.target.value;
+    // El personalizado no "es" ninguno de los botones de la paleta: se
+    // desmarcan todos para que quede claro cuál manda de verdad.
+    document.querySelectorAll('.color-swatch[data-color]').forEach(x => x.classList.remove('elegido'));
+  };
 
   const pintarHorarios = () => {
     document.getElementById('c-horarios').innerHTML = hs.map((h, i) => `

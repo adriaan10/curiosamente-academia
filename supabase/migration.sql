@@ -1488,3 +1488,12 @@ alter table public.alumnos
 -- .dmg/.blockmap/latest-mac.yml). El usuario sigue descargando el .dmg de
 -- siempre para instalar a mano; el .zip es invisible, solo lo usa el propio
 -- autoupdater.
+
+-- Color personalizado de clase (05/09/2026). Cliente 100%, sin esquema —
+-- clases.color ya aceptaba cualquier texto. Junto a la paleta de 25 colores
+-- rápidos, un círculo "🎨" con un <input type="color"> nativo (el selector
+-- completo del sistema) para elegir cualquier color, ya que la paleta se
+-- quedaba corta para distinguir muchas clases parecidas entre sí. Elegir un
+-- swatch de la paleta sincroniza el valor del personalizado (por si luego
+-- se quiere afinar desde ahí); elegir uno personalizado quita la marca de
+-- cualquier swatch de la paleta.
