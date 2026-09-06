@@ -592,6 +592,11 @@ function renderLogin() {
     if (recordar) await window.api.guardarCredenciales(email, password);
     else await window.api.borrarCredenciales();
     S.session = data.session;
+    // Por si se publicó una versión nueva mientras esta sesión estaba
+    // cerrada (por inactividad, por ejemplo) y no hubo ningún cambio en
+    // tiempo real después para avisar solo: se comprueba también aquí,
+    // en cada inicio de sesión, aunque el proceso no se haya reiniciado.
+    window.api.comprobarActualizacionesAhora();
     try {
       await cargarTodo();
       renderMain();

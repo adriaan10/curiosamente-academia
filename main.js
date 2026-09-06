@@ -255,7 +255,11 @@ ipcMain.on('actualizacion:instalar', () => autoUpdater.quitAndInstall());
 // Aviso instantáneo por Supabase Realtime (tabla app_version): en vez de
 // esperar a la próxima apertura, se relanza la comprobación ya mismo.
 ipcMain.on('actualizacion:comprobar-ahora', () => {
-  console.log('[actualizador] aviso instantáneo recibido (cambio en tabla app_version)');
+  // Dos motivos posibles para este aviso: un cambio en tiempo real en la
+  // tabla app_version, o un inicio de sesión (por si hubo una versión
+  // nueva mientras la sesión estaba cerrada). El registro de más abajo ya
+  // dice qué versión hay, así que no hace falta distinguir el motivo aquí.
+  console.log('[actualizador] comprobación forzada (tiempo real o login)');
   comprobarActualizaciones();
 });
 // Reinicio completo del proceso: se usa cuando a alguien le cambian los

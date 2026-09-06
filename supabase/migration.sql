@@ -1549,3 +1549,17 @@ alter table public.alumnos
 -- comprobar (con la versión actual), y en el error ya silenciado a
 -- propósito (ahora se ve en consola, pero se sigue sin mostrar al usuario).
 -- Nada de esto cambia el comportamiento, solo lo hace observable.
+
+-- Comprobar actualizaciones también al iniciar sesión (06/09/2026). Con el
+-- registro de arriba se confirmó en vivo (en un Mac real) que el mecanismo
+-- entero funciona perfecto — el hueco real que quedaba: el aviso instantáneo
+-- por tiempo real solo llega si la sesión está iniciada (el canal de tiempo
+-- real, iniciarTiempoReal(), solo se abre dentro de cargarTodo(), tras el
+-- login) — así que si alguien se queda sin sesión por inactividad (20 min)
+-- y justo entonces se publica una versión, al volver a entrar (sin cerrar
+-- la app entera) no se enteraría hasta el próximo cambio en tiempo real o
+-- hasta el siguiente cierre y apertura completos. app.js: la función
+-- entrar() (en renderLogin) llama a window.api.comprobarActualizacionesAhora()
+-- justo tras un login correcto — mismo canal ya existente
+-- (actualizacion:comprobar-ahora → comprobarActualizaciones() en main.js),
+-- sin código nuevo en el proceso principal.
