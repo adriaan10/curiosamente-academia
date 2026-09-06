@@ -1510,3 +1510,11 @@ alter table public.alumnos
 -- pulsar "Actualizar". cerrarModal() ya hacía este mismo chequeo
 -- correctamente al cerrar un modal; ahora recargarTrasCambioRemoto() lo
 -- hace también, mirando S.actualizacionPendiente antes que nada.
+
+-- Icono correcto en Mac (06/09/2026). main.js fijaba el icono de la ventana
+-- con assets/icon.ico siempre, sea cual sea el sistema — .ico es formato de
+-- Windows, así que en Mac (y Linux) no cargaba bien. package.json ya usaba
+-- assets/icon.png para el icono del propio paquete .app en mac.icon (eso ya
+-- estaba bien), pero main.js seguía dándole .ico al BrowserWindow en
+-- tiempo de ejecución. Ahora elige el archivo según process.platform:
+-- icon.ico en Windows, icon.png en el resto.

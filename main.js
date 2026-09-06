@@ -98,7 +98,9 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: `Curiosamente — Gestión de la academia (v${app.getVersion()})`,
-    icon: path.join(__dirname, 'assets', 'icon.ico'),
+    // .ico es un formato de Windows — en Mac (y Linux) hay que darle el .png,
+    // si no el icono de la ventana no carga bien.
+    icon: path.join(__dirname, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
