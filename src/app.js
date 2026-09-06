@@ -265,6 +265,13 @@ async function recargarTrasCambioRemoto() {
     if (propia) S.profesor = propia;
   }
 
+  // Si hay un aviso de "versión nueva" en pantalla (mostrarPantallaActualizacion
+  // pinta directo sobre $app(), no en modal-raiz), no lo tapes con un repintado
+  // normal: sin esto, el primer cambio en tiempo real que llegara mientras se
+  // veía el aviso lo borraba solo, sin que nadie tocara nada — la actualización
+  // seguía descargada de fondo, pero el aviso desaparecía sin explicación.
+  if (S.actualizacionPendiente) return mostrarPantallaActualizacion(S.actualizacionPendiente);
+
   // No interrumpir con un repintado completo si hay una ficha/modal abierta:
   // se vería la pantalla de golpe y se perdería lo que se estuviera editando.
   // Excepción: un aviso de Inicio (fichas sin precio, cambios de horario...)

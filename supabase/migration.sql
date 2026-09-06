@@ -1497,3 +1497,16 @@ alter table public.alumnos
 -- swatch de la paleta sincroniza el valor del personalizado (por si luego
 -- se quiere afinar desde ahí); elegir uno personalizado quita la marca de
 -- cualquier swatch de la paleta.
+
+-- El aviso de "versión nueva" desaparecía solo (05/09/2026). Diagnosticado
+-- por una sesión de Claude en el Mac del usuario, viendo el problema en
+-- vivo — mostrarPantallaActualizacion() pinta directo sobre $app(), no
+-- dentro de #modal-raiz, así que recargarTrasCambioRemoto() no la
+-- reconocía como "algo abierto que no hay que tapar": el primer cambio en
+-- tiempo real que llegara con el aviso en pantalla (muy probable en una
+-- academia con varios profesores generando actividad) lo sustituía por la
+-- vista normal sin que nadie tocara nada — la actualización seguía
+-- descargada de fondo, pero el aviso se esfumaba antes de que se pudiera
+-- pulsar "Actualizar". cerrarModal() ya hacía este mismo chequeo
+-- correctamente al cerrar un modal; ahora recargarTrasCambioRemoto() lo
+-- hace también, mirando S.actualizacionPendiente antes que nada.
