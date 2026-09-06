@@ -36,7 +36,8 @@ const S = {
   vistaRosterRecibos: false,
   filtros: { texto: '', asignatura: '', estado: 'activo', profesor: '', textoRecibo: '' },
   logoBase64: null,
-  actualizacionPendiente: null
+  actualizacionPendiente: null,
+  actualizacionNecesitaReinicio: false
 };
 
 const $app = () => document.getElementById('app');
@@ -56,7 +57,7 @@ async function init() {
   // recuerda aunque haya terminado antes de que esta ventana cargara), se
   // avisa antes que nada; si llega mientras se usa la app, el aviso salta en
   // cuanto llegue (o al cerrar un modal que estuviera abierto, ver cerrarModal).
-  window.api.onActualizacionLista((version) => avisoActualizacionPendiente(version));
+  window.api.onActualizacionLista((version, necesitaReinicioLimpio) => avisoActualizacionPendiente(version, necesitaReinicioLimpio));
   const yaLista = await window.api.getActualizacionPendiente();
   if (yaLista) return avisoActualizacionPendiente(yaLista);
 
@@ -270,7 +271,7 @@ async function recargarTrasCambioRemoto() {
   // normal: sin esto, el primer cambio en tiempo real que llegara mientras se
   // veía el aviso lo borraba solo, sin que nadie tocara nada — la actualización
   // seguía descargada de fondo, pero el aviso desaparecía sin explicación.
-  if (S.actualizacionPendiente) return mostrarPantallaActualizacion(S.actualizacionPendiente);
+  if (S.actualizacionPendiente) return mostrarOReiniciar();
 
   // No interrumpir con un repintado completo si hay una ficha/modal abierta:
   // se vería la pantalla de golpe y se perdería lo que se estuviera editando.
@@ -511,10 +512,20 @@ function mostrarPantallaActualizacion(version) {
 // Si hay un modal abierto (una ficha a medio editar, un recibo a medio
 // generar…) se espera a que se cierre antes de tapar la pantalla entera:
 // cerrarModal() se encarga de mostrarla en cuanto quede libre.
-function avisoActualizacionPendiente(version) {
+function avisoActualizacionPendiente(version, necesitaReinicioLimpio) {
   S.actualizacionPendiente = version;
+  S.actualizacionNecesitaReinicio = Boolean(necesitaReinicioLimpio);
   const modalAbierto = document.getElementById('modal-raiz')?.innerHTML.trim();
-  if (!modalAbierto) mostrarPantallaActualizacion(version);
+  if (!modalAbierto) mostrarOReiniciar();
+}
+
+// En Mac, la segunda actualización descargada en la misma sesión abierta no
+// se aplica bien con el botón normal (ver el aviso en main.js) — en vez de
+// ofrecerlo, se reinicia la app sola y silenciosa: el proceso nuevo vuelve a
+// contar como "primera vez" y ahí el botón de siempre ya funciona fiable.
+function mostrarOReiniciar() {
+  if (S.actualizacionNecesitaReinicio) window.api.restartApp();
+  else mostrarPantallaActualizacion(S.actualizacionPendiente);
 }
 
 function logoHtml(clase = 'logo-login') {
@@ -5026,7 +5037,7 @@ function abrirModal(html) {
 
 function cerrarModal() {
   document.getElementById('modal-raiz').innerHTML = '';
-  if (S.actualizacionPendiente) mostrarPantallaActualizacion(S.actualizacionPendiente);
+  if (S.actualizacionPendiente) mostrarOReiniciar();
 }
 
 let toastTimer;

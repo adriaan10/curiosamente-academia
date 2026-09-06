@@ -22,9 +22,21 @@ autoUpdater.on('error', () => { /* actualizar nunca debe romper el uso normal */
 // de que la ventana haya cargado del todo y monte su oyente: el renderer la
 // pregunta también al arrancar, con `actualizacion:pendiente`.
 let actualizacionLista = null;
+// En Mac, una segunda descarga de actualización dentro del mismo proceso ya
+// arrancado no la aplica bien Squirrel.Mac (el componente nativo de Apple
+// que usa electron-updater ahí) — solo funciona fiable la primera vez que
+// arranca el proceso. Con varias versiones publicadas seguidas y la app
+// abierta todo el rato (como en las pruebas de hoy), la segunda o tercera
+// descarga en la misma sesión se quedaría a medio aplicar. Por eso, a partir
+// de la segunda, se avisa al renderer para que reinicie la app sola en vez
+// de ofrecer el botón de "Actualizar": el proceso nuevo vuelve a contar como
+// "primera vez" y esa sí se aplica bien cuando se pulse Actualizar.
+let primerAvisoEnEstaSesion = true;
 autoUpdater.on('update-downloaded', (info) => {
+  const necesitaReinicioLimpio = process.platform === 'darwin' && !primerAvisoEnEstaSesion;
+  primerAvisoEnEstaSesion = false;
   actualizacionLista = info.version;
-  if (win && !win.isDestroyed()) win.webContents.send('actualizacion:lista', info.version);
+  if (win && !win.isDestroyed()) win.webContents.send('actualizacion:lista', info.version, necesitaReinicioLimpio);
 });
 
 function comprobarActualizaciones() {

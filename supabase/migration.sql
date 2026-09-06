@@ -1518,3 +1518,21 @@ alter table public.alumnos
 -- estaba bien), pero main.js seguía dándole .ico al BrowserWindow en
 -- tiempo de ejecución. Ahora elige el archivo según process.platform:
 -- icon.ico en Windows, icon.png en el resto.
+
+-- Reinicio silencioso para la 2ª+ actualización en Mac en la misma sesión
+-- (06/09/2026). Diagnosticado en el Mac: Squirrel.Mac (el componente nativo
+-- de Apple que usa electron-updater ahí) solo aplica de forma fiable la
+-- PRIMERA descarga de actualización del proceso — con varias versiones
+-- publicadas seguidas y la app abierta todo el rato (como hoy), la segunda
+-- descarga en la misma sesión no se aplicaría bien con el botón normal.
+-- main.js: primerAvisoEnEstaSesion (por proceso, se resetea solo en cada
+-- arranque) decide, en el evento update-downloaded, si esta descarga es la
+-- primera de la sesión; si no lo es Y es Mac, manda al renderer un segundo
+-- dato (necesitaReinicioLimpio) además de la versión. app.js:
+-- avisoActualizacionPendiente()/mostrarOReiniciar() usan ese dato: si hace
+-- falta, reinicia la app sola con el mismo window.api.restartApp() ya usado
+-- para el cambio de admin (app.relaunch()+app.exit(), sin IPC nuevo) en vez
+-- de mostrar el botón — el proceso nuevo cuenta otra vez como "primera vez"
+-- y ahí el botón de siempre funciona bien. En Windows nunca se activa
+-- (condición process.platform === 'darwin' en main.js), así que no cambia
+-- nada de lo que ya funcionaba ahí.

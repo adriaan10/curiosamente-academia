@@ -15,7 +15,7 @@ contextBridge.exposeInMainWorld('api', {
   saveBackup: (json) => ipcRenderer.invoke('backup:save', json),
   getLogo: () => ipcRenderer.invoke('logo:get'),
   getActualizacionPendiente: () => ipcRenderer.invoke('actualizacion:pendiente'),
-  onActualizacionLista: (cb) => ipcRenderer.on('actualizacion:lista', (_e, version) => cb(version)),
+  onActualizacionLista: (cb) => ipcRenderer.on('actualizacion:lista', (_e, version, necesitaReinicioLimpio) => cb(version, necesitaReinicioLimpio)),
   instalarActualizacion: () => ipcRenderer.send('actualizacion:instalar'),
   comprobarActualizacionesAhora: () => ipcRenderer.send('actualizacion:comprobar-ahora'),
   restartApp: () => ipcRenderer.send('app:restart'),
