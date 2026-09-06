@@ -11,12 +11,18 @@ let win;
 // que quien esté usando la app sepa que tiene que actualizar.
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
+// electron-updater no imprime nada por su cuenta salvo que se le dé un
+// logger — sin esto, una comprobación (falle o no) es completamente muda en
+// consola, lo que hace imposible diagnosticar por qué no salta un aviso.
+autoUpdater.logger = console;
 // La descarga sigue en segundo plano después de comprobar, y si falla ahí
 // (sin conexión, o en Mac sin firmar, donde la auto-actualización no está
 // permitida) el aviso llega por este evento y no por la promesa de abajo.
 // Sin este oyente, ese error tumbaría la app: se ignora a propósito, la
-// actualización se reintenta sola la próxima vez que se abra.
-autoUpdater.on('error', () => { /* actualizar nunca debe romper el uso normal */ });
+// actualización se reintenta sola la próxima vez que se abra. Se deja
+// constancia en consola (con el logger de arriba ya se vería igual, pero
+// así queda explícito que se ignora adrede y no por un descuido).
+autoUpdater.on('error', (err) => console.error('[actualizador] error ignorado a propósito:', err?.message || err));
 
 // Guardada aquí (no solo enviada por evento) por si la descarga termina antes
 // de que la ventana haya cargado del todo y monte su oyente: el renderer la
@@ -40,7 +46,8 @@ autoUpdater.on('update-downloaded', (info) => {
 });
 
 function comprobarActualizaciones() {
-  autoUpdater.checkForUpdates().catch(() => { /* sin conexión: se reintenta la próxima vez */ });
+  console.log('[actualizador] comprobando… versión actual:', app.getVersion());
+  autoUpdater.checkForUpdates().catch((err) => console.error('[actualizador] fallo al comprobar (sin conexión, o Mac sin firmar):', err?.message || err));
 }
 
 function configPath() {
@@ -247,7 +254,10 @@ ipcMain.handle('actualizacion:pendiente', () => actualizacionLista);
 ipcMain.on('actualizacion:instalar', () => autoUpdater.quitAndInstall());
 // Aviso instantáneo por Supabase Realtime (tabla app_version): en vez de
 // esperar a la próxima apertura, se relanza la comprobación ya mismo.
-ipcMain.on('actualizacion:comprobar-ahora', () => comprobarActualizaciones());
+ipcMain.on('actualizacion:comprobar-ahora', () => {
+  console.log('[actualizador] aviso instantáneo recibido (cambio en tabla app_version)');
+  comprobarActualizaciones();
+});
 // Reinicio completo del proceso: se usa cuando a alguien le cambian los
 // permisos de administrador mientras tiene la app abierta, para que arranque
 // limpia con los permisos nuevos en vez de dejar la sesión a medias.

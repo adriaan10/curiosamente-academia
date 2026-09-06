@@ -1536,3 +1536,16 @@ alter table public.alumnos
 -- y ahí el botón de siempre funciona bien. En Windows nunca se activa
 -- (condición process.platform === 'darwin' en main.js), así que no cambia
 -- nada de lo que ya funcionaba ahí.
+
+-- Registro real del actualizador (06/09/2026). main.js no imprimía nada por
+-- su cuenta en una comprobación normal — ni acierto, ni fallo, ni siquiera
+-- si llegaba el aviso instantáneo por tiempo real — así que ejecutando la
+-- app desde Terminal (`/Applications/Curiosamente.app/Contents/MacOS/Curiosamente`)
+-- no se veía nada aunque el mecanismo fallara de verdad, haciendo imposible
+-- diagnosticar por qué no saltaba la actualización en un Mac concreto.
+-- Añadido: autoUpdater.logger = console (electron-updater vuelca todo su
+-- proceso interno de comprobar/descargar), más tres líneas explícitas —
+-- al recibir el aviso instantáneo de la tabla app_version, al empezar a
+-- comprobar (con la versión actual), y en el error ya silenciado a
+-- propósito (ahora se ve en consola, pero se sigue sin mostrar al usuario).
+-- Nada de esto cambia el comportamiento, solo lo hace observable.
