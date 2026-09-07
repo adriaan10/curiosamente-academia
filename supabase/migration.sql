@@ -1645,3 +1645,61 @@ alter table public.alumnos
 -- Profesores, y junto a "Editar" en la fila de un alumno de baja en
 -- Alumnos — ambos con confirm() explicando qué se conserva antes de llamar
 -- a la función.
+
+-- ============================================================
+-- Limpieza total antes de entregar la app a los profesores (07/09/2026)
+-- ============================================================
+
+-- Los alumnos, matrículas y recibos que había eran todos de pruebas de esta
+-- sesión (nombres tipo "adrian fernandez artiaga", "carlos fernandez
+-- artiaga"... con el teléfono del admin, todos dados de alta el 05/09/2026).
+-- Antes de entregar la app a los profesores para que empiecen a usarla de
+-- verdad: `delete from recibos;` (cascada a finanzas_movimientos, todo
+-- origen='automatico') seguido de `delete from alumnos;` (cascada a
+-- matriculas, clase_alumnos, cambios_horario, reactivaciones_alumno,
+-- bajas_asignatura). Los profesores, asignaturas y clases (horario real que
+-- ya tienen montado) NO se tocan. Copia de seguridad de lo borrado guardada
+-- aparte, fuera de este repositorio, por si hiciera falta consultarla.
+
+-- ============================================================
+-- Color al crear una asignatura (07/09/2026)
+-- ============================================================
+
+-- alter table public.asignaturas add column color text; — nullable: las
+-- asignaturas antiguas (sin color guardado) siguen usando el reparto
+-- automático de siempre por nombre (colorArea() en app.js), las nuevas usan
+-- el que se elija al crearla. app.js: un <input type="color"> junto al
+-- campo de nombre en "Nueva/Editar profesor" (bloqueAsignaturas()), con un
+-- color de partida al azar de la misma paleta de Clases (COLORES_CLASE)
+-- para no dejarlo en negro. colorArea() ahora recibe la asignatura entera
+-- (antes solo el nombre) para poder leer ese color.
+
+-- ============================================================
+-- Modo desarrollador (07/09/2026)
+-- ============================================================
+
+-- profesores.es_desarrollador boolean, default false — un admin más, pero
+-- marcado como quien solo observa que todo vaya bien, sin contar como uno
+-- de los admins que tienen que resolver los avisos de Inicio. Mismos
+-- permisos que admin (es_admin sigue en true); es solo una etiqueta visual
+-- (chip "Desarrollador" gris/blanco/negro en la cabecera y en la lista de
+-- Profesores, en vez de "· admin") y un cambio de comportamiento en los
+-- avisos: is_desarrollador() (mismo patrón que is_admin()) + una política
+-- nueva en avisos_descartados (avisos_descartados_desarrollador_select)
+-- para que el desarrollador pueda leer también las filas de descarte de
+-- OTROS admins, no solo las suyas (is_admin() and profesor_id=auth.uid()
+-- sigue mandando para todos los demás, incluido para sus propias filas).
+--
+-- app.js: adminsReales() (es_admin, no es_desarrollador, activo) +
+-- resueltoParaTodosLosAdmins(tipo, referencia, actorId) — un aviso resuelto
+-- por un admin de verdad (actorId) se le sigue mostrando al desarrollador
+-- como "Hecho por X" (para poder vigilar que va bien) pero SIN botón de
+-- "Marcar visto": desaparece solo cuando el resto de admins de verdad (sin
+-- contar al desarrollador) también lo hayan visto/descartado, sin que el
+-- desarrollador tenga que actuar él. fichasParaAdmin/altasFueraDeFechaPara
+-- Admin/cambiosParaAdmin/reactivacionesParaAdmin/bajasAsignaturaParaAdmin
+-- usan esta lógica en vez de la de "lo descarté yo" cuando
+-- S.profesor.es_desarrollador es true.
+--
+-- Aplicado directamente en Supabase (sin RPC: profesores_update ya permite
+-- id=auth.uid() o is_admin(), así que Adrián puede marcarse a sí mismo).

@@ -389,7 +389,7 @@ async function backupAutomatico() {
 
 async function cargarAlumnos() {
   const { data, error } = await S.sb.from('alumnos')
-    .select('*, matriculas(*, asignaturas(nombre))')
+    .select('*, matriculas(*, asignaturas(nombre, color))')
     .order('nombre');
   if (error) return avisar('Error cargando alumnos: ' + error.message, true);
   S.alumnos = data || [];
@@ -638,7 +638,9 @@ function renderMain() {
       <button data-v="ajustes" class="tab ${S.vista === 'ajustes' ? 'activa' : ''}">Ajustes</button>
     </nav>
     <div class="usuario">
-      <span>${e(S.profesor?.nombre || '')}${esAdmin ? ' · admin' : ''}</span>
+      <span>${e(S.profesor?.nombre || '')}${S.profesor?.es_desarrollador
+        ? ' <span class="chip desarrollador">Desarrollador</span>'
+        : (esAdmin ? ' · admin' : '')}</span>
       <button class="btn liso" id="logout">Salir</button>
     </div>
   </header>
@@ -876,13 +878,30 @@ function nombreProfesor(id) {
   return S.profesores.find(p => p.id === id)?.nombre || 'otro admin';
 }
 
+// ---- Modo desarrollador: ve los avisos pero no cuenta como admin que tiene
+// que actuar. Un aviso resuelto por un admin de verdad se le sigue mostrando
+// (con "Hecho por X", sin botón) hasta que TODOS los demás admins de verdad
+// también lo hayan visto/descartado — solo entonces desaparece, sin que el
+// desarrollador tenga que marcar nada él mismo.
+function adminsReales() {
+  return S.profesores.filter(p => p.es_admin && !p.es_desarrollador && p.estado === 'activo');
+}
+function resueltoParaTodosLosAdmins(tipo, referencia, actorId) {
+  return adminsReales().every(p => p.id === actorId ||
+    S.avisosDescartados.some(d => d.tipo === tipo && d.referencia === String(referencia) && d.profesor_id === p.id));
+}
+
 // Fila ya resuelta por OTRO admin: sin botón de acción, con quién lo hizo, y
 // un "Marcar visto" que guarda el descarte para este admin (persiste: no
-// vuelve a salirle a él, siga o no abierto el modal, entre cuando entre).
+// vuelve a salirle a él, siga o no abierto el modal, entre cuando entre). En
+// modo desarrollador no hay botón: no le toca actuar, solo desaparece sola
+// cuando el resto de admins de verdad ya la hayan visto (ver arriba).
 function filaAvisoResuelto(tipo, id, etiquetaHtml, nombreQuien) {
+  const boton = S.profesor?.es_desarrollador ? '' :
+    `<button class="btn chico liso" data-marcar-visto-tipo="${tipo}" data-marcar-visto-ref="${e(String(id))}">Marcar visto</button>`;
   return `<li data-item="${e(String(id))}">${etiquetaHtml}
     <br><span class="chip envio-si">✓ Hecho por ${e(nombreQuien)}</span>
-    <button class="btn chico liso" data-marcar-visto-tipo="${tipo}" data-marcar-visto-ref="${e(String(id))}">Marcar visto</button></li>`;
+    ${boton}</li>`;
 }
 function activarMarcarVistoAviso() {
   document.querySelectorAll('[data-marcar-visto-tipo]').forEach(b => b.onclick = async () => {
@@ -899,14 +918,17 @@ function activarMarcarVistoAviso() {
 // precio pasa de vacío a puesto (ver guardarFicha), así que no hay ruido de
 // ediciones normales de matrículas que siempre tuvieron precio.
 function fichasParaAdmin() {
+  const esDev = S.profesor?.es_desarrollador;
   const items = [];
   for (const al of S.alumnos) {
     for (const m of al.matriculas || []) {
       if (m.tarifa == null) { items.push({ alumno: al, matricula: m, resuelto: false }); continue; }
+      if (!m.actualizado_por) continue;
       const ref = `${al.id}|${m.asignatura_id}`;
-      if (m.actualizado_por && m.actualizado_por !== S.profesor.id && !descartado('ficha', ref)) {
-        items.push({ alumno: al, matricula: m, resuelto: true });
-      }
+      const pendiente = esDev
+        ? !resueltoParaTodosLosAdmins('ficha', ref, m.actualizado_por)
+        : m.actualizado_por !== S.profesor.id && !descartado('ficha', ref);
+      if (pendiente) items.push({ alumno: al, matricula: m, resuelto: true });
     }
   }
   return items;
@@ -948,12 +970,14 @@ function modalFichasIncompletas(lista) {
 // Cada elemento: { alumno, resuelto }. resuelto=true cuando ya hay recibo de
 // este mes, lo generó OTRO admin y yo no lo he descartado todavía.
 function altasFueraDeFechaParaAdmin() {
+  const esDev = S.profesor?.es_desarrollador;
   const pendientes = recibosPendientesFueraDeFecha().map(alumno => ({ alumno, resuelto: false }));
   const resueltas = S.alumnos.filter(a => {
     if (!candidataAltaFueraDeFecha(a)) return false;
     const recibo = reciboDelPeriodoActual(a.id);
-    if (!recibo || recibo.profesor_id === S.profesor.id) return false;
-    return !descartado('alta_fuera_fecha', a.id);
+    if (!recibo) return false;
+    if (esDev) return !resueltoParaTodosLosAdmins('alta_fuera_fecha', a.id, recibo.profesor_id);
+    return recibo.profesor_id !== S.profesor.id && !descartado('alta_fuera_fecha', a.id);
   }).map(alumno => ({ alumno, resuelto: true }));
   return [...pendientes, ...resueltas];
 }
@@ -1003,15 +1027,21 @@ function modalRecibosFueraDeFecha(lista) {
 
 // ---- cambios de horario / reactivaciones / bajas de asignatura ----
 // Comparten forma: fila con visto/visto_por. Pendiente si !visto; resuelta
-// (para mí) si visto=true, lo marcó OTRO admin y yo no lo he descartado.
+// (para mí) si visto=true, lo marcó OTRO admin y yo no lo he descartado — o,
+// en modo desarrollador, si todavía no lo han visto TODOS los admins reales.
+function pendienteParaAdmin(item, tipo) {
+  if (!item.visto) return true;
+  if (S.profesor?.es_desarrollador) return !resueltoParaTodosLosAdmins(tipo, item.id, item.visto_por);
+  return item.visto_por !== S.profesor.id && !descartado(tipo, item.id);
+}
 function cambiosParaAdmin() {
-  return S.cambiosHorario.filter(c => !c.visto || (c.visto_por !== S.profesor.id && !descartado('cambio', c.id)));
+  return S.cambiosHorario.filter(c => pendienteParaAdmin(c, 'cambio'));
 }
 function reactivacionesParaAdmin() {
-  return S.reactivaciones.filter(r => !r.visto || (r.visto_por !== S.profesor.id && !descartado('reactivacion', r.id)));
+  return S.reactivaciones.filter(r => pendienteParaAdmin(r, 'reactivacion'));
 }
 function bajasAsignaturaParaAdmin() {
-  return S.bajasAsignatura.filter(b => !b.visto || (b.visto_por !== S.profesor.id && !descartado('baja_asignatura', b.id)));
+  return S.bajasAsignatura.filter(b => pendienteParaAdmin(b, 'baja_asignatura'));
 }
 
 // Refresca en su sitio el aviso que se tenga abierto (si hay uno) cuando
@@ -1066,9 +1096,13 @@ function opcionesAsignaturas(profesorId, seleccionadaId) {
     `<option value="${x.id}" ${x.id === seleccionadaId ? 'selected' : ''}>${e(x.nombre)}</option>`).join('');
 }
 
-// Color por área de asignatura: Inglés amarillo, Matemáticas azul, FyQ verde.
-function colorArea(nombreAsignatura) {
-  const n = String(nombreAsignatura || '');
+// Color de una asignatura: el que se eligió al crearla (asignatura.color) si
+// lo hay; si no (asignaturas antiguas, de antes de este color personalizado),
+// el reparto automático de siempre por nombre.
+function colorArea(asignatura) {
+  const obj = asignatura && typeof asignatura === 'object' ? asignatura : null;
+  if (obj?.color) return { fondo: obj.color + '33', borde: obj.color };
+  const n = String(obj ? obj.nombre : asignatura || '');
   if (n.startsWith('Inglés')) return { fondo: '#FFF1C2', borde: '#C9A227' };
   if (n.startsWith('Matemáticas')) return { fondo: '#DCEBFA', borde: '#3D7DC8' };
   if (n.startsWith('Física')) return { fondo: '#DFF2E4', borde: '#2E9E5B' };
@@ -1089,7 +1123,7 @@ function telefonosParaLista(a) {
 }
 
 function chipAsignatura(m, extraHtml = '') {
-  const c = colorArea(m.asignaturas?.nombre);
+  const c = colorArea(m.asignaturas);
   return `<span class="chip-asig" style="background:${c.fondo}; border-left: 3px solid ${c.borde}">
     ${e(m.asignaturas?.nombre || '')} · ${formatoImporte(m.tarifa)}€/${m.tipo_tarifa === 'clase' ? 'clase' : 'mes'}${extraHtml}</span>`;
 }
@@ -4011,11 +4045,11 @@ function renderProfesores() {
         .map(x => S.asignaturas.find(a => a.id === x.asignatura_id))
         .filter(Boolean);
       return `<tr class="${p.estado === 'baja' ? 'apagado' : ''}">
-      <td><strong>${e(p.nombre)}</strong>${p.es_admin ? ' <span class="chip activo">admin</span>' : ''}
+      <td><strong>${e(p.nombre)}</strong>${p.es_desarrollador ? ' <span class="chip desarrollador">Desarrollador</span>' : (p.es_admin ? ' <span class="chip activo">admin</span>' : '')}
         ${p.estado === 'baja' ? ' <span class="chip baja">baja</span>' : ''}</td>
       <td>${e(p.email)}</td>
       <td>${asigs.length ? asigs.map(a => {
-          const c = colorArea(a.nombre);
+          const c = colorArea(a);
           return `<span class="chip-asig" style="background:${c.fondo}; border-left:3px solid ${c.borde}">${e(a.nombre)}</span>`;
         }).join(' ')
         : (p.es_admin ? '<small>Todas (administrador)</small>' : '<small>Sin asignaturas (ve todas)</small>')}</td>
@@ -4080,7 +4114,7 @@ function passwordSugerida() {
 
 function checkboxesAsignaturas(marcadas = new Set()) {
   return S.asignaturas.map(a => {
-    const c = colorArea(a.nombre);
+    const c = colorArea(a);
     return `<label class="mes" style="border-left:3px solid ${c.borde}">
       <input type="checkbox" data-p-asig="${a.id}" ${marcadas.has(a.id) ? 'checked' : ''}> ${e(a.nombre)}
       <button type="button" class="btn chico liso peligro" data-borrar-asig="${a.id}" title="Borrar esta asignatura de la academia">✕</button></label>`;
@@ -4093,11 +4127,16 @@ function asignaturasMarcadas() {
 
 // Bloque de checkboxes + creación de asignaturas nuevas (para el alta/edición
 // de profesores): así una materia nueva no tiene que "compartirse" con nadie.
+// El color se elige al crearla (se usa luego en los chips de matrícula y en
+// esta misma lista); por defecto sale uno al azar de la paleta de Clases,
+// para no dejarlo siempre en negro.
 function bloqueAsignaturas(marcadas = new Set()) {
+  const colorInicial = COLORES_CLASE[Math.floor(Math.random() * COLORES_CLASE.length)];
   return `
   <div class="lista-alumnos" id="p-asigs">${checkboxesAsignaturas(marcadas)}</div>
   <div class="fila-horario" style="margin-top:8px">
     <input id="p-nueva-asig" placeholder="¿Materia nueva? ej. Latín — clases particulares">
+    <input type="color" id="p-nueva-asig-color" class="color-mini" value="${colorInicial}" title="Color de la asignatura">
     <button type="button" class="btn chico" id="p-crear-asig">+ Crear asignatura</button>
   </div>`;
 }
@@ -4134,12 +4173,13 @@ function activarBotonesBorrarAsignatura() {
 
 function activarCreacionAsignatura() {
   const $in = document.getElementById('p-nueva-asig');
+  const $color = document.getElementById('p-nueva-asig-color');
   activarBotonesBorrarAsignatura();
   const crear = async () => {
     const nombre = $in.value.trim();
     if (!nombre) return;
     const marcadasAhora = new Set(asignaturasMarcadas());
-    const { data, error } = await S.sb.from('asignaturas').insert({ nombre }).select('*').single();
+    const { data, error } = await S.sb.from('asignaturas').insert({ nombre, color: $color.value }).select('*').single();
     if (error) {
       document.getElementById('m-msg').textContent =
         error.code === '23505' || /duplicate/.test(error.message)
@@ -4152,6 +4192,7 @@ function activarCreacionAsignatura() {
     marcadasAhora.add(data.id); // la nueva queda marcada para este profesor
     repintarAsignaturas(marcadasAhora);
     $in.value = '';
+    $color.value = COLORES_CLASE[Math.floor(Math.random() * COLORES_CLASE.length)];
     avisar(`Asignatura "${data.nombre}" creada y marcada.`);
   };
   document.getElementById('p-crear-asig').onclick = crear;
