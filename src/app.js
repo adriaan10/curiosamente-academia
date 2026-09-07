@@ -400,6 +400,15 @@ async function cargarRecibos() {
     .select('*, alumnos(nombre, telefono, tutor_telefono, tutor_nombre, facturacion_nombre, madre_nombre, madre_telefono, padre_nombre, padre_telefono), profesores(nombre)')
     .order('created_at', { ascending: false });
   if (error) return avisar('Error cargando recibos: ' + error.message, true);
+  // Si el alumno o el profesor de un recibo se borraron de verdad (ver
+  // borrar_alumno/borrar_profesor), el embed de Supabase llega a null — se
+  // rellena aquí con el nombre guardado en el propio recibo (alumno_nombre/
+  // profesor_nombre, copiado al crearlo) para que el resto de la app siga
+  // mostrando de quién era sin tener que tocar cada pantalla una por una.
+  for (const r of data || []) {
+    if (!r.alumnos) r.alumnos = { nombre: `${r.alumno_nombre || 'Alumno'} (eliminado)` };
+    if (!r.profesores) r.profesores = { nombre: `${r.profesor_nombre || 'Profesor'} (eliminado)` };
+  }
   S.recibos = data || [];
 }
 
@@ -1152,6 +1161,9 @@ function renderAlumnos() {
       <td class="acciones">
         <button class="btn chico" data-recibo="${a.id}">Recibo</button>
         <button class="btn chico liso" data-editar="${a.id}">Editar</button>
+        ${esAdmin && a.estado === 'baja'
+          ? `<button class="btn chico liso peligro" data-borrar-alumno="${a.id}" title="Borrar ficha definitivamente (no afecta a sus recibos ya emitidos)">Borrar</button>`
+          : ''}
       </td>
     </tr>`).join('')}
     </tbody>
@@ -1173,6 +1185,15 @@ function renderAlumnos() {
     b.onclick = () => modalAlumno(S.alumnos.find(a => a.id === b.dataset.editar)));
   document.querySelectorAll('[data-recibo]').forEach(b =>
     b.onclick = () => modalRecibo(S.alumnos.find(a => a.id === b.dataset.recibo)));
+  document.querySelectorAll('[data-borrar-alumno]').forEach(b => b.onclick = async () => {
+    const a = S.alumnos.find(x => x.id === b.dataset.borrarAlumno);
+    if (!confirm(`¿Borrar definitivamente la ficha de ${a?.nombre || 'este alumno'}? Sus recibos ya emitidos se conservan (quedan como "alumno eliminado"), pero esta acción no se puede deshacer.`)) return;
+    const { error } = await S.sb.rpc('borrar_alumno', { p_alumno: b.dataset.borrarAlumno });
+    if (error) return avisar('Error: ' + error.message, true);
+    await cargarAlumnos();
+    renderAlumnos();
+    avisar('Alumno borrado definitivamente.');
+  });
 }
 
 // Separa nombre de pila y apellidos para rellenar las dos casillas. Si el
@@ -1356,7 +1377,6 @@ function modalAlumno(alumno) {
         return;
       }
       const partes = [];
-      if (d.descuento_multi > 0) partes.push(`−${formatoImporte(d.descuento_multi)}€ por varias asignaturas`);
       if (d.descuento_hermano > 0) partes.push(`−${formatoImporte(d.descuento_hermano)}€ por hermano/a matriculado/a`);
       if (d.descuento_extra > 0) partes.push(`−${formatoImporte(d.descuento_extra)}€ descuento especial`);
       cont.innerHTML = `<p class="letras">Precio base: ${formatoImporte(d.base)}€${partes.length ? '<br>' + partes.join('<br>') : ''}<br>
@@ -2687,7 +2707,6 @@ function modalRecibo(alumno) {
   const todasMats = alumno.matriculas || [];
   const idsMias = new Set(misMatriculas(alumno).map(m => m.id));
   if (!todasMats.length) return avisar('Este alumno no tiene ninguna asignatura apuntada.', true);
-  const nMesTotal = todasMats.filter(m => m.tipo_tarifa === 'mes' && m.tarifa != null).length;
 
   abrirModal(`
   <h2>Recibo — ${e(alumno.nombre)}</h2>
@@ -2740,7 +2759,6 @@ function modalRecibo(alumno) {
     if (d) {
       descuentos = d;
       const partes = [];
-      if (d.descuento_multi > 0) partes.push(`−${formatoImporte(d.descuento_multi)}€/mes por varias asignaturas`);
       if (d.descuento_hermano > 0) partes.push(`−${formatoImporte(d.descuento_hermano)}€/mes por hermano/a`);
       if (d.descuento_extra > 0) partes.push(`−${formatoImporte(d.descuento_extra)}€/mes descuento especial`);
       $descuentos.textContent = partes.length ? 'Descuentos: ' + partes.join(' · ') : '';
@@ -2766,14 +2784,14 @@ function modalRecibo(alumno) {
 
     const baseMes = marcadasMes.reduce((s, m) => s + Number(m.tarifa), 0) * meses.length;
     const baseClase = marcadasClase.reduce((s, m) => s + Number(m.tarifa), 0);
-    // Los tres descuentos son un importe FIJO al mes (5€ cada uno, no por
-    // asignatura): si el alumno tiene 2+ asignaturas de pago mensual son
-    // -5€ en total, no -5€ por cada una.
-    const descMulti = nMesTotal >= 2 ? 5 * meses.length : 0;
+    // El descuento automático por varias asignaturas se quitó: cuando el
+    // mismo profesor da dos asignaturas de Bachillerato con un precio ya
+    // combinado, no tiene sentido restar más — la jefa lo ajusta a mano con
+    // el "Descuento especial" caso por caso si hace falta.
     const descHermano = (descuentos.descuento_hermano > 0 && marcadasMes.length) ? descuentos.descuento_hermano * meses.length : 0;
     const descExtra = (descuentos.descuento_extra > 0 && marcadasMes.length) ? descuentos.descuento_extra * meses.length : 0;
 
-    const total = Math.max(0, baseMes - descMulti - descHermano - descExtra) + baseClase + extra + importeMatricula;
+    const total = Math.max(0, baseMes - descHermano - descExtra) + baseClase + extra + importeMatricula;
     $importe.value = total || '';
     $letras.textContent = importeALetras($importe.value || 0);
   };
@@ -2827,7 +2845,9 @@ async function crearRecibo(alumno, { concepto, importe, recibiDe, fechaEmision, 
   const fechaIso = m ? `${m[3]}-${m[2]}-${m[1]}` : new Date().toISOString().slice(0, 10);
   const { data: fila, error } = await S.sb.from('recibos').insert({
     alumno_id: alumno.id,
+    alumno_nombre: alumno.nombre, // copia fija: si algún día se borra la ficha, el recibo no se queda sin nombre
     profesor_id: S.profesor.id, // quien emite el recibo
+    profesor_nombre: S.profesor.nombre,
     fecha_emision: fechaIso,
     concepto,
     importe,
@@ -3257,13 +3277,11 @@ function modalReciboBulk() {
         const misMats = misMatriculas(a);
         const misMesMats = misMats.filter(m => m.tipo_tarifa === 'mes' && m.tarifa != null);
         const misClaseMats = misMats.filter(m => m.tipo_tarifa === 'clase' && m.tarifa != null);
-        const nMesTotalAlumno = (a.matriculas || []).filter(m => m.tipo_tarifa === 'mes' && m.tarifa != null).length;
         const baseMes = misMesMats.reduce((s, m) => s + Number(m.tarifa), 0) * meses.length;
         const baseClase = misClaseMats.reduce((s, m) => s + Number(m.tarifa), 0);
-        const descMulti = nMesTotalAlumno >= 2 ? 5 * meses.length : 0;
         const descHermano = (misMesMats.length && esHermanoDesignado(a)) ? 5 * meses.length : 0;
         const descExtra = (misMesMats.length && a.descuento_extra > 0) ? a.descuento_extra * meses.length : 0;
-        const importe = Math.max(0, baseMes - descMulti - descHermano - descExtra) + baseClase;
+        const importe = Math.max(0, baseMes - descHermano - descExtra) + baseClase;
         if (importe <= 0) { mal++; continue; }
         const generados = await crearRecibos(a, {
           concepto, importe,
@@ -4003,7 +4021,8 @@ function renderProfesores() {
         : (p.es_admin ? '<small>Todas (administrador)</small>' : '<small>Sin asignaturas (ve todas)</small>')}</td>
       <td class="acciones">
         ${p.estado === 'baja'
-          ? `<button class="btn chico" data-reactivar-prof="${p.id}">Reactivar</button>`
+          ? `<button class="btn chico" data-reactivar-prof="${p.id}">Reactivar</button>
+             <button class="btn chico liso peligro" data-borrar-prof="${p.id}" title="Borrar ficha definitivamente (no afecta a sus recibos, clases ni movimientos ya registrados)">Borrar</button>`
           : (p.id !== S.profesor.id
             ? `<button class="btn chico liso" data-editar-prof="${p.id}">Editar</button>` : '')}
       </td>
@@ -4028,6 +4047,19 @@ function renderProfesores() {
     renderProfesores();
     avisar(`${p.nombre} reactivado: ya puede entrar de nuevo.`);
   });
+  document.querySelectorAll('[data-borrar-prof]').forEach(b => b.onclick = async () => {
+    const p = S.profesores.find(x => x.id === b.dataset.borrarProf);
+    if (!confirm(`¿Borrar definitivamente la ficha de ${p?.nombre || 'este profesor'}? Sus recibos y movimientos de finanzas ya registrados se conservan (quedan como "profesor eliminado"), pero esta acción no se puede deshacer.`)) return;
+    const { error } = await S.sb.rpc('borrar_profesor', { p_profesor: b.dataset.borrarProf });
+    if (error) {
+      return avisar(error.code === '23503'
+        ? 'No se puede borrar: todavía tiene clases asignadas. Bórralas o reasígnalas a otro profesor primero.'
+        : 'Error: ' + error.message, true);
+    }
+    await cargarTodo();
+    renderProfesores();
+    avisar('Profesor borrado definitivamente.');
+  });
 }
 
 function emailSugerido(nombre) {
@@ -4050,7 +4082,8 @@ function checkboxesAsignaturas(marcadas = new Set()) {
   return S.asignaturas.map(a => {
     const c = colorArea(a.nombre);
     return `<label class="mes" style="border-left:3px solid ${c.borde}">
-      <input type="checkbox" data-p-asig="${a.id}" ${marcadas.has(a.id) ? 'checked' : ''}> ${e(a.nombre)}</label>`;
+      <input type="checkbox" data-p-asig="${a.id}" ${marcadas.has(a.id) ? 'checked' : ''}> ${e(a.nombre)}
+      <button type="button" class="btn chico liso peligro" data-borrar-asig="${a.id}" title="Borrar esta asignatura de la academia">✕</button></label>`;
   }).join('');
 }
 
@@ -4069,8 +4102,39 @@ function bloqueAsignaturas(marcadas = new Set()) {
   </div>`;
 }
 
+// Vuelve a pintar la lista de asignaturas conservando las que ya estuvieran
+// marcadas, y reengancha tanto el checkbox como el botón de borrar de cada
+// fila (hace falta llamarla cada vez que se repinta #p-asigs).
+function repintarAsignaturas(marcadas) {
+  document.getElementById('p-asigs').innerHTML = checkboxesAsignaturas(marcadas);
+  activarBotonesBorrarAsignatura();
+}
+
+function activarBotonesBorrarAsignatura() {
+  document.querySelectorAll('[data-borrar-asig]').forEach(b => b.onclick = async (ev) => {
+    ev.preventDefault();
+    const id = Number(b.dataset.borrarAsig);
+    const asig = S.asignaturas.find(a => a.id === id);
+    if (!confirm(`¿Borrar la asignatura "${asig?.nombre || ''}" de toda la academia? Solo se puede borrar si ningún alumno está matriculado en ella ni hay clases suyas.`)) return;
+    const marcadasAhora = new Set(asignaturasMarcadas());
+    const { error } = await S.sb.from('asignaturas').delete().eq('id', id);
+    if (error) {
+      document.getElementById('m-msg').textContent = error.code === '23503'
+        ? 'No se puede borrar: todavía hay alumnos matriculados o clases con esta asignatura.'
+        : 'Error al borrar la asignatura: ' + error.message;
+      return;
+    }
+    document.getElementById('m-msg').textContent = '';
+    S.asignaturas = S.asignaturas.filter(a => a.id !== id);
+    marcadasAhora.delete(id);
+    repintarAsignaturas(marcadasAhora);
+    avisar(`Asignatura "${asig?.nombre || ''}" borrada.`);
+  });
+}
+
 function activarCreacionAsignatura() {
   const $in = document.getElementById('p-nueva-asig');
+  activarBotonesBorrarAsignatura();
   const crear = async () => {
     const nombre = $in.value.trim();
     if (!nombre) return;
@@ -4086,7 +4150,7 @@ function activarCreacionAsignatura() {
     document.getElementById('m-msg').textContent = '';
     S.asignaturas.push(data);
     marcadasAhora.add(data.id); // la nueva queda marcada para este profesor
-    document.getElementById('p-asigs').innerHTML = checkboxesAsignaturas(marcadasAhora);
+    repintarAsignaturas(marcadasAhora);
     $in.value = '';
     avisar(`Asignatura "${data.nombre}" creada y marcada.`);
   };

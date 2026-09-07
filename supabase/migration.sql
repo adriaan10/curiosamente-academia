@@ -1563,3 +1563,85 @@ alter table public.alumnos
 -- justo tras un login correcto — mismo canal ya existente
 -- (actualizacion:comprobar-ahora → comprobarActualizaciones() en main.js),
 -- sin código nuevo en el proceso principal.
+
+-- ============================================================
+-- Quitar descuento automático por 2+ asignaturas (07/09/2026)
+-- ============================================================
+
+-- Motivo: algunos profesores de Bachillerato dan dos asignaturas (ej.
+-- Matemáticas y Física y Química) como un único paquete combinado, con un
+-- precio que fija el propio profesor para la academia — no son dos cosas
+-- independientes, así que el descuento automático de 5€ restaba de más sin
+-- sentido en ese caso. Como la matrícula no sabe qué profesor da cada
+-- asignatura (eso vive en `clases`, no en `matriculas`, y no siempre están
+-- sincronizadas), no es fiable distinguir ese caso del de dos profesores
+-- distintos de verdad solo con los datos que hay. Se quita el automatismo
+-- del todo: calcular_descuentos_alumno() devuelve descuento_multi = 0
+-- siempre (se deja la columna por compatibilidad con quien la lea). La
+-- administradora aplica el ajuste a mano con "Descuento especial"
+-- (alumnos.descuento_extra, en negativo para anular un descuento que ya no
+-- aplica) caso por caso cuando corresponda.
+-- app.js: se quita el cálculo espejo (descMulti) de modalRecibo() y
+-- modalReciboBulk(), y la línea de "por varias asignaturas" del resumen de
+-- descuentos en la ficha del alumno — ya no hay nada que mostrar ahí.
+
+-- ============================================================
+-- Borrar asignaturas desde "Nuevo/Editar profesor" (07/09/2026)
+-- ============================================================
+
+-- Ya se podían crear asignaturas nuevas desde ese mismo bloque
+-- (bloqueAsignaturas() en app.js); ahora también se pueden borrar, con un
+-- botón "✕" junto a cada una. Sin cambio de esquema — la RLS ya lo permitía
+-- (asignaturas_admin cubre also DELETE); solo faltaba el botón. Sigue
+-- bloqueado por las FK normales (NO ACTION) si esa asignatura todavía tiene
+-- matrículas o clases: el error 23503 se traduce en la interfaz a un
+-- mensaje claro en vez de dejar pasar el error crudo de Postgres.
+
+-- ============================================================
+-- Borrar alumnos y profesores de baja sin perder el histórico (07/09/2026)
+-- ============================================================
+
+-- Antes, recibos.alumno_id tenía ON DELETE CASCADE: borrar la ficha de un
+-- alumno borraba también TODOS sus recibos (y, en cadena, los movimientos
+-- automáticos de Ingresos y gastos que generaron al cobrarse). Y
+-- recibos.profesor_id era NO ACTION: borrar un profesor con algún recibo a
+-- su nombre simplemente fallaba. Ninguna de las dos servía para "borrar la
+-- ficha de alguien que ya no está, pero conservar la contabilidad".
+--
+-- Cambiado a ON DELETE SET NULL en ambas columnas de `recibos` (antes NOT
+-- NULL, ahora nullable), con un snapshot del nombre guardado en el propio
+-- recibo (columnas nuevas `alumno_nombre` / `profesor_nombre`, rellenadas
+-- para el histórico ya existente y, de aquí en adelante, en cada recibo
+-- nuevo — tanto crearRecibo() en el cliente como generar_recibos_mensuales()
+-- en SQL) para que la lista de recibos siga mostrando de quién era el
+-- recibo aunque la ficha ya no exista (cargarRecibos() en app.js rellena
+-- `r.alumnos`/`r.profesores` con ese nombre + " (eliminado)" si el embed de
+-- Supabase llega a null — un solo sitio, no hubo que tocar cada pantalla).
+--
+-- Mismo cambio (NO ACTION → SET NULL) en el resto de referencias a
+-- profesores que no son "económicas" pero sí bloqueaban el borrado:
+-- finanzas_movimientos.creado_por, matriculas.actualizado_por,
+-- cuentas_saldo_inicial.actualizado_por, cambios_horario/reactivaciones_
+-- alumno/bajas_asignatura (profesor_id y visto_por, antes NOT NULL en
+-- profesor_id, ahora nullable). avisos_descartados.profesor_id es parte de
+-- su clave primaria (no se puede dejar a null): ahí sí se deja CASCADE,
+-- porque es solo un "ya lo vi", sin nada económico ni histórico real.
+--
+-- clases.profesor_id se deja tal cual (NO ACTION): si el profesor a borrar
+-- todavía tiene clases activas, el borrado falla a propósito — mejor que el
+-- admin las reasigne o borre primero a que desaparezcan solas sin avisar.
+-- borrar_profesor() traduce ese error (23503) a un mensaje claro en la app.
+--
+-- Dos funciones nuevas, security definer, mismo patrón que el resto de
+-- operaciones sensibles de este archivo: borrar_alumno(uuid) y
+-- borrar_profesor(uuid), solo admin, solo si la ficha ya está en
+-- estado='baja' (nunca se puede borrar a alguien activo), y
+-- borrar_profesor() además rechaza que el admin se borre a sí mismo. Como
+-- defensa extra, la política alumnos_delete (RLS) pasa de "is_admin()" a
+-- "is_admin() and estado='baja'" — así ni siquiera un DELETE directo a la
+-- tabla (saltándose la función) podría borrar a un alumno activo.
+--
+-- app.js: botón "Borrar" (rojo) junto a "Reactivar" en la pestaña Bajas de
+-- Profesores, y junto a "Editar" en la fila de un alumno de baja en
+-- Alumnos — ambos con confirm() explicando qué se conserva antes de llamar
+-- a la función.
