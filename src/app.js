@@ -632,7 +632,7 @@ function renderMain() {
       <button data-v="horario" class="tab ${S.vista === 'horario' ? 'activa' : ''}">Horario</button>
       <button data-v="recibos" class="tab ${S.vista === 'recibos' ? 'activa' : ''}">Recibos</button>
       <button data-v="notas" class="tab ${S.vista === 'notas' ? 'activa' : ''}">Notas</button>
-      ${esAdmin ? `<button data-v="profesores" class="tab ${S.vista === 'profesores' ? 'activa' : ''}">Profesores</button>` : ''}
+      <button data-v="profesores" class="tab ${S.vista === 'profesores' ? 'activa' : ''}">Profesores</button>
       ${esAdmin ? `<button data-v="finanzas" class="tab ${S.vista === 'finanzas' ? 'activa' : ''}">Ingresos y gastos</button>` : ''}
       ${esAdmin ? `<button data-v="reestructuracion" class="tab ${S.vista === 'reestructuracion' ? 'activa' : ''}">Reestructuración</button>` : ''}
       <button data-v="ajustes" class="tab ${S.vista === 'ajustes' ? 'activa' : ''}">Ajustes</button>
@@ -4019,22 +4019,30 @@ function profesoresActivos() {
   return S.profesores.filter(p => p.estado !== 'baja' && p.da_clases !== false);
 }
 
+// Un profesor normal (no admin) también entra aquí, pero con una vista
+// reducida: ve la lista de todos (para organizarse entre ellos: quién da
+// qué), y solo puede editar SU PROPIA fila, y solo sus asignaturas — nada
+// de crear profesores, tocar admin/contraseña/baja de nadie, ni ver la
+// pestaña "Baja". modalEditarProfesor() recibe ese límite y ajusta lo que
+// enseña y lo que deja guardar; la RLS (profesor_asignaturas_propias) es la
+// que de verdad lo garantiza en el servidor.
 function renderProfesores() {
-  if (!S.profesor?.es_admin) return renderAjustes();
-  const sub = S.vistaProfes || 'activos';
+  const esAdmin = S.profesor?.es_admin;
+  const sub = esAdmin ? (S.vistaProfes || 'activos') : 'activos';
   const lista = S.profesores.filter(p => (sub === 'baja' ? p.estado === 'baja' : p.estado !== 'baja'));
   const nBajas = S.profesores.filter(p => p.estado === 'baja').length;
   document.getElementById('contenido').innerHTML = `
   <div class="barra">
-    <div class="segmentos">
+    ${esAdmin ? `<div class="segmentos">
       <button class="seg ${sub === 'activos' ? 'activo' : ''}" data-sub-prof="activos">Activos</button>
       <button class="seg ${sub === 'baja' ? 'activo' : ''}" data-sub-prof="baja">Baja${nBajas ? ` (${nBajas})` : ''}</button>
-    </div>
+    </div>` : ''}
     <p class="ayuda">${sub === 'baja'
       ? 'Sin acceso a la app. Sus recibos, clases y datos se conservan.'
-      : 'Profesores con acceso a la app. Cada uno ve solo sus asignaturas.'}</p>
+      : esAdmin ? 'Profesores con acceso a la app. Cada uno ve solo sus asignaturas.'
+      : 'Así se organiza toda la academia: qué asignaturas da cada profesor. Solo puedes editar las tuyas.'}</p>
     <span class="flex1"></span>
-    <button class="btn primario" id="btn-nuevo-prof">+ Nuevo profesor</button>
+    ${esAdmin ? `<button class="btn primario" id="btn-nuevo-prof">+ Nuevo profesor</button>` : ''}
   </div>
   ${lista.length === 0 ? `<div class="vacio">${sub === 'baja' ? 'No hay profesores de baja.' : 'No hay profesores.'}</div>` : `
   <table>
@@ -4055,10 +4063,12 @@ function renderProfesores() {
         : (p.es_admin ? '<small>Todas (administrador)</small>' : '<small>Sin asignaturas (ve todas)</small>')}</td>
       <td class="acciones">
         ${p.estado === 'baja'
-          ? `<button class="btn chico" data-reactivar-prof="${p.id}">Reactivar</button>
-             <button class="btn chico liso peligro" data-borrar-prof="${p.id}" title="Borrar ficha definitivamente (no afecta a sus recibos, clases ni movimientos ya registrados)">Borrar</button>`
-          : (p.id !== S.profesor.id
-            ? `<button class="btn chico liso" data-editar-prof="${p.id}">Editar</button>` : '')}
+          ? (esAdmin ? `<button class="btn chico" data-reactivar-prof="${p.id}">Reactivar</button>
+             <button class="btn chico liso peligro" data-borrar-prof="${p.id}" title="Borrar ficha definitivamente (no afecta a sus recibos, clases ni movimientos ya registrados)">Borrar</button>` : '')
+          : (esAdmin && p.id !== S.profesor.id
+            ? `<button class="btn chico liso" data-editar-prof="${p.id}">Editar</button>`
+            : (!esAdmin && p.id === S.profesor.id
+              ? `<button class="btn chico liso" data-editar-mis-asig="${p.id}">Editar mis asignaturas</button>` : ''))}
       </td>
     </tr>`;
     }).join('')}
@@ -4069,9 +4079,12 @@ function renderProfesores() {
     S.vistaProfes = b.dataset.subProf;
     renderProfesores();
   });
-  document.getElementById('btn-nuevo-prof').onclick = () => modalNuevoProfesor();
+  const btnNuevo = document.getElementById('btn-nuevo-prof');
+  if (btnNuevo) btnNuevo.onclick = () => modalNuevoProfesor();
   document.querySelectorAll('[data-editar-prof]').forEach(b =>
     b.onclick = () => modalEditarProfesor(S.profesores.find(p => p.id === b.dataset.editarProf)));
+  document.querySelectorAll('[data-editar-mis-asig]').forEach(b =>
+    b.onclick = () => modalEditarProfesor(S.profesores.find(p => p.id === b.dataset.editarMisAsig), true));
   document.querySelectorAll('[data-reactivar-prof]').forEach(b => b.onclick = async () => {
     const p = S.profesores.find(x => x.id === b.dataset.reactivarProf);
     if (!confirm(`¿Reactivar a ${p.nombre}? Recuperará su acceso a la app con su misma contraseña.`)) return;
@@ -4112,12 +4125,12 @@ function passwordSugerida() {
   return p + '!';
 }
 
-function checkboxesAsignaturas(marcadas = new Set()) {
+function checkboxesAsignaturas(marcadas = new Set(), puedeGestionar = true) {
   return S.asignaturas.map(a => {
     const c = colorArea(a);
     return `<label class="mes" style="border-left:3px solid ${c.borde}">
       <input type="checkbox" data-p-asig="${a.id}" ${marcadas.has(a.id) ? 'checked' : ''}> ${e(a.nombre)}
-      <button type="button" class="btn chico liso peligro" data-borrar-asig="${a.id}" title="Borrar esta asignatura de la academia">✕</button></label>`;
+      ${puedeGestionar ? `<button type="button" class="btn chico liso peligro" data-borrar-asig="${a.id}" title="Borrar esta asignatura de la academia">✕</button>` : ''}</label>`;
   }).join('');
 }
 
@@ -4130,22 +4143,26 @@ function asignaturasMarcadas() {
 // El color se elige al crearla (se usa luego en los chips de matrícula y en
 // esta misma lista); por defecto sale uno al azar de la paleta de Clases,
 // para no dejarlo siempre en negro.
-function bloqueAsignaturas(marcadas = new Set()) {
+// puedeGestionar=false (un profesor normal editando SUS PROPIAS asignaturas,
+// ver modalEditarProfesor) quita el borrar y el crear — solo puede marcar o
+// desmarcar entre las que ya existen; crear/borrar asignaturas de la
+// academia entera sigue siendo cosa del admin.
+function bloqueAsignaturas(marcadas = new Set(), puedeGestionar = true) {
   const colorInicial = COLORES_CLASE[Math.floor(Math.random() * COLORES_CLASE.length)];
   return `
-  <div class="lista-alumnos" id="p-asigs">${checkboxesAsignaturas(marcadas)}</div>
-  <div class="fila-horario" style="margin-top:8px">
+  <div class="lista-alumnos" id="p-asigs">${checkboxesAsignaturas(marcadas, puedeGestionar)}</div>
+  ${puedeGestionar ? `<div class="fila-horario" style="margin-top:8px">
     <input id="p-nueva-asig" placeholder="¿Materia nueva? ej. Latín — clases particulares">
     <input type="color" id="p-nueva-asig-color" class="color-mini" value="${colorInicial}" title="Color de la asignatura">
     <button type="button" class="btn chico" id="p-crear-asig">+ Crear asignatura</button>
-  </div>`;
+  </div>` : ''}`;
 }
 
 // Vuelve a pintar la lista de asignaturas conservando las que ya estuvieran
 // marcadas, y reengancha tanto el checkbox como el botón de borrar de cada
 // fila (hace falta llamarla cada vez que se repinta #p-asigs).
-function repintarAsignaturas(marcadas) {
-  document.getElementById('p-asigs').innerHTML = checkboxesAsignaturas(marcadas);
+function repintarAsignaturas(marcadas, puedeGestionar = true) {
+  document.getElementById('p-asigs').innerHTML = checkboxesAsignaturas(marcadas, puedeGestionar);
   activarBotonesBorrarAsignatura();
 }
 
@@ -4175,6 +4192,7 @@ function activarCreacionAsignatura() {
   const $in = document.getElementById('p-nueva-asig');
   const $color = document.getElementById('p-nueva-asig-color');
   activarBotonesBorrarAsignatura();
+  if (!$in) return; // modo restringido (profesor editando sus propias asignaturas): no hay bloque de crear
   const crear = async () => {
     const nombre = $in.value.trim();
     if (!nombre) return;
@@ -4253,22 +4271,29 @@ function modalNuevoProfesor() {
   };
 }
 
-function modalEditarProfesor(prof) {
+// soloAsignaturas=true: un profesor normal editando SU PROPIA fila (desde
+// "Editar mis asignaturas" en renderProfesores) — solo ve y puede tocar el
+// bloque de asignaturas, nada de admin/contraseña/baja de nadie. La RLS
+// (profesor_asignaturas_propias) es la que de verdad lo impide por la API
+// directa; esto es solo para no enseñarle controles que igualmente le
+// rechazaría el servidor.
+function modalEditarProfesor(prof, soloAsignaturas = false) {
   const marcadas = new Set(S.profAsig.filter(x => x.profesor_id === prof.id).map(x => x.asignatura_id));
   abrirModal(`
-  <h2>Editar — ${e(prof.nombre)}</h2>
+  <h2>${soloAsignaturas ? 'Mis asignaturas' : `Editar — ${e(prof.nombre)}`}</h2>
   <p class="ayuda">${e(prof.email)}</p>
   <h3 class="seccion">Asignaturas que imparte</h3>
-  ${bloqueAsignaturas(marcadas)}
+  ${bloqueAsignaturas(marcadas, !soloAsignaturas)}
+  ${soloAsignaturas ? '' : `
   <h3 class="seccion">Permisos</h3>
   <p class="ayuda">${prof.es_admin
     ? 'Es <strong>administrador</strong>: ve y gestiona todo (alumnos, recibos, finanzas y profesores).'
     : 'Profesor normal: solo ve sus propias asignaturas y alumnos.'}</p>
   <button class="btn liso" id="p-admin">${prof.es_admin ? 'Quitar administrador' : 'Hacer administrador'}</button>
   <h3 class="seccion">Cambiar contraseña (opcional)</h3>
-  <label>Nueva contraseña (mín. 8; en blanco = no cambiar)<input id="p-pass"></label>
+  <label>Nueva contraseña (mín. 8; en blanco = no cambiar)<input id="p-pass"></label>`}
   <div class="pie-modal">
-    <button class="btn liso peligro" id="p-baja">Dar de baja</button>
+    ${soloAsignaturas ? '' : '<button class="btn liso peligro" id="p-baja">Dar de baja</button>'}
     <span class="flex1"></span>
     <button class="btn liso" id="m-cancelar">Cancelar</button>
     <button class="btn primario" id="p-guardar">Guardar</button>
@@ -4276,35 +4301,37 @@ function modalEditarProfesor(prof) {
   <p id="m-msg" class="error"></p>`);
 
   activarCreacionAsignatura();
-  document.getElementById('p-admin').onclick = async () => {
-    const nuevo = !prof.es_admin;
-    const msg = nuevo
-      ? `¿Hacer administrador a ${prof.nombre}? Podrá ver y gestionar todo: alumnos, recibos, finanzas y profesores. Si tiene la app abierta, se le pedirá reiniciarla.`
-      : `¿Quitar el admin a ${prof.nombre}? Dejará de ver finanzas y la gestión de profesores, y solo verá sus propias asignaturas. Si tiene la app abierta, se le pedirá reiniciarla.`;
-    if (!confirm(msg)) return;
-    const { error } = await S.sb.rpc('cambiar_admin_profesor', { p_profesor: prof.id, p_es_admin: nuevo });
-    if (error) {
-      document.getElementById('m-msg').textContent = 'Error: ' + error.message;
-      return;
-    }
-    cerrarModal();
-    await cargarTodo();
-    renderProfesores();
-    avisar(`${prof.nombre} ${nuevo ? 'ya es administrador' : 'ya no es administrador'}.`);
-  };
-  document.getElementById('p-baja').onclick = async () => {
-    if (!confirm(`¿Dar de baja a ${prof.nombre}? No podrá volver a entrar en la app hasta que lo reactives. Sus recibos, clases y datos se conservan.`)) return;
-    const { error } = await S.sb.rpc('cambiar_estado_profesor', { p_profesor: prof.id, p_estado: 'baja' });
-    if (error) {
-      document.getElementById('m-msg').textContent = 'Error: ' + error.message;
-      return;
-    }
-    cerrarModal();
-    await cargarTodo();
-    S.vistaProfes = 'baja';
-    renderProfesores();
-    avisar(`${prof.nombre} dado de baja: su acceso queda bloqueado.`);
-  };
+  if (!soloAsignaturas) {
+    document.getElementById('p-admin').onclick = async () => {
+      const nuevo = !prof.es_admin;
+      const msg = nuevo
+        ? `¿Hacer administrador a ${prof.nombre}? Podrá ver y gestionar todo: alumnos, recibos, finanzas y profesores. Si tiene la app abierta, se le pedirá reiniciarla.`
+        : `¿Quitar el admin a ${prof.nombre}? Dejará de ver finanzas y la gestión de profesores, y solo verá sus propias asignaturas. Si tiene la app abierta, se le pedirá reiniciarla.`;
+      if (!confirm(msg)) return;
+      const { error } = await S.sb.rpc('cambiar_admin_profesor', { p_profesor: prof.id, p_es_admin: nuevo });
+      if (error) {
+        document.getElementById('m-msg').textContent = 'Error: ' + error.message;
+        return;
+      }
+      cerrarModal();
+      await cargarTodo();
+      renderProfesores();
+      avisar(`${prof.nombre} ${nuevo ? 'ya es administrador' : 'ya no es administrador'}.`);
+    };
+    document.getElementById('p-baja').onclick = async () => {
+      if (!confirm(`¿Dar de baja a ${prof.nombre}? No podrá volver a entrar en la app hasta que lo reactives. Sus recibos, clases y datos se conservan.`)) return;
+      const { error } = await S.sb.rpc('cambiar_estado_profesor', { p_profesor: prof.id, p_estado: 'baja' });
+      if (error) {
+        document.getElementById('m-msg').textContent = 'Error: ' + error.message;
+        return;
+      }
+      cerrarModal();
+      await cargarTodo();
+      S.vistaProfes = 'baja';
+      renderProfesores();
+      avisar(`${prof.nombre} dado de baja: su acceso queda bloqueado.`);
+    };
+  }
 
   document.getElementById('m-cancelar').onclick = cerrarModal;
   document.getElementById('p-guardar').onclick = async () => {
@@ -4320,7 +4347,7 @@ function modalEditarProfesor(prof) {
       document.getElementById('m-msg').textContent = 'Error: ' + error.message;
       return;
     }
-    const pass = document.getElementById('p-pass').value;
+    const pass = soloAsignaturas ? '' : document.getElementById('p-pass').value;
     if (pass) {
       const { error: ep } = await S.sb.rpc('cambiar_password_profesor', { p_profesor: prof.id, p_password: pass });
       if (ep) {
@@ -4331,7 +4358,7 @@ function modalEditarProfesor(prof) {
     cerrarModal();
     await cargarTodo();
     renderProfesores();
-    avisar('Profesor actualizado.');
+    avisar(soloAsignaturas ? 'Tus asignaturas se han actualizado.' : 'Profesor actualizado.');
   };
 }
 

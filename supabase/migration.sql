@@ -1703,3 +1703,29 @@ alter table public.alumnos
 --
 -- Aplicado directamente en Supabase (sin RPC: profesores_update ya permite
 -- id=auth.uid() o is_admin(), así que Adrián puede marcarse a sí mismo).
+
+-- ============================================================
+-- Pestaña Profesores también para profesores normales (07/09/2026)
+-- ============================================================
+
+-- Hasta ahora esa pestaña era solo-admin. Petición: que cualquier profesor
+-- pueda entrar a ver quién da qué (para organizarse entre ellos) y editar
+-- SUS PROPIAS asignaturas — nada de crear profesores, tocar admin/
+-- contraseña/baja de nadie (ni la suya propia), ni ver la pestaña "Baja".
+--
+-- Única política nueva: profesor_asignaturas_propias, permite a cualquier
+-- autenticado gestionar las filas de profesor_asignaturas donde
+-- profesor_id = auth.uid() (se suma a profesor_asignaturas_admin, que
+-- sigue intacta para que el admin gestione las de cualquiera). Sin cambio
+-- de esquema.
+--
+-- app.js: la pestaña "Profesores" del nav ya no está detrás de
+-- esAdmin; renderProfesores() enseña la lista completa a todos pero, si no
+-- eres admin, sin el segmento "Baja", sin "+ Nuevo profesor", y con
+-- "Editar mis asignaturas" solo en tu propia fila (en vez de "Editar" en
+-- todas). modalEditarProfesor(prof, soloAsignaturas) — con soloAsignaturas
+-- en true oculta Permisos, cambiar contraseña y Dar de baja, y
+-- bloqueAsignaturas()/checkboxesAsignaturas() reciben puedeGestionar=false
+-- para no ofrecer tampoco crear ni borrar asignaturas de la academia (eso
+-- sigue siendo solo-admin) — solo marcar/desmarcar entre las que ya
+-- existen.
