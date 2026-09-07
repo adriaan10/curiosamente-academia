@@ -1279,7 +1279,17 @@ function modalAlumno(alumno) {
   // (y así avisar en tiempo real al otro admin) o si solo se ha tocado otra
   // cosa de una matrícula que ya tenía precio de antes.
   const tarifasOriginales = new Map(ms.map(m => [m.id, m.tarifa]));
-  const nuevaMatricula = () => ({ id: null, asignatura_id: misAsignaturas()[0]?.id, tarifa: '', tipo_tarifa: 'mes', horas_semana: '' });
+  // Una fila nueva empieza con el filtro de "Profesor" puesto en quien la
+  // está creando (y su primera asignatura propia), no en "Todas" — un admin
+  // que también da clases (ej. Dani) normalmente mete alumnos de LAS SUYAS,
+  // aunque puede cambiar el filtro si hace falta. Para un admin sin
+  // asignaturas propias (ej. Adrián) esto no cambia nada: asignaturasDe
+  // Profesor() ya le enseña todas igualmente (su "sin asignaturas ve
+  // todas" de siempre).
+  const nuevaMatricula = () => {
+    const propias = asignaturasDeProfesor(S.profesor?.id);
+    return { id: null, asignatura_id: propias[0]?.id, tarifa: '', tipo_tarifa: 'mes', horas_semana: '', _profSel: S.profesor?.id };
+  };
   if (!alumno) ms.push(nuevaMatricula());
 
   // Historial de recibos de este alumno (ya filtrado por lo que el usuario
@@ -5044,12 +5054,14 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta = nul
     <label>Importe (€)<input id="fc-importe" type="number" min="0" step="0.01"></label>
     <label>Descripción<input id="fc-descripcion"></label>
   </div>
+  ${scopeEfectivo && scopeBanco ? `
   <label class="check-inline">
-    <input type="radio" name="fc-cuenta" id="fc-cuenta-efectivo" checked> Efectivo
+    <input type="radio" name="fc-cuenta" id="fc-cuenta-efectivo" ${filtroCuenta !== 'banco' ? 'checked' : ''}> Efectivo
   </label>
   <label class="check-inline">
-    <input type="radio" name="fc-cuenta" id="fc-cuenta-banco"> Banco
-  </label>
+    <input type="radio" name="fc-cuenta" id="fc-cuenta-banco" ${filtroCuenta === 'banco' ? 'checked' : ''}> Banco
+  </label>` : `
+  <p class="ayuda">Se apunta en ${scopeBanco ? 'Banco' : 'Efectivo'} — esta columna solo está ahí.</p>`}
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cerrar</button>
     <button class="btn primario" id="fc-guardar">Añadir</button>
@@ -5140,7 +5152,12 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta = nul
     const fecha = document.getElementById('fc-fecha').value;
     if (!importe || importe <= 0) return avisar('El importe tiene que ser mayor que 0.', true);
     if (!fecha) return avisar('Elige una fecha.', true);
-    const cuentaElegida = document.getElementById('fc-cuenta-banco').checked ? 'banco' : 'efectivo';
+    // Con las dos cuentas marcadas arriba hay que elegir en cuál se apunta
+    // este movimiento en concreto (son excluyentes: uno u otro, nunca los
+    // dos); si la columna solo está en una, no hay nada que preguntar — se
+    // apunta ahí directamente.
+    const cuentaElegida = !scopeBanco ? 'efectivo' : !scopeEfectivo ? 'banco'
+      : (document.getElementById('fc-cuenta-banco').checked ? 'banco' : 'efectivo');
     const { error } = await S.sb.from('finanzas_movimientos').insert({
       tipo, categoria, importe, fecha,
       descripcion: document.getElementById('fc-descripcion').value.trim() || null,

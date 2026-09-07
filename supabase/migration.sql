@@ -1895,3 +1895,57 @@ alter table public.alumnos
 -- legales.
 -- Se borran del todo, de las dos cuentas (eran redundantes con el total
 -- automático que ya calcula la app): Gasto efectivo, Gasto banco.
+
+-- ============================================================
+-- Filtro de profesor en alta de alumno: por defecto, uno mismo (08/09/2026)
+-- ============================================================
+
+-- Reportado con Dani: al ser admin, una fila de matrícula nueva empezaba
+-- con el filtro de "Profesor" en blanco ("Todas las asignaturas") en vez
+-- de en él mismo — nuevaMatricula() calculaba su primera asignatura con
+-- misAsignaturas()[0], que para un admin es la primera de TODA la
+-- academia (orden alfabético/id, no necesariamente suya), y luego
+-- profesorParaAsignatura() de esa asignatura ajena no tenía por qué
+-- coincidir con quien estuviera dando de alta al alumno. Un admin que
+-- también da clases (como Dani) normalmente mete alumnos de LAS SUYAS.
+--
+-- nuevaMatricula() ahora parte de asignaturasDeProfesor(S.profesor.id) y
+-- fija _profSel al propio profesor desde el principio — sigue pudiendo
+-- cambiarse a "Todas" o a otro profesor a mano si hace falta (ej. un alta
+-- con asignaturas de varios profesores a la vez). Para un admin sin
+-- asignaturas propias (ej. Adrián) no cambia nada en la práctica:
+-- asignaturasDeProfesor() ya le enseña todas igual, por el "sin
+-- asignaturas ve todas" de siempre.
+
+-- ============================================================
+-- Borrar clases de Francis (08/09/2026)
+-- ============================================================
+
+-- Se olvidó en la limpieza del 07/09/2026 (se borraron alumnos/recibos
+-- pero no las clases de quien todavía no había montado las suyas de
+-- verdad). Borrada su única clase ("b2") directamente en Supabase — cascada
+-- normal a clase_horarios/clase_alumnos/clase_excepciones, ya vacíos de
+-- todas formas tras la limpieza de alumnos.
+
+-- ============================================================
+-- "Añadir a [columna]": el radio Efectivo/Banco solo si hace falta (08/09/2026)
+-- ============================================================
+
+-- El admin señaló, con una captura, el radio Efectivo/Banco de "Añadir a
+-- [categoría]" (el que decide de qué cuenta sale UN movimiento nuevo en
+-- concreto) pidiendo quitarlo por parecer la opción "antigua", ya
+-- redundante con los checkboxes nuevos de arriba. No es así del todo —
+-- sigue haciendo falta cuando la columna está en LAS DOS cuentas a la vez
+-- (no hay forma de adivinar de cuál sale el dinero), pero cuando la
+-- columna solo está en una (por ejemplo "Luz", solo Banco tras la
+-- reorganización de más arriba), preguntar "¿efectivo o banco?" no tenía
+-- sentido — solo hay una respuesta posible. Eso sí era vestigio inútil.
+--
+-- modalCategoriaMovimientos(): el radio ahora solo se muestra si
+-- scopeEfectivo && scopeBanco (las dos marcadas); si la columna está solo
+-- en una, en su lugar sale un aviso fijo ("Se apunta en Banco — esta
+-- columna solo está ahí") y el movimiento se guarda directamente en esa
+-- cuenta sin preguntar. fc-guardar usa la cuenta forzada en ese caso,
+-- el radio (leído del DOM) solo cuando de verdad hay elección. De paso,
+-- cuando sí hay radio, el que sale premarcado ahora es el de la pestaña
+-- desde la que se abrió (filtroCuenta) en vez de Efectivo fijo siempre.
