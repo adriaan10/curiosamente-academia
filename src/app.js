@@ -4058,6 +4058,7 @@ function profesoresActivos() {
 function renderProfesores() {
   const esAdmin = S.profesor?.es_admin;
   const sub = esAdmin ? (S.vistaProfes || 'activos') : 'activos';
+  if (sub === 'asignaturas') return renderAsignaturasSueltas();
   const lista = S.profesores.filter(p => (sub === 'baja' ? p.estado === 'baja' : p.estado !== 'baja'));
   const nBajas = S.profesores.filter(p => p.estado === 'baja').length;
   document.getElementById('contenido').innerHTML = `
@@ -4065,6 +4066,7 @@ function renderProfesores() {
     ${esAdmin ? `<div class="segmentos">
       <button class="seg ${sub === 'activos' ? 'activo' : ''}" data-sub-prof="activos">Activos</button>
       <button class="seg ${sub === 'baja' ? 'activo' : ''}" data-sub-prof="baja">Baja${nBajas ? ` (${nBajas})` : ''}</button>
+      <button class="seg" data-sub-prof="asignaturas">Asignaturas</button>
     </div>` : ''}
     <p class="ayuda">${sub === 'baja'
       ? 'Sin acceso a la app. Sus recibos, clases y datos se conservan.'
@@ -4138,6 +4140,101 @@ function renderProfesores() {
   });
 }
 
+// Pestaña "Asignaturas" dentro de Profesores (solo admin): crearlas sueltas,
+// sin tener que pasar por dar de alta o editar a un profesor concreto —
+// así ya están listas para elegir tanto al crear un profesor nuevo como al
+// editar las propias. Antes solo se podían crear desde dentro de esos dos
+// sitios (bloqueAsignaturas(), que sigue existiendo para marcar/desmarcar
+// cuáles imparte cada uno).
+function filaAsignaturaSuelta(a) {
+  const c = colorArea(a);
+  const nUsan = S.profAsig.filter(x => x.asignatura_id === a.id).length;
+  return `<tr>
+    <td><span class="chip-asig" style="background:${c.fondo}; border-left:3px solid ${c.borde}">${e(a.nombre)}</span></td>
+    <td><small class="ayuda">${nUsan ? `${nUsan} profesor${nUsan === 1 ? '' : 'es'}` : 'sin profesores todavía'}</small></td>
+    <td class="acciones"><button class="btn chico liso peligro" data-borrar-asig-suelta="${a.id}">Borrar</button></td>
+  </tr>`;
+}
+function listaAsignaturasSueltasHtml() {
+  if (!S.asignaturas.length) return '<div class="vacio">Todavía no hay ninguna asignatura.</div>';
+  return `<table>
+    <thead><tr><th>Asignatura</th><th>La dan</th><th></th></tr></thead>
+    <tbody id="asig-tbody">${S.asignaturas.map(filaAsignaturaSuelta).join('')}</tbody>
+  </table>`;
+}
+function activarBorrarAsignaturaSuelta() {
+  document.querySelectorAll('[data-borrar-asig-suelta]').forEach(b => b.onclick = async () => {
+    const id = Number(b.dataset.borrarAsigSuelta);
+    const asig = S.asignaturas.find(a => a.id === id);
+    if (!confirm(`¿Borrar la asignatura "${asig?.nombre || ''}" de toda la academia? Solo se puede borrar si ningún alumno está matriculado en ella ni hay clases suyas.`)) return;
+    const { error } = await S.sb.from('asignaturas').delete().eq('id', id);
+    const $msg = document.getElementById('asig-msg');
+    if (error) {
+      $msg.textContent = error.code === '23503'
+        ? 'No se puede borrar: todavía hay alumnos matriculados o clases con esta asignatura.'
+        : 'Error al borrar la asignatura: ' + error.message;
+      return;
+    }
+    $msg.textContent = '';
+    S.asignaturas = S.asignaturas.filter(a => a.id !== id);
+    S.profAsig = S.profAsig.filter(x => x.asignatura_id !== id);
+    document.getElementById('asig-lista').innerHTML = listaAsignaturasSueltasHtml();
+    activarBorrarAsignaturaSuelta();
+    avisar(`Asignatura "${asig?.nombre || ''}" borrada.`);
+  });
+}
+function renderAsignaturasSueltas() {
+  const nBajas = S.profesores.filter(p => p.estado === 'baja').length;
+  const colorInicial = COLORES_CLASE[Math.floor(Math.random() * COLORES_CLASE.length)];
+  document.getElementById('contenido').innerHTML = `
+  <div class="barra">
+    <div class="segmentos">
+      <button class="seg" data-sub-prof="activos">Activos</button>
+      <button class="seg" data-sub-prof="baja">Baja${nBajas ? ` (${nBajas})` : ''}</button>
+      <button class="seg activo" data-sub-prof="asignaturas">Asignaturas</button>
+    </div>
+    <p class="ayuda">Se crean sueltas, listas para elegir al dar de alta un profesor o al editar tus propias asignaturas.</p>
+  </div>
+  <div id="asig-lista">${listaAsignaturasSueltasHtml()}</div>
+  <div class="fila-horario" style="margin-top:12px">
+    <input id="asig-nueva-nombre" placeholder="ej. Latín — clases particulares">
+    <label class="color-swatch color-personalizado" title="Color de la asignatura">
+      🎨<input type="color" id="asig-nueva-color" value="${colorInicial}">
+    </label>
+    <button type="button" class="btn chico" id="asig-crear">+ Crear asignatura</button>
+  </div>
+  <p id="asig-msg" class="error"></p>`;
+
+  document.querySelectorAll('[data-sub-prof]').forEach(b => b.onclick = () => {
+    S.vistaProfes = b.dataset.subProf;
+    renderProfesores();
+  });
+  activarBorrarAsignaturaSuelta();
+  const $nombre = document.getElementById('asig-nueva-nombre');
+  const $color = document.getElementById('asig-nueva-color');
+  const crear = async () => {
+    const nombre = $nombre.value.trim();
+    if (!nombre) return;
+    const { data, error } = await S.sb.from('asignaturas').insert({ nombre, color: $color.value }).select('*').single();
+    const $msg = document.getElementById('asig-msg');
+    if (error) {
+      $msg.textContent = error.code === '23505' || /duplicate/.test(error.message)
+        ? 'Ya existe una asignatura con ese nombre.'
+        : 'Error al crear la asignatura: ' + error.message;
+      return;
+    }
+    $msg.textContent = '';
+    S.asignaturas.push(data);
+    document.getElementById('asig-lista').innerHTML = listaAsignaturasSueltasHtml();
+    activarBorrarAsignaturaSuelta();
+    $nombre.value = '';
+    $color.value = COLORES_CLASE[Math.floor(Math.random() * COLORES_CLASE.length)];
+    avisar(`Asignatura "${data.nombre}" creada.`);
+  };
+  document.getElementById('asig-crear').onclick = crear;
+  $nombre.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); crear(); } };
+}
+
 function emailSugerido(nombre) {
   const limpio = String(nombre || '').trim().toLowerCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -4182,7 +4279,9 @@ function bloqueAsignaturas(marcadas = new Set(), puedeGestionar = true) {
   <div class="lista-alumnos" id="p-asigs">${checkboxesAsignaturas(marcadas, puedeGestionar)}</div>
   ${puedeGestionar ? `<div class="fila-horario" style="margin-top:8px">
     <input id="p-nueva-asig" placeholder="¿Materia nueva? ej. Latín — clases particulares">
-    <input type="color" id="p-nueva-asig-color" class="color-mini" value="${colorInicial}" title="Color de la asignatura">
+    <label class="color-swatch color-personalizado" title="Color de la asignatura">
+      🎨<input type="color" id="p-nueva-asig-color" value="${colorInicial}">
+    </label>
     <button type="button" class="btn chico" id="p-crear-asig">+ Crear asignatura</button>
   </div>` : ''}`;
 }
@@ -4826,13 +4925,10 @@ function modalAnadirCategoriaFinanzas(tipo, cuentaActual = 'todo') {
   <label>Nombre de la categoría<input id="fc-nombre" placeholder="ej. Formación"></label>
   <label>¿Dónde se usa?</label>
   <label class="check-inline">
-    <input type="radio" name="fc-cat-cuenta" id="fc-cat-todo" ${cuentaActual !== 'efectivo' && cuentaActual !== 'banco' ? 'checked' : ''}> Las dos (Efectivo y Banco)
+    <input type="checkbox" id="fc-cat-efectivo" ${cuentaActual !== 'banco' ? 'checked' : ''}> Efectivo
   </label>
   <label class="check-inline">
-    <input type="radio" name="fc-cat-cuenta" id="fc-cat-efectivo" ${cuentaActual === 'efectivo' ? 'checked' : ''}> Solo Efectivo
-  </label>
-  <label class="check-inline">
-    <input type="radio" name="fc-cat-cuenta" id="fc-cat-banco" ${cuentaActual === 'banco' ? 'checked' : ''}> Solo Banco
+    <input type="checkbox" id="fc-cat-banco" ${cuentaActual !== 'efectivo' ? 'checked' : ''}> Banco
   </label>
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cancelar</button>
@@ -4846,8 +4942,10 @@ function modalAnadirCategoriaFinanzas(tipo, cuentaActual = 'todo') {
     if (!nombre) { msg.textContent = 'Escribe un nombre.'; return; }
     const yaExiste = categoriasConExtras(tipo).some(c => c.toLowerCase() === nombre.toLowerCase());
     if (yaExiste) { msg.textContent = 'Ya hay una categoría con ese nombre.'; return; }
-    const cuentaCat = document.getElementById('fc-cat-efectivo').checked ? 'efectivo'
-      : document.getElementById('fc-cat-banco').checked ? 'banco' : null;
+    const marcaEfectivo = document.getElementById('fc-cat-efectivo').checked;
+    const marcaBanco = document.getElementById('fc-cat-banco').checked;
+    if (!marcaEfectivo && !marcaBanco) { msg.textContent = 'Marca al menos una cuenta (Efectivo o Banco).'; return; }
+    const cuentaCat = marcaEfectivo && marcaBanco ? null : (marcaEfectivo ? 'efectivo' : 'banco');
     const { error } = await S.sb.from('finanzas_categorias').insert({ tipo, categoria: nombre, cuenta: cuentaCat });
     if (error) { msg.textContent = 'Error: ' + error.message; return; }
     await cargarFinanzasCategorias();
@@ -4908,11 +5006,23 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta = nul
     .filter(m => m.tipo === tipo && m.categoria === categoria && claveMesFecha(m.fecha) === claveMes)
     .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
   const total = lista.reduce((s, m) => s + Number(m.importe), 0);
+  // Dónde está esta columna ahora mismo: reflejado con dos checkboxes
+  // independientes (no un radio de 3 opciones) para poder marcar o
+  // desmarcar cada cuenta por separado sin tocar la otra. Una categoría
+  // "suelta" (sin fila propia en finanzas_categorias, solo con movimientos
+  // antiguos) se trata como si estuviera en las dos, mismo criterio de "no
+  // esconder dinero" que el resto de esta pantalla.
+  const cat = S.finanzasCategorias.find(c => c.tipo === tipo && c.categoria === categoria);
+  const scopeEfectivo = !cat || cat.cuenta === 'efectivo' || cat.cuenta == null;
+  const scopeBanco = !cat || cat.cuenta === 'banco' || cat.cuenta == null;
 
   abrirModal(`
   <h2>${e(categoria)} — ${tituloMes(claveMes)}</h2>
-  <p class="ayuda">Total del mes: <strong>${formatoImporte(total)}€</strong>
-    <button class="btn chico liso peligro" id="fc-borrar-categoria" style="margin-left:10px">🗑 Eliminar esta categoría</button></p>
+  <p class="ayuda">Total del mes: <strong>${formatoImporte(total)}€</strong></p>
+  <p class="ayuda">¿Dónde está esta columna?
+    <label class="check-inline"><input type="checkbox" id="fc-scope-efectivo" ${scopeEfectivo ? 'checked' : ''}> Efectivo</label>
+    <label class="check-inline"><input type="checkbox" id="fc-scope-banco" ${scopeBanco ? 'checked' : ''}> Banco</label>
+  </p>
   ${lista.length === 0 ? '<p class="ayuda">Sin movimientos todavía.</p>' : `
   <div class="tabla-wrap"><table>
     <thead><tr><th>Fecha</th><th>Importe</th><th>Cuenta</th><th>Descripción</th><th></th></tr></thead>
@@ -4953,51 +5063,78 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta = nul
     await cargarFinanzas();
     modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta);
   });
-  const btnBorrarCategoria = document.getElementById('fc-borrar-categoria');
-  if (btnBorrarCategoria) btnBorrarCategoria.onclick = async () => {
-    // Si se ve una cuenta concreta (no "Todo"), borrar solo afecta a ESA
-    // cuenta: antes esto borraba TODOS los movimientos de la categoría (los
-    // de Efectivo Y los de Banco) aunque solo se estuviera mirando una de
-    // las dos — un bug real de pérdida de dinero de la otra cuenta. Ahora,
-    // si a la categoría le queda algo en la otra cuenta (una fila propia
-    // marcada para ella o para "las dos", o movimientos sueltos suyos), no
-    // se borra la categoría del todo: se deja fijada solo a esa otra cuenta,
-    // para que siga viéndose ahí con su dinero intacto.
-    const cat = S.finanzasCategorias.find(c => c.tipo === tipo && c.categoria === categoria);
-    const otraCuenta = filtroCuenta === 'efectivo' ? 'banco' : filtroCuenta === 'banco' ? 'efectivo' : null;
-    const todos = filtroCuenta
-      ? S.finanzas.filter(m => m.tipo === tipo && m.categoria === categoria && m.cuenta === filtroCuenta)
+  // Marcar/desmarcar Efectivo o Banco para esta columna. Desmarcar borra de
+  // verdad los movimientos de ESA cuenta (con aviso y el importe exacto) —
+  // antes esto solo existía como "eliminar la categoría entera", que se
+  // llevaba por delante el dinero de la OTRA cuenta aunque solo se
+  // estuviera mirando una de las dos (bug real, ya corregido una vez;
+  // ahora con checkboxes independientes queda claro cuál se toca). Si
+  // queda la otra cuenta marcada, la columna se re-fija a ella (no
+  // desaparece); si no queda ninguna, se borra la columna entera. Marcar
+  // la cuenta que faltaba es lo contrario: no borra nada, solo hace que la
+  // columna también aparezca ahí (de momento con 0€, hasta que se le meta
+  // algún movimiento).
+  async function cambiarScopeCuenta(cuentaCambiada, marcado) {
+    const catActual = S.finanzasCategorias.find(c => c.tipo === tipo && c.categoria === categoria);
+    const otraCuenta = cuentaCambiada === 'efectivo' ? 'banco' : 'efectivo';
+    const otraMarcada = document.getElementById(otraCuenta === 'banco' ? 'fc-scope-banco' : 'fc-scope-efectivo').checked;
+    const nombreCuenta = cuentaCambiada === 'banco' ? 'Banco' : 'Efectivo';
+    const nombreOtra = otraCuenta === 'banco' ? 'Banco' : 'Efectivo';
+
+    if (marcado) {
+      const nuevaCuenta = otraMarcada ? null : cuentaCambiada;
+      const { error } = catActual
+        ? await S.sb.from('finanzas_categorias').update({ cuenta: nuevaCuenta }).eq('tipo', tipo).eq('categoria', categoria)
+        : await S.sb.from('finanzas_categorias').insert({ tipo, categoria, cuenta: nuevaCuenta });
+      if (error) return avisar('Error: ' + error.message, true);
+      await cargarFinanzasCategorias();
+      avisar(`"${categoria}" añadida también a ${nombreCuenta}.`);
+      modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta);
+      return;
+    }
+
+    // Desmarcar: si no queda ninguna cuenta marcada, es un borrado completo
+    // de la columna (todos sus movimientos, de cualquier cuenta); si queda
+    // la otra, solo se borra lo de esta cuenta.
+    const todos = otraMarcada
+      ? S.finanzas.filter(m => m.tipo === tipo && m.categoria === categoria && m.cuenta === cuentaCambiada)
       : S.finanzas.filter(m => m.tipo === tipo && m.categoria === categoria);
     const totalTodos = todos.reduce((s, m) => s + Number(m.importe), 0);
-    const quedaEnOtra = Boolean(otraCuenta) && (
-      (cat != null && (cat.cuenta === otraCuenta || cat.cuenta == null)) ||
-      S.finanzas.some(m => m.tipo === tipo && m.categoria === categoria && m.cuenta === otraCuenta)
-    );
-    const nombreCuenta = filtroCuenta === 'banco' ? 'Banco' : 'Efectivo';
-    const etiqueta = filtroCuenta ? ` de ${nombreCuenta}` : '';
-    const aviso = todos.length
-      ? `¿Seguro que quieres eliminar la columna "${categoria}"${etiqueta}? Se borrarán también sus ${todos.length} movimiento${todos.length === 1 ? '' : 's'}${etiqueta} de TODOS los meses (${formatoImporte(totalTodos)}€ en total).${quedaEnOtra ? ` Se mantiene en ${otraCuenta === 'banco' ? 'Banco' : 'Efectivo'}.` : ''} Esta acción no se puede deshacer.`
-      : `¿Eliminar la columna "${categoria}"${etiqueta}? No tiene ningún movimiento todavía${etiqueta}.`;
-    if (!confirm(aviso)) return;
+    const aviso = otraMarcada
+      ? (todos.length
+        ? `¿Seguro que quieres quitar "${categoria}" de ${nombreCuenta}? Se borrarán también sus ${todos.length} movimiento${todos.length === 1 ? '' : 's'} de ${nombreCuenta} de TODOS los meses (${formatoImporte(totalTodos)}€ en total). Se mantiene en ${nombreOtra}. Esta acción no se puede deshacer.`
+        : `¿Quitar "${categoria}" de ${nombreCuenta}? No tiene ningún movimiento todavía ahí. Se mantiene en ${nombreOtra}.`)
+      : (todos.length
+        ? `¿Seguro que quieres eliminar del todo la columna "${categoria}"? Se borrarán también sus ${todos.length} movimiento${todos.length === 1 ? '' : 's'} de TODOS los meses y de las dos cuentas (${formatoImporte(totalTodos)}€ en total). Esta acción no se puede deshacer.`
+        : `¿Eliminar del todo la columna "${categoria}"? No tiene ningún movimiento todavía.`);
+    if (!confirm(aviso)) {
+      document.getElementById(cuentaCambiada === 'banco' ? 'fc-scope-banco' : 'fc-scope-efectivo').checked = true;
+      return;
+    }
     if (todos.length) {
       let q = S.sb.from('finanzas_movimientos').delete().eq('tipo', tipo).eq('categoria', categoria);
-      if (filtroCuenta) q = q.eq('cuenta', filtroCuenta);
+      if (otraMarcada) q = q.eq('cuenta', cuentaCambiada);
       const { error } = await q;
       if (error) return avisar('Error: ' + error.message, true);
     }
-    if (quedaEnOtra) {
+    if (otraMarcada) {
       const { error } = await S.sb.from('finanzas_categorias')
         .update({ cuenta: otraCuenta }).eq('tipo', tipo).eq('categoria', categoria);
       if (error) return avisar('Error: ' + error.message, true);
+      await Promise.all([cargarFinanzas(), cargarFinanzasCategorias()]);
+      avisar(`"${categoria}" ya no está en ${nombreCuenta}.`);
+      modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta);
     } else {
       const { error } = await S.sb.from('finanzas_categorias').delete().eq('tipo', tipo).eq('categoria', categoria);
       if (error) return avisar('Error: ' + error.message, true);
+      cerrarModal();
+      await Promise.all([cargarFinanzas(), cargarFinanzasCategorias()]);
+      renderFinanzas();
+      avisar('Columna eliminada.');
     }
-    cerrarModal();
-    await Promise.all([cargarFinanzas(), cargarFinanzasCategorias()]);
-    renderFinanzas();
-    avisar(`Columna eliminada${etiqueta}.`);
-  };
+  }
+  document.getElementById('fc-scope-efectivo').onchange = (ev) => cambiarScopeCuenta('efectivo', ev.target.checked);
+  document.getElementById('fc-scope-banco').onchange = (ev) => cambiarScopeCuenta('banco', ev.target.checked);
   document.getElementById('fc-guardar').onclick = async () => {
     const importe = Number(document.getElementById('fc-importe').value);
     const fecha = document.getElementById('fc-fecha').value;

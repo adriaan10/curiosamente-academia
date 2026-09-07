@@ -1809,3 +1809,89 @@ alter table public.alumnos
 -- ya usado en todo este bloque: modalEditarProfesor(prof, true) nunca
 -- toca profesores (solo profesor_asignaturas), así que es igual de seguro
 -- para un admin editándose a sí mismo que para un profesor normal.
+
+-- ============================================================
+-- Pestaña "Asignaturas" dentro de Profesores (08/09/2026)
+-- ============================================================
+
+-- Hasta ahora una asignatura solo se podía crear DESDE DENTRO de dar de
+-- alta o editar a un profesor concreto (bloqueAsignaturas(), que sigue
+-- existiendo tal cual para marcar/desmarcar cuáles imparte cada uno — no
+-- se toca). Ahora, además, hay un tercer segmento "Asignaturas" en
+-- Profesores (solo admin, junto a "Activos"/"Baja") con una lista plana de
+-- todas las asignaturas de la academia — con su color, cuántos profesores
+-- la dan ahora mismo, y un botón para borrarla (mismo bloqueo por FK de
+-- siempre: falla con un mensaje claro si algún alumno matriculado o alguna
+-- clase la sigue usando) — y un formulario para crear una nueva suelta,
+-- con nombre y color (mismo <input type="color"> y paleta de arranque al
+-- azar que ya se usaba en el formulario de dentro del profesor). Así una
+-- asignatura ya existe de antemano, lista para marcarla, tanto al dar de
+-- alta un profesor nuevo como al entrar a "Editar mis asignaturas".
+--
+-- Sin cambio de esquema ni de RLS (asignaturas_admin ya cubría todo esto).
+-- app.js: renderAsignaturasSueltas() + listaAsignaturasSueltasHtml() +
+-- filaAsignaturaSuelta() + activarBorrarAsignaturaSuelta(), todas nuevas;
+-- renderProfesores() deriva a renderAsignaturasSueltas() cuando
+-- S.vistaProfes === 'asignaturas'.
+
+-- ============================================================
+-- Columnas de Ingresos y gastos: checkboxes Efectivo/Banco (08/09/2026)
+-- ============================================================
+
+-- El selector de "¿dónde se usa?" al crear una columna (modalAnadirCategoria
+-- Finanzas) era un radio de 3 opciones excluyentes (Las dos / Solo Efectivo
+-- / Solo Banco) — no dejaba ver de un vistazo ni cambiar por separado en
+-- cuál de las dos cuentas está una columna YA creada. Cambiado a dos
+-- checkboxes independientes (Efectivo, Banco) en los dos sitios: al crear
+-- (modalAnadirCategoriaFinanzas) y, nuevo, también al ver una columna ya
+-- existente (modalCategoriaMovimientos, en vez del botón único "🗑
+-- Eliminar esta categoría" de antes).
+--
+-- cambiarScopeCuenta(cuentaCambiada, marcado) es la lógica común de ambos
+-- checkboxes en modalCategoriaMovimientos:
+--  - Marcar una cuenta que faltaba: no borra nada — añade esa cuenta al
+--    alcance de la columna (cuenta=null si quedan las dos marcadas, o el
+--    valor de esa cuenta si la otra sigue sin marcar). Si la columna era
+--    "suelta" (sin fila propia en finanzas_categorias), se crea una. Ningún
+--    movimiento nuevo: simplemente esa cuenta empieza a verla, con 0€
+--    hasta que se le meta alguno.
+--  - Desmarcar una cuenta con la otra todavía marcada: avisa con el
+--    importe exacto de ESA cuenta antes de borrar sus movimientos, y deja
+--    la columna fijada a la que queda (se conserva su dinero intacto) —
+--    mismo criterio que el arreglo del bug de pérdida de datos del
+--    07/09/2026, ahora expresado con un checkbox en vez de un botón único.
+--  - Desmarcar la única cuenta que quedaba marcada: es un borrado completo
+--    de la columna (todos sus movimientos, de cualquier cuenta, y la fila
+--    de finanzas_categorias) — mismo aviso más fuerte de antes.
+-- Si se cancela el confirm() de cualquiera de los dos borrados, el
+-- checkbox vuelve a marcarse solo (no se queda a medias).
+--
+-- Aparte, el <input type="color"> de crear asignatura (Nuevo/Editar
+-- profesor, pestaña Asignaturas de Profesores) pasa de un círculo liso
+-- (".color-mini", quitada del CSS por no usarse ya) al mismo swatch con
+-- degradado arcoíris y 🎨 que ya se usaba en Clases (".color-personalizado")
+-- — se veía "raro", sin pinta de ser un selector de color; ahora es
+-- evidente de un vistazo.
+
+-- ============================================================
+-- Limpieza real de columnas de Gastos en Efectivo (08/09/2026)
+-- ============================================================
+
+-- Reorganización pedida en vivo por el admin, aprovechando los checkboxes
+-- nuevos de arriba. Antes de tocar nada se comprobó que ninguna de las
+-- categorías afectadas tuviera movimientos ya registrados (0 en las 9).
+-- Primer intento con Limpieza y Material puestas solo en Banco: corregido
+-- en el momento (el admin las quería en Efectivo también) — quedan en las
+-- dos cuentas junto con el resto de esa lista.
+--
+-- Se quitan de Efectivo (pasan a cuenta='banco', antes null=compartida —
+-- se conservan intactas en Banco, nada que perder ahí, son facturas que se
+-- pagan siempre por banco): Fotocopiadora, Impuestos, Nómina nuestra,
+-- Nóminas banco, Otros — y el resto de categorías de gasto que ya eran
+-- solo-banco de antes (Alquiler, Autónomo, Internet, Luz, Seguridad
+-- Social, Seguro).
+-- Se quedan tal cual en las dos cuentas (cuenta=null, sin tocar): Agua,
+-- Asesoría, IA, Limpieza, Material, Nóminas efectivo, Requerimientos
+-- legales.
+-- Se borran del todo, de las dos cuentas (eran redundantes con el total
+-- automático que ya calcula la app): Gasto efectivo, Gasto banco.
