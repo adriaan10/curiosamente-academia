@@ -1729,3 +1729,53 @@ alter table public.alumnos
 -- para no ofrecer tampoco crear ni borrar asignaturas de la academia (eso
 -- sigue siendo solo-admin) — solo marcar/desmarcar entre las que ya
 -- existen.
+
+-- ============================================================
+-- Elegir profesor al dar de alta una asignatura (08/09/2026)
+-- ============================================================
+
+-- Ahora que no hay descuento por número de asignaturas (se quitó el
+-- 07/09/2026), ya no pasa nada porque cada profesor organice sus propias
+-- asignaturas como quiera. En la ficha del alumno (modalAlumno, solo para
+-- admin — un profesor normal ya veía únicamente las suyas), cada fila de
+-- matrícula gana un selector de "Profesor" antes del de "Asignatura": al
+-- elegir uno, la lista de asignaturas se acota a las suyas
+-- (asignaturasDeProfesor()), igual que ya hacía el selector de clases en
+-- modalClase(). Es solo un filtro de la interfaz — no se guarda en
+-- `matriculas` (que no tiene profesor_id) ni cambia profesor_asignaturas;
+-- "Todas las asignaturas" quita el filtro. Si la asignatura ya puesta la da
+-- un único profesor, se preselecciona solo (profesorParaAsignatura()); si
+-- la dan varios o ninguno, se deja en "Todas".
+
+-- ============================================================
+-- Bug: borrar una columna de Efectivo borraba también la de Banco (08/09/2026)
+-- ============================================================
+
+-- finanzas_categorias tiene una única fila por categoría, con un campo
+-- `cuenta` (null = las dos, o 'efectivo'/'banco' si es solo de una) que
+-- decide en qué pestaña aparece. "🗑 Eliminar esta categoría"
+-- (modalCategoriaMovimientos) borraba SIEMPRE todos sus movimientos —de
+-- Efectivo Y de Banco— y la fila entera de finanzas_categorias, sin mirar
+-- desde qué pestaña se había abierto: si la categoría era compartida (o
+-- tenía movimientos sueltos en la otra cuenta), borrarla desde Efectivo se
+-- llevaba por delante el dinero de Banco también. Bug real de pérdida de
+-- datos, reportado en vivo por el admin.
+--
+-- Arreglado sin cambio de esquema: modalCategoriaMovimientos() recibe ahora
+-- un 4º argumento (filtroCuenta, la pestaña desde la que se abrió, ya
+-- calculada en renderFinanzas()). Al eliminar una columna con una cuenta
+-- concreta activa (no "Todo"): el delete de finanzas_movimientos se filtra
+-- también por `cuenta`; y si a la categoría le queda algo en la OTRA cuenta
+-- (una fila propia para ella o para "las dos", o movimientos sueltos suyos
+-- — mismo criterio de "no esconder dinero" que categoriasConExtras()), en
+-- vez de borrar finanzas_categorias se hace un update fijando `cuenta` a
+-- esa otra cuenta, para que la columna se quede viéndose solo ahí con su
+-- dinero intacto. Desde "Todo" (sin cuenta concreta) el comportamiento
+-- sigue siendo el de siempre: borra todo, las dos cuentas.
+--
+-- De paso, aprovechando el mismo bug para limpiar datos reales: Luz,
+-- Internet, Autónomo, Alquiler, Seguridad Social y Seguro estaban las 6
+-- como categoría compartida (cuenta=null, sin movimientos todavía) cuando
+-- en realidad son gastos que siempre se pagan por banco — se les puso
+-- `cuenta='banco'` a mano (update directo, no había nada que perder), así
+-- ya no aparecen en absoluto en la pestaña Efectivo.

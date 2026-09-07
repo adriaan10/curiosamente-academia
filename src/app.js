@@ -1088,6 +1088,14 @@ function misAsignaturas() {
   return S.profesor?.es_admin ? S.asignaturas : asignaturasDeProfesor(S.profesor?.id);
 }
 
+// Si una asignatura la da un único profesor, es quien se preselecciona en el
+// filtro de "Profesor" al abrir una ficha con esa asignatura ya puesta (ver
+// modalAlumno) — si la dan varios, o ninguno todavía, no se puede adivinar.
+function profesorParaAsignatura(asignaturaId) {
+  const ps = S.profAsig.filter(x => x.asignatura_id === asignaturaId).map(x => x.profesor_id);
+  return ps.length === 1 ? ps[0] : '';
+}
+
 function opcionesAsignaturas(profesorId, seleccionadaId) {
   const lista = S.profesor?.es_admin && !profesorId
     ? S.asignaturas
@@ -1359,9 +1367,20 @@ function modalAlumno(alumno) {
   <p id="m-msg" class="error"></p>`);
 
   const pintarMatriculas = () => {
-    document.getElementById('a-matriculas').innerHTML = ms.map((m, i) => `
+    document.getElementById('a-matriculas').innerHTML = ms.map((m, i) => {
+      // Filtro de "Profesor" (solo admin): no se guarda en la matrícula —
+      // solo sirve para acortar la lista de asignaturas a las de ese
+      // profesor, así cada uno organiza las suyas sin depender de un
+      // descuento por número de asignaturas (ya no existe). Se preselecciona
+      // solo si esa asignatura la da un único profesor; si no, "Todas".
+      if (m._profSel === undefined) m._profSel = esAdmin ? profesorParaAsignatura(m.asignatura_id) : S.profesor.id;
+      return `
       <div class="fila-horario">
-        <select data-m-asig="${i}">${opcionesAsignaturas(esAdmin ? null : S.profesor.id, m.asignatura_id)}</select>
+        ${esAdmin ? `<select data-m-prof="${i}">
+          <option value="">Todas las asignaturas</option>
+          ${profesoresActivos().map(p => `<option value="${p.id}" ${p.id === m._profSel ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
+        </select>` : ''}
+        <select data-m-asig="${i}">${opcionesAsignaturas(esAdmin ? (m._profSel || null) : S.profesor.id, m.asignatura_id)}</select>
         <input type="number" data-m-tarifa="${i}" min="0" step="0.01" placeholder="${esAdmin ? '€' : 'lo pone el admin'}"
           value="${m.tarifa ?? ''}" class="ancho-tarifa" ${esAdmin ? '' : 'disabled'}>
         <select data-m-tipo="${i}">
@@ -1370,8 +1389,16 @@ function modalAlumno(alumno) {
         </select>
         <input type="number" data-m-horas="${i}" min="0" step="0.5" placeholder="h/sem" value="${m.horas_semana ?? ''}" class="ancho-horas">
         <button class="btn chico liso" data-m-quitar="${i}" title="Quitar esta asignatura">✕</button>
-      </div>`).join('') || '<p class="ayuda">Sin asignaturas tuyas todavía.</p>';
+      </div>`;
+    }).join('') || '<p class="ayuda">Sin asignaturas tuyas todavía.</p>';
     const cont = document.getElementById('a-matriculas');
+    cont.querySelectorAll('[data-m-prof]').forEach(s => s.onchange = () => {
+      const i = +s.dataset.mProf;
+      ms[i]._profSel = s.value;
+      const disponibles = (s.value ? asignaturasDeProfesor(s.value) : S.asignaturas).map(a => a.id);
+      if (!disponibles.includes(ms[i].asignatura_id)) ms[i].asignatura_id = disponibles[0] ?? null;
+      pintarMatriculas();
+    });
     cont.querySelectorAll('[data-m-asig]').forEach(s => s.onchange = () => { ms[+s.dataset.mAsig].asignatura_id = Number(s.value); });
     cont.querySelectorAll('[data-m-tarifa]').forEach(s => s.oninput = () => { ms[+s.dataset.mTarifa].tarifa = s.value; });
     cont.querySelectorAll('[data-m-tipo]').forEach(s => s.onchange = () => { ms[+s.dataset.mTipo].tipo_tarifa = s.value; });
@@ -4744,7 +4771,7 @@ function renderFinanzas() {
   document.querySelectorAll('[data-cuenta-fin]').forEach(b => b.onclick = () => { S.cuentaFinanzas = b.dataset.cuentaFin; renderFinanzas(); });
   document.getElementById('fin-anadir-categoria').onclick = () => modalAnadirCategoriaFinanzas(tipo, cuenta);
   document.querySelectorAll('.celda-fin[data-cat]').forEach(el => el.onclick = () =>
-    modalCategoriaMovimientos(tipo, el.dataset.cat, el.dataset.mes));
+    modalCategoriaMovimientos(tipo, el.dataset.cat, el.dataset.mes, filtroCuenta));
   const $fijarSaldo = document.getElementById('fin-saldo-inicial');
   if ($fijarSaldo) $fijarSaldo.onclick = () => modalFijarSaldoInicial(filtroCuenta);
 
@@ -4872,7 +4899,9 @@ function modalFijarSaldoInicial(cuenta) {
 }
 
 // Movimientos de una categoría en un mes concreto: verlos, borrarlos, y añadir uno nuevo.
-function modalCategoriaMovimientos(tipo, categoria, claveMes) {
+// filtroCuenta: la pestaña (Efectivo/Banco/Todo) desde la que se abrió —
+// "Eliminar esta columna" la usa para no tocar la otra cuenta (ver abajo).
+function modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta = null) {
   const lista = S.finanzas
     .filter(m => m.tipo === tipo && m.categoria === categoria && claveMesFecha(m.fecha) === claveMes)
     .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
@@ -4920,26 +4949,52 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes) {
     if (!confirm('¿Eliminar este movimiento?')) return;
     await S.sb.from('finanzas_movimientos').delete().eq('id', b.dataset.borrarFin);
     await cargarFinanzas();
-    modalCategoriaMovimientos(tipo, categoria, claveMes);
+    modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta);
   });
   const btnBorrarCategoria = document.getElementById('fc-borrar-categoria');
   if (btnBorrarCategoria) btnBorrarCategoria.onclick = async () => {
-    const todos = S.finanzas.filter(m => m.tipo === tipo && m.categoria === categoria);
+    // Si se ve una cuenta concreta (no "Todo"), borrar solo afecta a ESA
+    // cuenta: antes esto borraba TODOS los movimientos de la categoría (los
+    // de Efectivo Y los de Banco) aunque solo se estuviera mirando una de
+    // las dos — un bug real de pérdida de dinero de la otra cuenta. Ahora,
+    // si a la categoría le queda algo en la otra cuenta (una fila propia
+    // marcada para ella o para "las dos", o movimientos sueltos suyos), no
+    // se borra la categoría del todo: se deja fijada solo a esa otra cuenta,
+    // para que siga viéndose ahí con su dinero intacto.
+    const cat = S.finanzasCategorias.find(c => c.tipo === tipo && c.categoria === categoria);
+    const otraCuenta = filtroCuenta === 'efectivo' ? 'banco' : filtroCuenta === 'banco' ? 'efectivo' : null;
+    const todos = filtroCuenta
+      ? S.finanzas.filter(m => m.tipo === tipo && m.categoria === categoria && m.cuenta === filtroCuenta)
+      : S.finanzas.filter(m => m.tipo === tipo && m.categoria === categoria);
     const totalTodos = todos.reduce((s, m) => s + Number(m.importe), 0);
+    const quedaEnOtra = Boolean(otraCuenta) && (
+      (cat != null && (cat.cuenta === otraCuenta || cat.cuenta == null)) ||
+      S.finanzas.some(m => m.tipo === tipo && m.categoria === categoria && m.cuenta === otraCuenta)
+    );
+    const nombreCuenta = filtroCuenta === 'banco' ? 'Banco' : 'Efectivo';
+    const etiqueta = filtroCuenta ? ` de ${nombreCuenta}` : '';
     const aviso = todos.length
-      ? `¿Seguro que quieres eliminar la columna "${categoria}"? Se borrarán también sus ${todos.length} movimiento${todos.length === 1 ? '' : 's'} de TODOS los meses (${formatoImporte(totalTodos)}€ en total). Esta acción no se puede deshacer.`
-      : `¿Eliminar la columna "${categoria}"? No tiene ningún movimiento todavía.`;
+      ? `¿Seguro que quieres eliminar la columna "${categoria}"${etiqueta}? Se borrarán también sus ${todos.length} movimiento${todos.length === 1 ? '' : 's'}${etiqueta} de TODOS los meses (${formatoImporte(totalTodos)}€ en total).${quedaEnOtra ? ` Se mantiene en ${otraCuenta === 'banco' ? 'Banco' : 'Efectivo'}.` : ''} Esta acción no se puede deshacer.`
+      : `¿Eliminar la columna "${categoria}"${etiqueta}? No tiene ningún movimiento todavía${etiqueta}.`;
     if (!confirm(aviso)) return;
     if (todos.length) {
-      const { error } = await S.sb.from('finanzas_movimientos').delete().eq('tipo', tipo).eq('categoria', categoria);
+      let q = S.sb.from('finanzas_movimientos').delete().eq('tipo', tipo).eq('categoria', categoria);
+      if (filtroCuenta) q = q.eq('cuenta', filtroCuenta);
+      const { error } = await q;
       if (error) return avisar('Error: ' + error.message, true);
     }
-    const { error } = await S.sb.from('finanzas_categorias').delete().eq('tipo', tipo).eq('categoria', categoria);
-    if (error) return avisar('Error: ' + error.message, true);
+    if (quedaEnOtra) {
+      const { error } = await S.sb.from('finanzas_categorias')
+        .update({ cuenta: otraCuenta }).eq('tipo', tipo).eq('categoria', categoria);
+      if (error) return avisar('Error: ' + error.message, true);
+    } else {
+      const { error } = await S.sb.from('finanzas_categorias').delete().eq('tipo', tipo).eq('categoria', categoria);
+      if (error) return avisar('Error: ' + error.message, true);
+    }
     cerrarModal();
     await Promise.all([cargarFinanzas(), cargarFinanzasCategorias()]);
     renderFinanzas();
-    avisar('Columna eliminada.');
+    avisar(`Columna eliminada${etiqueta}.`);
   };
   document.getElementById('fc-guardar').onclick = async () => {
     const importe = Number(document.getElementById('fc-importe').value);
@@ -4957,7 +5012,7 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes) {
     if (error) return avisar('Error: ' + error.message, true);
     await cargarFinanzas();
     avisar('Movimiento añadido.');
-    modalCategoriaMovimientos(tipo, categoria, claveMes);
+    modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta);
   };
 }
 
