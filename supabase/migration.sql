@@ -1736,14 +1736,20 @@ alter table public.alumnos
 
 -- Ahora que no hay descuento por número de asignaturas (se quitó el
 -- 07/09/2026), ya no pasa nada porque cada profesor organice sus propias
--- asignaturas como quiera. En la ficha del alumno (modalAlumno, solo para
--- admin — un profesor normal ya veía únicamente las suyas), cada fila de
--- matrícula gana un selector de "Profesor" antes del de "Asignatura": al
+-- asignaturas como quiera. En la ficha del alumno (modalAlumno), cada fila
+-- de matrícula gana un selector de "Profesor" antes del de "Asignatura": al
 -- elegir uno, la lista de asignaturas se acota a las suyas
 -- (asignaturasDeProfesor()), igual que ya hacía el selector de clases en
--- modalClase(). Es solo un filtro de la interfaz — no se guarda en
--- `matriculas` (que no tiene profesor_id) ni cambia profesor_asignaturas;
--- "Todas las asignaturas" quita el filtro. Si la asignatura ya puesta la da
+-- modalClase(). Para TODOS los profesores, no solo admin — quien da de
+-- alta a un alumno puede no ser quien le dará todas sus asignaturas (puede
+-- llevar materias de varios profesores a la vez), así que el filtro no
+-- tiene sentido limitarlo a admin; RLS en `matriculas` ya era abierta
+-- (matriculas_insert/update/delete: with_check/qual = true, sin
+-- restricción por profesor), así que esto no abre ningún permiso nuevo —
+-- solo hace visible en la interfaz algo que el servidor ya permitía. Es
+-- solo un filtro de la interfaz — no se guarda en `matriculas` (que no
+-- tiene profesor_id) ni cambia profesor_asignaturas; "Todas las
+-- asignaturas" quita el filtro. Si la asignatura ya puesta la da
 -- un único profesor, se preselecciona solo (profesorParaAsignatura()); si
 -- la dan varios o ninguno, se deja en "Todas".
 

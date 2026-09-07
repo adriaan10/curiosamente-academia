@@ -1368,19 +1368,21 @@ function modalAlumno(alumno) {
 
   const pintarMatriculas = () => {
     document.getElementById('a-matriculas').innerHTML = ms.map((m, i) => {
-      // Filtro de "Profesor" (solo admin): no se guarda en la matrícula —
-      // solo sirve para acortar la lista de asignaturas a las de ese
-      // profesor, así cada uno organiza las suyas sin depender de un
-      // descuento por número de asignaturas (ya no existe). Se preselecciona
-      // solo si esa asignatura la da un único profesor; si no, "Todas".
-      if (m._profSel === undefined) m._profSel = esAdmin ? profesorParaAsignatura(m.asignatura_id) : S.profesor.id;
+      // Filtro de "Profesor" (para cualquiera, no solo admin — quien da de
+      // alta a un alumno puede no ser quien le dará todas sus asignaturas):
+      // no se guarda en la matrícula, solo acorta la lista de asignaturas a
+      // las de ese profesor, así cada uno organiza las suyas sin depender de
+      // un descuento por número de asignaturas (ya no existe). Se
+      // preselecciona solo si esa asignatura la da un único profesor; si no
+      // ("Todas las asignaturas"), se ven todas.
+      if (m._profSel === undefined) m._profSel = profesorParaAsignatura(m.asignatura_id);
       return `
       <div class="fila-horario">
-        ${esAdmin ? `<select data-m-prof="${i}">
+        <select data-m-prof="${i}">
           <option value="">Todas las asignaturas</option>
           ${profesoresActivos().map(p => `<option value="${p.id}" ${p.id === m._profSel ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
-        </select>` : ''}
-        <select data-m-asig="${i}">${opcionesAsignaturas(esAdmin ? (m._profSel || null) : S.profesor.id, m.asignatura_id)}</select>
+        </select>
+        <select data-m-asig="${i}">${opcionesAsignaturas(m._profSel || null, m.asignatura_id)}</select>
         <input type="number" data-m-tarifa="${i}" min="0" step="0.01" placeholder="${esAdmin ? '€' : 'lo pone el admin'}"
           value="${m.tarifa ?? ''}" class="ancho-tarifa" ${esAdmin ? '' : 'disabled'}>
         <select data-m-tipo="${i}">
