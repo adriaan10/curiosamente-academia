@@ -1785,3 +1785,27 @@ alter table public.alumnos
 -- en realidad son gastos que siempre se pagan por banco — se les puso
 -- `cuenta='banco'` a mano (update directo, no había nada que perder), así
 -- ya no aparecen en absoluto en la pestaña Efectivo.
+
+-- ============================================================
+-- Bug: un admin no podía editar sus propias asignaturas (08/09/2026)
+-- ============================================================
+
+-- Reportado en vivo por un profesor (Dani) al que se acababa de hacer
+-- administrador: dejó de poder tocar sus propias asignaturas. Causa: la
+-- columna de acciones de renderProfesores() solo daba el botón "Editar mis
+-- asignaturas" a quien NO fuera admin (!esAdmin && p.id === S.profesor.id),
+-- y el botón "Editar" completo explícitamente EXCLUYE la fila propia
+-- (esAdmin && p.id !== S.profesor.id) porque incluye "Hacer/Quitar admin" y
+-- "Dar de baja", que no tiene sentido aplicarse a uno mismo (además
+-- cambiar_admin_profesor() lo rechaza en el servidor: "No puedes
+-- cambiarte el admin a ti mismo"). Resultado: para CUALQUIER admin —
+-- incluido Adrián — la propia fila se quedaba sin ningún botón, sin
+-- manera de tocar las asignaturas propias desde esta pantalla.
+--
+-- Arreglado invirtiendo la prioridad: la fila propia (p.id ===
+-- S.profesor.id) SIEMPRE da "Editar mis asignaturas" —sea admin o no—, y
+-- el "Editar" completo (Permisos/contraseña/baja) solo aparece en las
+-- filas de otros profesores, y solo si quien mira es admin. Mismo patrón
+-- ya usado en todo este bloque: modalEditarProfesor(prof, true) nunca
+-- toca profesores (solo profesor_asignaturas), así que es igual de seguro
+-- para un admin editándose a sí mismo que para un profesor normal.

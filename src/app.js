@@ -4094,10 +4094,10 @@ function renderProfesores() {
         ${p.estado === 'baja'
           ? (esAdmin ? `<button class="btn chico" data-reactivar-prof="${p.id}">Reactivar</button>
              <button class="btn chico liso peligro" data-borrar-prof="${p.id}" title="Borrar ficha definitivamente (no afecta a sus recibos, clases ni movimientos ya registrados)">Borrar</button>` : '')
-          : (esAdmin && p.id !== S.profesor.id
-            ? `<button class="btn chico liso" data-editar-prof="${p.id}">Editar</button>`
-            : (!esAdmin && p.id === S.profesor.id
-              ? `<button class="btn chico liso" data-editar-mis-asig="${p.id}">Editar mis asignaturas</button>` : ''))}
+          : (p.id === S.profesor.id
+            ? `<button class="btn chico liso" data-editar-mis-asig="${p.id}">Editar mis asignaturas</button>`
+            : (esAdmin
+              ? `<button class="btn chico liso" data-editar-prof="${p.id}">Editar</button>` : ''))}
       </td>
     </tr>`;
     }).join('')}
