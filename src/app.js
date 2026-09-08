@@ -77,6 +77,21 @@ async function init() {
   } catch { /* expulsado por baja: ya se muestra el login */ }
 }
 
+// Registro silencioso de qué versión/plataforma tiene cada uno — no se ve
+// en ningún sitio de la app, es solo para poder comprobar desde fuera
+// (Supabase) quién tiene la app instalada y si ya le llegó una
+// actualización recién publicada. Fire-and-forget a propósito: si falla
+// (sin conexión, lo que sea) no debe interrumpir el login de nadie ni
+// avisar de nada.
+async function registrarEstadoApp() {
+  try {
+    const { version, plataforma } = await window.api.getAppVersion();
+    await S.sb.from('profesor_app_estado').upsert({
+      profesor_id: S.profesor.id, version, plataforma, ultima_conexion: new Date().toISOString()
+    });
+  } catch { /* silencioso a propósito */ }
+}
+
 async function cargarTodo() {
   const uid = S.session.user.id;
   const [prof, profs, asigs, profAsig] = await Promise.all([
@@ -111,6 +126,7 @@ async function cargarTodo() {
     }, 0);
     throw new Error('acceso desactivado');
   }
+  registrarEstadoApp();
   if (profs.error) avisar('Error cargando profesores: ' + profs.error.message, true);
   else S.profesores = profs.data || [];
   if (asigs.error) avisar('Error cargando asignaturas: ' + asigs.error.message, true);
@@ -2799,7 +2815,7 @@ function modalRecibo(alumno) {
       <input id="r-extra-desc" placeholder="ej. 2 horas extra"></label>
     <label>Concepto<input id="r-concepto"></label>
     <label>Importe total (€)<input id="r-importe" type="number" min="0" step="0.01"></label>
-    <label>Recibí de<input id="r-recibide" value="${e(alumno.facturacion_nombre || alumno.tutor_nombre || alumno.nombre)}"></label>
+    <label>Recibí de<input id="r-recibide" value="${e(nombreAlumnoParaPdf(alumno))}"></label>
     <label>Fecha de emisión<input id="r-fecha" value="${hoyDDMMAAAA()}"></label>
   </div>
   <label class="check-inline" style="margin-top:10px">
@@ -2963,14 +2979,15 @@ async function crearRecibos(alumno, opts) {
   const importePadre = round2(opts.importe - importeMadre);
   const importeMatriculaMadre = opts.importeMatricula ? round2(opts.importeMatricula * pctMadre / 100) : 0;
   const importeMatriculaPadre = opts.importeMatricula ? round2(opts.importeMatricula - importeMatriculaMadre) : 0;
+  // El PDF de cada uno va a nombre del alumno igualmente (recibiDe se
+  // hereda de opts sin más) — antes se sustituía aquí por el nombre de la
+  // madre o el padre, aunque el recibo fuera del hijo.
   const madre = await crearRecibo(alumno, {
     ...opts, importe: importeMadre, importeMatricula: importeMatriculaMadre,
-    recibiDe: alumno.madre_nombre || opts.recibiDe,
     concepto: `${opts.concepto} (Madre · ${pctMadre}%)`
   }, 'madre');
   const padre = await crearRecibo(alumno, {
     ...opts, importe: importePadre, importeMatricula: importeMatriculaPadre,
-    recibiDe: alumno.padre_nombre || opts.recibiDe,
     concepto: `${opts.concepto} (Padre · ${pctPadre}%)`
   }, 'padre');
   return [madre, padre];
@@ -2997,11 +3014,40 @@ function telefonoDeRecibo(recibo) {
   if (recibo.progenitor === 'padre') return a.padre_telefono;
   return a.telefono || a.tutor_telefono;
 }
+// A quién se dirige el MENSAJE de WhatsApp: al padre/madre/tutor (el que
+// vaya a leerlo), o al propio alumno si es mayor de edad y no tiene tutor
+// puesto. Esto no cambia — sigue siendo distinto de a quién va el PDF (ver
+// nombreAlumnoParaPdf/nombreParaReciboPdf justo abajo).
 function destinatarioDeRecibo(recibo) {
   const a = recibo.alumnos || {};
   if (recibo.progenitor === 'madre') return a.madre_nombre || a.tutor_nombre || a.nombre || '';
   if (recibo.progenitor === 'padre') return a.padre_nombre || a.tutor_nombre || a.nombre || '';
   return a.facturacion_nombre || a.tutor_nombre || a.nombre || '';
+}
+
+// A nombre de quién va el PDF del recibo (el "Recibí de:"): siempre el
+// propio alumno, aunque sea menor y tenga tutor puesto — el tutor es solo
+// a quien se AVISA por WhatsApp (destinatarioDeRecibo, arriba), no a quien
+// se le hace el recibo. Se respeta "Facturar a" (facturacion_nombre) si el
+// admin lo puso a mano en la ficha — es una elección explícita suya para
+// ese caso concreto (ej. una empresa pagando), distinta del arrastre
+// automático al tutor que aquí se ha quitado.
+function nombreAlumnoParaPdf(alumno) {
+  return alumno?.facturacion_nombre || alumno?.nombre || '';
+}
+// Mismo criterio que la de arriba, pero a partir de un recibo ya guardado
+// (con el alumno embebido) en vez del objeto alumno directo — para
+// regenerar un PDF ya emitido, donde no se guarda "recibí de" en la BD.
+function nombreParaReciboPdf(recibo) {
+  return nombreAlumnoParaPdf(recibo.alumnos) || recibo.alumno_nombre || '';
+}
+// Recibo conjunto de hermanos: el PDF va a nombre de TODOS los hijos
+// incluidos ("Ana, Carlos y Pedro"), no del padre/tutor de la familia.
+function nombresEnLista(nombres) {
+  const limpios = nombres.filter(Boolean);
+  if (limpios.length <= 1) return limpios[0] || '';
+  if (limpios.length === 2) return `${limpios[0]} y ${limpios[1]}`;
+  return `${limpios.slice(0, -1).join(', ')} y ${limpios[limpios.length - 1]}`;
 }
 
 // El concepto interno de un recibo de padres separados lleva "(Madre · 33%)"
@@ -3085,13 +3131,14 @@ async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
   const alumno = recibo.alumnos || {};
   const tel = telefonoDeRecibo(recibo);
   if (!telefonoWa(tel)) return { ok: false, error: 'sin teléfono válido' };
-  const destinatario = destinatarioDeRecibo(recibo);
+  const destinatario = destinatarioDeRecibo(recibo); // para el mensaje: padre/tutor
+  const nombrePdf = nombreParaReciboPdf(recibo); // para el PDF: el alumno
 
   try {
     const letras = recibo.importe_letras || importeALetras(recibo.importe);
     const bytes = await generarReciboPdf({
       fechaEmision: fmtFecha(recibo.fecha_emision),
-      recibiDe: destinatario,
+      recibiDe: nombrePdf,
       cantidadLetras: letras,
       concepto: recibo.concepto,
       desglose: desgloseDeRecibo(recibo.concepto, recibo.importe, recibo.importe_matricula) || undefined,
@@ -3147,7 +3194,8 @@ async function enviarPorWhatsAppApiConjunto(recibos, tipo = 'recibo') {
   const primero = recibos[0];
   const tel = telefonoDeRecibo(primero);
   if (!telefonoWa(tel)) return { ok: false, error: 'sin teléfono válido' };
-  const destinatario = destinatarioDeRecibo(primero);
+  const destinatario = destinatarioDeRecibo(primero); // para el mensaje: padre/tutor de la familia
+  const nombresPdf = nombresEnLista(recibos.map(nombreParaReciboPdf)); // para el PDF: los hermanos
   const total = recibos.reduce((s, r) => s + Number(r.importe), 0);
   // Solo nombres + concepto de cada hermano, para que se sepa quiénes van
   // incluidos — sin el importe de cada uno, que solo se ve dentro del PDF.
@@ -3156,10 +3204,13 @@ async function enviarPorWhatsAppApiConjunto(recibos, tipo = 'recibo') {
     .join(' + ');
 
   try {
+    // El desglose (una línea por hermano, con su propio importe) ya estaba
+    // perfecto — no se toca. Lo que cambia es solo el "Recibí de:" de
+    // arriba, que iba al padre/tutor y ahora va a los propios hijos.
     const desglose = recibos.map(r => `${r.alumnos?.nombre || ''} — ${r.concepto} — ${formatoImporte(r.importe)}€`);
     const bytes = await generarReciboPdf({
       fechaEmision: fmtFecha(primero.fecha_emision),
-      recibiDe: destinatario,
+      recibiDe: nombresPdf,
       cantidadLetras: importeALetras(total),
       desglose,
       totalCifra: formatoImporte(total),
@@ -3358,7 +3409,7 @@ function modalReciboBulk() {
         if (importe <= 0) { mal++; continue; }
         const generados = await crearRecibos(a, {
           concepto, importe,
-          recibiDe: a.facturacion_nombre || a.tutor_nombre || a.nombre,
+          recibiDe: nombreAlumnoParaPdf(a),
           fechaEmision: hoyDDMMAAAA(),
           periodos: periodosMarcados(cont, 'b')
         });
@@ -3383,7 +3434,7 @@ async function regenerarPdf(r) {
   }
   const bytes = await generarReciboPdf({
     fechaEmision: (r.fecha_emision || '').split('-').reverse().join('/'),
-    recibiDe: destinatarioDeRecibo(r),
+    recibiDe: nombreParaReciboPdf(r),
     cantidadLetras: letras,
     concepto: r.concepto,
     desglose: desgloseDeRecibo(r.concepto, r.importe, r.importe_matricula) || undefined,
@@ -3855,7 +3906,7 @@ async function descargarPdfsMes(claveM, lista, boton) {
       }
       const bytes = await generarReciboPdf({
         fechaEmision: (r.fecha_emision || '').split('-').reverse().join('/'),
-        recibiDe: destinatarioDeRecibo(r),
+        recibiDe: nombreParaReciboPdf(r),
         cantidadLetras: letras,
         concepto: r.concepto,
         desglose: desgloseDeRecibo(r.concepto, r.importe, r.importe_matricula) || undefined,
@@ -4162,7 +4213,10 @@ function filaAsignaturaSuelta(a) {
   return `<tr>
     <td><span class="chip-asig" style="background:${c.fondo}; border-left:3px solid ${c.borde}">${e(a.nombre)}</span></td>
     <td><small class="ayuda">${nUsan ? `${nUsan} profesor${nUsan === 1 ? '' : 'es'}` : 'sin profesores todavía'}</small></td>
-    <td class="acciones"><button class="btn chico liso peligro" data-borrar-asig-suelta="${a.id}">Borrar</button></td>
+    <td class="acciones">
+      <button class="btn chico liso" data-editar-asig-suelta="${a.id}">Editar</button>
+      <button class="btn chico liso peligro" data-borrar-asig-suelta="${a.id}">Borrar</button>
+    </td>
   </tr>`;
 }
 function listaAsignaturasSueltasHtml() {
@@ -4173,6 +4227,8 @@ function listaAsignaturasSueltasHtml() {
   </table>`;
 }
 function activarBorrarAsignaturaSuelta() {
+  document.querySelectorAll('[data-editar-asig-suelta]').forEach(b => b.onclick = () =>
+    modalEditarAsignatura(S.asignaturas.find(a => a.id === Number(b.dataset.editarAsigSuelta))));
   document.querySelectorAll('[data-borrar-asig-suelta]').forEach(b => b.onclick = async () => {
     const id = Number(b.dataset.borrarAsigSuelta);
     const asig = S.asignaturas.find(a => a.id === id);
@@ -4192,6 +4248,49 @@ function activarBorrarAsignaturaSuelta() {
     activarBorrarAsignaturaSuelta();
     avisar(`Asignatura "${asig?.nombre || ''}" borrada.`);
   });
+}
+
+// Editar nombre y/o color de una asignatura ya existente — hasta ahora
+// solo se podía elegir al crearla; si se ponía mal el nombre o el color no
+// tocaba de gustar, la única forma de arreglarlo era borrarla y crearla de
+// nuevo (perdiendo el "la dan X profesores" — de hecho no se podía borrar
+// si algún profesor ya la tenía marcada). Cambia el nombre/color en
+// `asignaturas` directamente: los chips en cualquier otro sitio de la app
+// (matrículas, lista de profesores…) lo recogen solos en el próximo
+// repintado, sin nada más que tocar.
+function modalEditarAsignatura(asig) {
+  abrirModal(`
+  <h2>Editar asignatura</h2>
+  <div class="fila-horario">
+    <input id="ea-nombre" value="${e(asig.nombre)}" style="flex:1">
+    <label class="color-swatch color-personalizado" title="Color de la asignatura">
+      🎨<input type="color" id="ea-color" value="${asig.color || COLORES_CLASE[0]}">
+    </label>
+  </div>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+    <button class="btn primario" id="ea-guardar">Guardar</button>
+  </div>
+  <p id="m-msg" class="error"></p>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('ea-guardar').onclick = async () => {
+    const nombre = document.getElementById('ea-nombre').value.trim();
+    const color = document.getElementById('ea-color').value;
+    const $msg = document.getElementById('m-msg');
+    if (!nombre) { $msg.textContent = 'Escribe un nombre.'; return; }
+    const { data, error } = await S.sb.from('asignaturas').update({ nombre, color }).eq('id', asig.id).select('*').single();
+    if (error) {
+      $msg.textContent = error.code === '23505' || /duplicate/.test(error.message)
+        ? 'Ya existe una asignatura con ese nombre.'
+        : 'Error al guardar: ' + error.message;
+      return;
+    }
+    const i = S.asignaturas.findIndex(a => a.id === asig.id);
+    if (i !== -1) S.asignaturas[i] = data;
+    cerrarModal();
+    renderAsignaturasSueltas();
+    avisar('Asignatura actualizada.');
+  };
 }
 function renderAsignaturasSueltas() {
   const nBajas = S.profesores.filter(p => p.estado === 'baja').length;

@@ -1949,3 +1949,115 @@ alter table public.alumnos
 -- el radio (leído del DOM) solo cuando de verdad hay elección. De paso,
 -- cuando sí hay radio, el que sale premarcado ahora es el de la pestaña
 -- desde la que se abrió (filtroCuenta) en vez de Efectivo fijo siempre.
+
+-- ============================================================
+-- Bug: borrar un profesor dejaba el email bloqueado para siempre (08/09/2026)
+-- ============================================================
+
+-- Reportado con Carol: se creó de prueba, se dio de baja, se borró — y
+-- luego no se podía volver a crear un profesor con su email
+-- (carol@curiosamente.es), "ya existe un usuario con ese email". Causa:
+-- borrar_profesor() solo hacía `delete from public.profesores`, pero la
+-- cuenta de acceso real (auth.users/auth.identities, donde vive el email)
+-- se quedaba huérfana para siempre — crear_profesor() comprueba
+-- `exists (select 1 from auth.users where email = ...)` antes de dejar
+-- crear a alguien, así que ese email quedaba bloqueado de por vida.
+--
+-- Arreglado: borrar_profesor() ahora hace `delete from auth.users where
+-- id = p_profesor` en vez de tocar directamente `public.profesores` —
+-- profesores.id referencia auth.users(id) con ON DELETE CASCADE, así que
+-- se limpia todo junto (profesores, y auth.identities por su propio
+-- cascade) sin tener que borrar cada tabla a mano. Sin cambio de firma ni
+-- de permisos (sigue solo-admin, sigue sin poder borrarse a uno mismo).
+--
+-- Se limpió también la cuenta huérfana real de Carol que ya existía
+-- (auth.users, id 01b8e53c-...) para poder volver a darla de alta. A los
+-- alumnos esto no les puede pasar: no tienen cuenta de acceso ni
+-- restricción de email único (comprobado, alumnos.email no tiene
+-- constraint UNIQUE), así que borrar_alumno() no necesita el mismo arreglo.
+-- Probado en vivo: crear un profesor de prueba → dar de baja → borrar →
+-- volver a crear con el mismo email, sin error.
+
+-- ============================================================
+-- Botón "Editar" en la pestaña Asignaturas (08/09/2026)
+-- ============================================================
+
+-- Pedido por el admin: hasta ahora, si el nombre o el color de una
+-- asignatura quedaban mal puestos, la única forma de arreglarlo era
+-- borrarla y crearla de nuevo — y ni eso, si algún profesor ya la tenía
+-- marcada (el borrado está bloqueado por FK en ese caso). modalEditarAsig
+-- natura(asig) — modal sencillo, nombre + el mismo swatch de color de
+-- siempre — hace un update directo sobre `asignaturas` (nombre, color).
+-- Sin cambio de esquema ni de RLS (asignaturas_admin ya lo permitía). Los
+-- chips en cualquier otro sitio de la app (matrículas, lista de
+-- profesores…) recogen el cambio solos en el próximo repintado, sin nada
+-- más que tocar. Probado en vivo con una asignatura de prueba: cambia
+-- nombre y color, y se refleja correctamente en la lista.
+
+-- ============================================================
+-- El PDF del recibo va a nombre del alumno, no del padre/tutor (08/09/2026)
+-- ============================================================
+
+-- Pedido por el admin: el "Recibí de:" del PDF (y del justificante de
+-- pago, que usa el mismo generador con pagado=true) tiene que ir SIEMPRE a
+-- nombre del alumno, aunque sea menor de edad y tenga tutor puesto — el
+-- padre/tutor solo es a quien se avisa por WhatsApp, no a quien se le hace
+-- el recibo. Antes se mezclaban las dos cosas: destinatarioDeRecibo()
+-- (pensada para el mensaje) se usaba también para rellenar el PDF en la
+-- mayoría de sitios, así que el recibo de un menor salía a nombre de su
+-- madre/padre/tutor.
+--
+-- Separado en dos funciones con responsabilidades distintas — el mensaje
+-- de WhatsApp NO cambia (destinatarioDeRecibo, tal cual estaba):
+--  - nombreAlumnoParaPdf(alumno) / nombreParaReciboPdf(recibo): el propio
+--    alumno.nombre siempre — con una única excepción intencionada, se
+--    respeta "Facturar a" (facturacion_nombre) si el admin lo puso a mano
+--    en la ficha (ej. una empresa pagando), porque es una elección suya
+--    explícita para ese caso, distinta del arrastre automático al tutor
+--    que aquí se ha quitado.
+--  - nombresEnLista(nombres): para el recibo conjunto de hermanos, une los
+--    nombres de TODOS los hijos incluidos ("Ana, Carlos y Pedro") en vez
+--    de poner al padre/tutor de la familia. El desglose por hermano (con
+--    el importe de cada uno) ya estaba perfecto y no se ha tocado, es
+--    solo el "Recibí de:" el que cambia.
+--
+-- Sitios corregidos (los 5 que llaman a generarReciboPdf): crearRecibo()
+-- (alta manual, incluida la del formulario "Recibí de" editable, que
+-- ahora arranca en el alumno en vez de en el tutor), crearRecibos() (ya no
+-- sustituye por el nombre de la madre/el padre en el recibo de padres
+-- separados), modalReciboBulk() (recibos en lote), regenerarPdf() (al
+-- reabrir un PDF perdido), descargarPdfsMes() (descarga en carpeta del
+-- mes), enviarPorWhatsAppApi() y enviarPorWhatsAppApiConjunto() (individual
+-- y hermanos, por la API oficial — en las dos, el PDF usa el nombre nuevo
+-- pero el "nombre" que lleva la plantilla del mensaje sigue usando
+-- destinatarioDeRecibo() sin tocar).
+--
+-- Probado en vivo con datos sintéticos (sin tocar ningún alumno real): menor
+-- con tutor (PDF→alumno, mensaje→tutor), "Facturar a" puesto a mano (PDF y
+-- mensaje→esa empresa, sin cambios ahí), mayor de edad sin tutor (los dos→
+-- el propio alumno), padres separados con recibo del padre (PDF→alumno,
+-- mensaje→padre), y 3 hermanos combinados (PDF→"Ana, Carlos y Pedro",
+-- mensaje→tutor de la familia) — los 5 casos salieron correctos.
+
+-- ============================================================
+-- Registro silencioso de versión por profesor (08/09/2026)
+-- ============================================================
+
+-- Pedido explícitamente como algo discreto, para llevar el control de
+-- quién tiene la app instalada y si ya le llegó una versión recién
+-- publicada, sin que se note nada en la interfaz para nadie (ni siquiera
+-- para el resto de admins). Tabla nueva `profesor_app_estado`
+-- (profesor_id, version, plataforma, ultima_conexion) — cada instalación
+-- escribe SOLO su propia fila (RLS: profesor_id = auth.uid(), en insert y
+-- en update), y solo puede LEER la tabla entera quien tenga
+-- es_desarrollador=true (RLS: is_desarrollador(), no is_admin() — así
+-- Judith/Dani, admins normales, tampoco la ven).
+--
+-- main.js: nuevo IPC 'app:version' → { version: app.getVersion(),
+-- plataforma: process.platform } (preload.js: window.api.getAppVersion()).
+-- app.js: registrarEstadoApp(), llamada sin esperar (fire-and-forget,
+-- nunca avisa ni interrumpe si falla) desde cargarTodo() justo tras
+-- confirmar que la sesión es válida — así se actualiza en cada inicio de
+-- sesión y en cada refresco de datos, sin ningún botón ni pantalla nueva.
+-- Probado en vivo: tras loguear, aparece la fila con versión y plataforma
+-- correctas, sin ningún aviso ni rastro visible en la app.
