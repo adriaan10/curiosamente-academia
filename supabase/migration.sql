@@ -2061,3 +2061,40 @@ alter table public.alumnos
 -- sesión y en cada refresco de datos, sin ningún botón ni pantalla nueva.
 -- Probado en vivo: tras loguear, aparece la fila con versión y plataforma
 -- correctas, sin ningún aviso ni rastro visible en la app.
+--
+-- REVERTIDO el mismo día: el propio Adrián señaló el hueco real — solo
+-- reportaba tras iniciar sesión, así que si alguien tenía la app abierta
+-- sin loguear (o sin volver a entrar) no se sabía nada de verdad "en
+-- tiempo real". La única forma de cerrar ese hueco es una Edge Function
+-- sin verificación de sesión (como enviar-whatsapp) que acepte el aviso
+-- aunque no haya login — pero eso abre la puerta, en teoría, a que
+-- cualquiera con la app instalada pueda mandar un aviso falso (sin login
+-- real no hay manera de comprobar quién lo manda de verdad). Puesto a
+-- elegir, se prefirió no tener la función a medias/sin uso: se quitó todo
+-- (tabla `profesor_app_estado` con sus políticas — drop table cascade se
+-- llevó las policies solas —, el IPC 'app:version' de main.js/preload.js,
+-- y registrarEstadoApp() de app.js). Si en el futuro se quiere retomar,
+-- la Edge Function sin verificar sesión es el camino a seguir.
+
+-- ============================================================
+-- Colegio del alumno + orden alfabético por apellido (08/09/2026)
+-- ============================================================
+
+-- alumnos.colegio text, nullable — campo nuevo en la ficha, puramente
+-- informativo (a qué colegio va), sin ninguna lógica enganchada (no entra
+-- en recibos, filtros ni nada más). app.js: input junto a "Apellidos" en
+-- modalAlumno(), guardado tal cual en guardarFicha().
+--
+-- Aparte, cargarAlumnos() pasa de `.order('nombre')` (que en la práctica
+-- ordenaba por NOMBRE de pila, porque `nombre` guarda "Nombre Apellidos"
+-- junto) a `.order('apellidos').order('nombre')` — pedido explícitamente
+-- para tener a los hermanos (mismo apellido) juntos y a la vista en el
+-- listado. Los dos sitios que reordenaban en memoria por nombre de pila
+-- (el detalle de una clase, y "Recibos por alumno") se alinean igual con
+-- el mismo criterio, vía compararAlumnosPorApellido() — para que el orden
+-- sea consistente en toda la app, no solo en la pestaña Alumnos.
+--
+-- Probado en vivo con datos de prueba (dos "Alonso" + un "Zamora", creados
+-- y borrados después): el listado real de alumnos ya sale ordenado por
+-- apellido, con los dos Alonso juntos y en orden entre ellos; el campo
+-- Colegio se guarda y se recupera bien al reabrir la ficha.

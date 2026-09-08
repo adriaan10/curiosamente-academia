@@ -77,21 +77,6 @@ async function init() {
   } catch { /* expulsado por baja: ya se muestra el login */ }
 }
 
-// Registro silencioso de qué versión/plataforma tiene cada uno — no se ve
-// en ningún sitio de la app, es solo para poder comprobar desde fuera
-// (Supabase) quién tiene la app instalada y si ya le llegó una
-// actualización recién publicada. Fire-and-forget a propósito: si falla
-// (sin conexión, lo que sea) no debe interrumpir el login de nadie ni
-// avisar de nada.
-async function registrarEstadoApp() {
-  try {
-    const { version, plataforma } = await window.api.getAppVersion();
-    await S.sb.from('profesor_app_estado').upsert({
-      profesor_id: S.profesor.id, version, plataforma, ultima_conexion: new Date().toISOString()
-    });
-  } catch { /* silencioso a propósito */ }
-}
-
 async function cargarTodo() {
   const uid = S.session.user.id;
   const [prof, profs, asigs, profAsig] = await Promise.all([
@@ -126,7 +111,6 @@ async function cargarTodo() {
     }, 0);
     throw new Error('acceso desactivado');
   }
-  registrarEstadoApp();
   if (profs.error) avisar('Error cargando profesores: ' + profs.error.message, true);
   else S.profesores = profs.data || [];
   if (asigs.error) avisar('Error cargando asignaturas: ' + asigs.error.message, true);
@@ -404,11 +388,21 @@ async function backupAutomatico() {
 }
 
 async function cargarAlumnos() {
+  // Por apellido (con el nombre completo como segundo criterio, para
+  // ordenar entre sí a los hermanos que comparten apellido) — así se ven
+  // los hermanos juntos y controlados de un vistazo en el listado.
   const { data, error } = await S.sb.from('alumnos')
     .select('*, matriculas(*, asignaturas(nombre, color))')
+    .order('apellidos', { nullsFirst: false })
     .order('nombre');
   if (error) return avisar('Error cargando alumnos: ' + error.message, true);
   S.alumnos = data || [];
+}
+
+// Mismo criterio que la carga (apellido, luego nombre completo como
+// desempate) para los listados que se ordenan aparte en memoria.
+function compararAlumnosPorApellido(a, b) {
+  return (a.apellidos || '').localeCompare(b.apellidos || '') || (a.nombre || '').localeCompare(b.nombre || '');
 }
 
 async function cargarRecibos() {
@@ -1322,6 +1316,8 @@ function modalAlumno(alumno) {
     <label>Nombre *<input id="a-nombre" value="${e(nombreForm.nombre)}"></label>
     <label>Apellidos <small>(para detectar hermanos automáticamente)</small>
       <input id="a-apellidos" value="${e(nombreForm.apellidos)}" placeholder="ej. García López"></label>
+    <label>Colegio <small>(solo informativo)</small>
+      <input id="a-colegio" value="${e(a.colegio || '')}" placeholder="ej. CEIP Cervantes"></label>
     <label>Teléfono / WhatsApp (si es menor, el del padre/madre)
       <input id="a-tel" value="${e(formatearTelefono(a.telefono || a.tutor_telefono))}" inputmode="numeric" maxlength="11" placeholder="612 345 678"></label>
     <label>Padre / madre / tutor (nombre y apellidos)
@@ -1503,6 +1499,7 @@ function modalAlumno(alumno) {
       // recibos, la búsqueda, etc. se sigue guardando junto, como siempre.
       nombre: [nombreSolo, apellidos].filter(Boolean).join(' '),
       apellidos,
+      colegio: v('a-colegio') || null,
       telefono: quitarEspacios(v('a-tel')) || null,
       tutor_nombre: v('a-tutor') || null,
       fecha_alta: v('a-alta') || null,
@@ -2082,7 +2079,7 @@ function modalDetalleClase(clase, fechaCtx) {
   const alumnos = (clase.clase_alumnos || [])
     .map(ca => S.alumnos.find(a => a.id === ca.alumno_id))
     .filter(Boolean)
-    .sort((a, b) => a.nombre.localeCompare(b.nombre));
+    .sort(compararAlumnosPorApellido);
   const hoyIso = fechaISO(new Date());
   const proximasExc = S.excepciones.filter(x => x.clase_id === clase.id && x.fecha >= hoyIso);
   const anulaciones = proximasExc.filter(x => x.tipo === 'anulada');
@@ -3834,7 +3831,7 @@ function renderRecibosPorAlumno() {
     .filter(a => a.estado === 'activo')
     .filter(a => !profId || matriculasDeProfesor(a, profId).length > 0)
     .filter(a => !t || (a.nombre || '').toLowerCase().includes(t))
-    .sort((a, b) => a.nombre.localeCompare(b.nombre));
+    .sort(compararAlumnosPorApellido);
 
   const filas = alumnos.map(a => {
     const recibo = S.recibos.find(r => r.alumno_id === a.id && claveMes(r.fecha_emision) === S.mesRecibos);

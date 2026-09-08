@@ -269,5 +269,3 @@ ipcMain.on('app:restart', () => {
   app.relaunch();
   app.exit(0);
 });
-
-ipcMain.handle('app:version', () => ({ version: app.getVersion(), plataforma: process.platform }));
