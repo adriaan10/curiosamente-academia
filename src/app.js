@@ -4574,6 +4574,27 @@ function modalEditarProfesor(prof, soloAsignaturas = false) {
       document.getElementById('m-msg').textContent = 'Elige al menos una asignatura.';
       return;
     }
+    // Este modal carga las asignaturas marcadas UNA VEZ al abrirse y no se
+    // entera si alguien más las cambia mientras tanto (dos admins editando
+    // casi a la vez, o el mismo profesor en dos ventanas): Guardar borraba
+    // y volvía a escribir todo según lo que hubiera en PANTALLA, así que el
+    // segundo que guardaba pisaba sin avisar lo que el primero acababa de
+    // guardar de verdad. Bug real, reportado en vivo (le pasó a Dani).
+    // Arreglado con una comprobación de "sigue siendo lo mismo que había al
+    // abrir": si no, no se guarda nada y se avisa a reabrir el modal.
+    const { data: actuales, error: errActuales } = await S.sb.from('profesor_asignaturas')
+      .select('asignatura_id').eq('profesor_id', prof.id);
+    if (errActuales) {
+      document.getElementById('m-msg').textContent = 'Error: ' + errActuales.message;
+      return;
+    }
+    const idsActuales = new Set((actuales || []).map(x => x.asignatura_id));
+    const cambiadoPorOtro = idsActuales.size !== marcadas.size || [...idsActuales].some(id => !marcadas.has(id));
+    if (cambiadoPorOtro) {
+      document.getElementById('m-msg').textContent =
+        'Alguien más ha cambiado las asignaturas de este profesor mientras estaba abierto. Cierra y vuelve a abrir para verlas actualizadas y editarlas de nuevo.';
+      return;
+    }
     await S.sb.from('profesor_asignaturas').delete().eq('profesor_id', prof.id);
     const { error } = await S.sb.from('profesor_asignaturas')
       .insert(asigs.map(id => ({ profesor_id: prof.id, asignatura_id: id })));

@@ -2098,3 +2098,41 @@ alter table public.alumnos
 -- y borrados después): el listado real de alumnos ya sale ordenado por
 -- apellido, con los dos Alonso juntos y en orden entre ellos; el campo
 -- Colegio se guarda y se recupera bien al reabrir la ficha.
+
+-- ============================================================
+-- Bug: dos ediciones de asignaturas a la vez se pisaban (09/09/2026)
+-- ============================================================
+
+-- Reportado en vivo: Dani (recién hecho admin) intentó ponerse asignaturas
+-- de matemáticas y, al guardar, no se quedaron — seguía con 0. Causa:
+-- modalEditarProfesor()/bloqueAsignaturas() carga las casillas marcadas
+-- UNA VEZ al abrir el modal, y "Guardar" siempre borra TODAS las filas de
+-- profesor_asignaturas de ese profesor y vuelve a escribir lo que hay en
+-- pantalla en ese momento — así que si dos ediciones se solapan en el
+-- tiempo (dos admins, o el mismo profesor en dos ventanas), la que guarda
+-- en segundo lugar pisa sin avisar lo que la primera acababa de guardar de
+-- verdad, con la foto vieja de cuando abrió su propio modal. Sin ningún
+-- error visible — las dos veces "funciona" (ninguna llamada falla), solo
+-- que el resultado final es el de quien guardó el último.
+--
+-- Arreglado con control de concurrencia optimista: antes de borrar/
+-- reescribir, p-guardar vuelve a pedir a Supabase qué hay AHORA MISMO para
+-- ese profesor y lo compara con `marcadas` (la foto que se capturó al
+-- abrir el modal). Si no coincide exactamente, no se guarda nada — se
+-- avisa con un mensaje claro a cerrar y volver a abrir el modal para
+-- editar sobre los datos actuales. Antes ninguno de los dos guardados
+-- fallaba nunca; ahora el que tiene la foto vieja se bloquea explícitamente
+-- en vez de pisar al otro en silencio.
+--
+-- Probado en vivo simulando el caso exacto: modal de un profesor abierto
+-- con una asignatura marcada, otro admin le cambia la asignatura por SQL
+-- mientras sigue abierto, y al pulsar Guardar (sin haber tocado nada) sale
+-- el aviso y NO se pisa el cambio del otro admin — se comprobó en la base
+-- de datos que el dato ajeno sobrevive intacto. Un guardado normal
+-- (reabriendo el modal fresco) se probó aparte y sigue funcionando igual
+-- que siempre. Datos de prueba limpiados después.
+--
+-- Aparte, se le devolvieron a Dani las 8 asignaturas de matemáticas que
+-- ahora mismo también tiene Carol (compartidas entre los dos — la app ya
+-- permite que una asignatura la den varios profesores a la vez), para que
+-- a ambos les vuelvan a aparecer sus 13 alumnos comunes.
