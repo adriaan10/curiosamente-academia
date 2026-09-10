@@ -2136,3 +2136,94 @@ alter table public.alumnos
 -- ahora mismo también tiene Carol (compartidas entre los dos — la app ya
 -- permite que una asignatura la den varios profesores a la vez), para que
 -- a ambos les vuelvan a aparecer sus 13 alumnos comunes.
+--
+-- Se quitaron después todas las de Carol a petición del admin (eran de
+-- Dani) — Carol se quedó sin ninguna asignatura ni alumno.
+
+-- ============================================================
+-- Bug: al reabrir una ficha, el filtro de "Profesor" salía mal (09/09/2026)
+-- ============================================================
+
+-- Reportado en vivo: al dar de alta a un alumno con Carol + una asignatura
+-- de matemáticas, y luego volver a la ficha a editarla, no salía Carol —
+-- salía "Todas las asignaturas" (o, en otros casos, hasta otro profesor
+-- distinto). Causa: el filtro de "Profesor" al lado de cada matrícula
+-- (añadido el 08/09/2026) nunca se guardaba en la base de datos a
+-- propósito — `matriculas` no tenía profesor_id — así que cada vez que se
+-- reabría la ficha, la app tenía que ADIVINAR quién se había elegido
+-- mirando quién da esa asignatura AHORA MISMO (profesorParaAsignatura()).
+-- Mientras cada asignatura la diera un único profesor, acertaba siempre —
+-- pero desde que Dani y Carol comparten esas 8 asignaturas de
+-- matemáticas, la adivinanza ya no puede distinguir entre los dos y sale
+-- ambigua ("Todas"), o incluso puede acertar con un profesor equivocado si
+-- la asignatura cambió de manos entre medias.
+--
+-- Arreglado guardando de verdad la elección en vez de adivinarla:
+-- matriculas.profesor_id uuid, nullable, referencia a profesores(id) — sin
+-- ambigüedad de embeds en PostgREST porque ninguna consulta actual hace
+-- `matriculas(*, profesores(...))` (solo se comprobó explícitamente antes
+-- de añadir la columna, ver el mismo problema ya documentado con
+-- cambios_horario/reactivaciones_alumno/bajas_asignatura el 07/09/2026).
+-- app.js: guardarFicha() guarda profesor_id: m._profSel al guardar cada
+-- matrícula; pintarMatriculas() usa m.profesor_id (si lo hay) en vez de
+-- profesorParaAsignatura() al reabrir — la adivinanza por si acaso solo
+-- se usa ya para matrículas antiguas, de antes de este cambio, que tienen
+-- profesor_id todavía a null.
+--
+-- Probado en vivo con un alumno de prueba: Carol + "Mate + FQ 1BAT"
+-- (asignatura que también tiene Dani) → se guarda profesor_id de Carol en
+-- la base de datos, y al reabrir la ficha sale "Carol" preseleccionada en
+-- vez de "Todas las asignaturas". Alumno de prueba borrado después.
+
+-- ============================================================
+-- Revisión completa de "compartir asignaturas": recibos (09/09/2026)
+-- ============================================================
+
+-- Pedido por el admin tras el lío de Dani/Carol: revisar a fondo qué más
+-- podía fallar ahora que una asignatura puede tener más de un profesor a
+-- la vez. Se encontraron y arreglaron dos cosas más, las dos en la
+-- generación de recibos (lo más delicado, porque mueve dinero real):
+--
+-- 1) "Recibos del mes (en lote)" (modalReciboBulk) no comprobaba si un
+--    alumno ya tenía recibo de ese mes antes de crear uno nuevo — a
+--    diferencia de "altas fuera de fecha", que sí lo hacía desde antes.
+--    Con dos profesores compartiendo asignatura y por tanto compartiendo
+--    alumnos (ej. Dani y Carol con sus 13 comunes), si los dos generaban
+--    "en lote" el mismo mes, se duplicaba el recibo del alumno — cobro
+--    doble real. Mismo problema, más pequeño, en el "Generar recibo PDF"
+--    manual de la ficha (modalRecibo), aunque ahí hace falta que dos
+--    personas decidan generarlo a mano casi a la vez.
+--
+--    Arreglados los dos con el mismo criterio que ya usaba "altas fuera de
+--    fecha": antes de crear, se comprueba si ya hay un recibo con alguno
+--    de los meses marcados para ese alumno — si lo hay, no se crea nada
+--    (en el lote se cuenta como "repetido" y se sigue con el resto; en el
+--    manual se avisa y no se genera). Probado en vivo con un alumno de
+--    prueba: con un recibo ya existente del mes actual, "Generar recibo"
+--    se bloquea con el aviso y no duplica nada en la base de datos; para
+--    un mes distinto (sin recibo previo) genera con normalidad. Datos de
+--    prueba borrados después.
+--
+-- 2) Generar recibos (individual y en lote) pasa a ser SOLO para
+--    administradores — pedido explícitamente. Antes cualquier profesor
+--    podía generar los suyos. Cierra además, de raíz, el hueco de que un
+--    profesor con 0 asignaturas asignadas (que por diseño "ve todas", para
+--    no dejarlo con la pantalla vacía al entrar por primera vez — le pasó
+--    a Carol un rato) pudiera generar recibos en lote de TODA la academia
+--    por error, no solo de sus alumnos: ahora ni siquiera puede llegar a
+--    esa pantalla.
+--
+--    app.js: los botones "Recibo" (fila de alumno) y "Recibos del mes"
+--    (cabecera de Alumnos) solo se pintan si esAdmin; modalRecibo() y
+--    modalReciboBulk() llevan además su propia comprobación
+--    (`if (!S.profesor?.es_admin) return avisar(...)`) como segunda
+--    barrera, por si se llegara a ellas desde otro sitio en el futuro. Los
+--    demás puntos de generación ya eran solo-admin de antes (el aviso de
+--    "altas fuera de fecha" en Inicio, y "Generar recibo" dentro de
+--    Recibos > Ver por alumno, ambos gateados por esAdmin desde que se
+--    crearon). VER (historial en la ficha, pestaña Recibos con Pendientes/
+--    Cobrados/Exportar CSV) sigue igual para todos, sin cambios — solo se
+--    quitó la capacidad de generar. Probado en vivo suplantando a un
+--    profesor no-admin real: los botones desaparecen, y llamar a las dos
+--    funciones directamente también se bloquea con el aviso; restaurando
+--    la identidad de admin, los botones vuelven a aparecer con normalidad.

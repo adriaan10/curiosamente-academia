@@ -1194,7 +1194,7 @@ function renderAlumnos() {
     <span class="flex1"></span>
     <button class="btn" id="btn-csv">Exportar CSV</button>
     <button class="btn" id="btn-modificaciones">🔧 Modificación horas alumnos</button>
-    <button class="btn" id="btn-bulk">Recibos del mes</button>
+    ${esAdmin ? `<button class="btn" id="btn-bulk">Recibos del mes</button>` : ''}
     <button class="btn primario" id="btn-nuevo">+ Nuevo alumno</button>
   </div>
   ${lista.length === 0 ? `<div class="vacio">No hay alumnos que coincidan.<br>
@@ -1211,7 +1211,7 @@ function renderAlumnos() {
       <td>${e(telefonosParaLista(a))}</td>
       <td><span class="chip ${a.estado}">${a.estado}</span></td>
       <td class="acciones">
-        <button class="btn chico" data-recibo="${a.id}">Recibo</button>
+        ${esAdmin ? `<button class="btn chico" data-recibo="${a.id}">Recibo</button>` : ''}
         <button class="btn chico liso" data-editar="${a.id}">Editar</button>
         ${esAdmin && a.estado === 'baja'
           ? `<button class="btn chico liso peligro" data-borrar-alumno="${a.id}" title="Borrar ficha definitivamente (no afecta a sus recibos ya emitidos)">Borrar</button>`
@@ -1231,7 +1231,8 @@ function renderAlumnos() {
   if (ft) ft.onchange = (ev) => { S.filtros.verTodos = ev.target.checked; rerender(); };
   document.getElementById('btn-nuevo').onclick = () => modalAlumno(null);
   document.getElementById('btn-modificaciones').onclick = () => modalModificaciones();
-  document.getElementById('btn-bulk').onclick = () => modalReciboBulk();
+  const btnBulk = document.getElementById('btn-bulk');
+  if (btnBulk) btnBulk.onclick = () => modalReciboBulk();
   document.getElementById('btn-csv').onclick = exportarAlumnosCsv;
   document.querySelectorAll('[data-editar]').forEach(b =>
     b.onclick = () => modalAlumno(S.alumnos.find(a => a.id === b.dataset.editar)));
@@ -1392,12 +1393,16 @@ function modalAlumno(alumno) {
     document.getElementById('a-matriculas').innerHTML = ms.map((m, i) => {
       // Filtro de "Profesor" (para cualquiera, no solo admin — quien da de
       // alta a un alumno puede no ser quien le dará todas sus asignaturas):
-      // no se guarda en la matrícula, solo acorta la lista de asignaturas a
-      // las de ese profesor, así cada uno organiza las suyas sin depender de
-      // un descuento por número de asignaturas (ya no existe). Se
-      // preselecciona solo si esa asignatura la da un único profesor; si no
-      // ("Todas las asignaturas"), se ven todas.
-      if (m._profSel === undefined) m._profSel = profesorParaAsignatura(m.asignatura_id);
+      // sirve para acortar la lista de asignaturas a las de ese profesor,
+      // así cada uno organiza las suyas sin depender de un descuento por
+      // número de asignaturas (ya no existe). Al reabrir una matrícula ya
+      // guardada, se usa quien se eligió de verdad (m.profesor_id) en vez
+      // de adivinarlo — antes, si dos profesores acababan dando la misma
+      // asignatura (ej. Dani y Carol), ya no se podía adivinar y salía
+      // "Todas las asignaturas" sin más. Solo para matrículas antiguas de
+      // antes de este cambio (profesor_id aún null) se recurre a adivinar
+      // por si esa asignatura la da un único profesor.
+      if (m._profSel === undefined) m._profSel = m.profesor_id || profesorParaAsignatura(m.asignatura_id);
       return `
       <div class="fila-horario">
         <select data-m-prof="${i}">
@@ -1558,6 +1563,12 @@ function modalAlumno(alumno) {
       const datos = {
         alumno_id: alumnoId,
         asignatura_id: Number(m.asignatura_id),
+        // Quién se eligió en el filtro de "Profesor" de esta fila, para que
+        // al reabrir la ficha se sepa de verdad quién era (antes había que
+        // adivinarlo cada vez mirando quién da esa asignatura AHORA MISMO —
+        // si dos profesores la comparten, ya no se puede adivinar y salía
+        // "Todas las asignaturas" o incluso el profesor equivocado).
+        profesor_id: m._profSel || null,
         tarifa: tarifaNueva,
         tipo_tarifa: m.tipo_tarifa,
         horas_semana: m.horas_semana ? Number(m.horas_semana) : null
@@ -2790,6 +2801,11 @@ function periodosMarcados(cont, idPrefijo) {
 }
 
 function modalRecibo(alumno) {
+  // Generar recibos es cosa de administradores — un profesor normal puede
+  // ver el historial (arriba, en la ficha), pero no crear ninguno nuevo.
+  // El botón que llega aquí ya está oculto para ellos; esto es solo la
+  // segunda barrera, por si se llega desde otro sitio.
+  if (!S.profesor?.es_admin) return avisar('Solo un administrador puede generar recibos.', true);
   const todasMats = alumno.matriculas || [];
   const idsMias = new Set(misMatriculas(alumno).map(m => m.id));
   if (!todasMats.length) return avisar('Este alumno no tiene ninguna asignatura apuntada.', true);
@@ -2904,11 +2920,24 @@ function modalRecibo(alumno) {
     const btn = document.getElementById('r-generar');
     btn.disabled = true; btn.textContent = 'Generando…';
     try {
+      const periodos = periodosMarcados(cont, 'r');
+      // Mismo control que en "en lote" y "altas fuera de fecha": si ya hay
+      // un recibo de alguno de estos meses (lo generó otro profesor que
+      // comparte alguna asignatura de este alumno, justo antes de que
+      // llegara este clic), no se duplica.
+      if (periodos.length) {
+        const { data: existentes } = await S.sb.from('recibos').select('periodos').eq('alumno_id', alumno.id);
+        if ((existentes || []).some(r => (r.periodos || []).some(p => periodos.includes(p)))) {
+          btn.disabled = false; btn.textContent = 'Generar recibo PDF';
+          document.getElementById('m-msg').textContent = 'Ya hay un recibo de ese mes para este alumno (puede que lo generara otro profesor). Revisa su historial antes de generar otro.';
+          return;
+        }
+      }
       const recibos = await crearRecibos(alumno, {
         concepto, importe,
         recibiDe: document.getElementById('r-recibide').value.trim() || alumno.nombre,
         fechaEmision: document.getElementById('r-fecha').value.trim() || hoyDDMMAAAA(),
-        periodos: periodosMarcados(cont, 'r'),
+        periodos,
         importeMatricula: $matriculaChk.checked ? (Number($matriculaImporte.value) || 0) : 0
       });
       cerrarModal();
@@ -3368,6 +3397,12 @@ function recibosHermanosDe(r) {
 }
 
 function modalReciboBulk() {
+  // Solo administradores — mismo motivo que modalRecibo(). Cierra además el
+  // hueco de que un profesor con 0 asignaturas asignadas (que por diseño
+  // "ve todas", para no dejarlo con la pantalla vacía nada más entrar) se
+  // encontrara generando recibos en lote de TODA la academia por error, no
+  // solo de sus alumnos — ya no puede llegar aquí en absoluto.
+  if (!S.profesor?.es_admin) return avisar('Solo un administrador puede generar recibos.', true);
   const candidatos = alumnosFiltrados().filter(a => a.estado === 'activo' && misMatriculas(a).some(m => m.tarifa != null));
   abrirModal(`
   <h2>Recibos del mes (en lote)</h2>
@@ -3389,12 +3424,24 @@ function modalReciboBulk() {
       return;
     }
     const concepto = conceptoDesdeMeses(meses);
+    const periodos = periodosMarcados(cont, 'b');
     const btn = document.getElementById('b-generar');
     btn.disabled = true;
-    let ok = 0, mal = 0;
+    let ok = 0, mal = 0, repetidos = 0;
     for (const a of candidatos) {
-      btn.textContent = `Generando ${ok + mal + 1}/${candidatos.length}…`;
+      btn.textContent = `Generando ${ok + mal + repetidos + 1}/${candidatos.length}…`;
       try {
+        // Si ya hay un recibo de alguno de estos meses para este alumno, no
+        // se duplica — se salta. Hace falta desde que una asignatura puede
+        // tener más de un profesor (ej. Dani y Carol): si los dos generan
+        // "Recibos del mes en lote" para sus alumnos, antes se creaban dos
+        // recibos distintos para el mismo alumno del mismo mes. Mismo
+        // criterio que ya usaba "altas fuera de fecha" desde antes.
+        const { data: existentes } = await S.sb.from('recibos').select('periodos').eq('alumno_id', a.id);
+        if ((existentes || []).some(r => (r.periodos || []).some(p => periodos.includes(p)))) {
+          repetidos++;
+          continue;
+        }
         const misMats = misMatriculas(a);
         const misMesMats = misMats.filter(m => m.tipo_tarifa === 'mes' && m.tarifa != null);
         const misClaseMats = misMats.filter(m => m.tipo_tarifa === 'clase' && m.tarifa != null);
@@ -3408,7 +3455,7 @@ function modalReciboBulk() {
           concepto, importe,
           recibiDe: nombreAlumnoParaPdf(a),
           fechaEmision: hoyDDMMAAAA(),
-          periodos: periodosMarcados(cont, 'b')
+          periodos
         });
         ok += generados.length;
       } catch { mal++; }
@@ -3417,7 +3464,7 @@ function modalReciboBulk() {
     await cargarRecibos();
     S.vista = 'recibos';
     renderMain();
-    avisar(`Generados ${ok} recibos${mal ? `, ${mal} con error` : ''}. Los PDF están en la carpeta de recibos.`);
+    avisar(`Generados ${ok} recibos${mal ? `, ${mal} con error` : ''}${repetidos ? `, ${repetidos} ya tenían recibo de ese mes` : ''}. Los PDF están en la carpeta de recibos.`);
   };
 }
 
