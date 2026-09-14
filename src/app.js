@@ -727,7 +727,7 @@ function renderInicio() {
   const reactivacionesSinVer = esAdmin ? reactivacionesParaAdmin() : [];
   const bajasAsignaturaSinVer = esAdmin ? bajasAsignaturaParaAdmin() : [];
   const pagadosPorEnviar = esAdmin
-    ? S.recibos.filter(r => r.estado === 'pagado' && !r.fecha_envio_whatsapp_pago)
+    ? S.recibos.filter(r => r.estado === 'pagado' && !r.fecha_envio_whatsapp_pago && !r.cobro_rapido)
     : [];
 
   document.getElementById('contenido').innerHTML = `
@@ -1104,6 +1104,20 @@ function misAsignaturas() {
 function profesorParaAsignatura(asignaturaId) {
   const ps = S.profAsig.filter(x => x.asignatura_id === asignaturaId).map(x => x.profesor_id);
   return ps.length === 1 ? ps[0] : '';
+}
+
+// Profesor(es) real(es) del alumno, para dejar constancia en el recibo de a
+// quién le corresponde (no confundir con quién lo generó/emitió, que puede
+// ser cualquier admin desde que la generación se restringió a admins). Usa
+// matriculas.profesor_id (ya fijo, no adivinado) con el mismo fallback que
+// la ficha para matrículas antiguas sin ese dato todavía. Puede haber más de
+// un profesor si la asignatura está compartida (ej. Dani y Carol).
+function profesoresTitularesDeAlumno(alumno) {
+  const ids = [...new Set((alumno.matriculas || [])
+    .map(m => m.profesor_id || profesorParaAsignatura(m.asignatura_id))
+    .filter(Boolean))];
+  const nombre = ids.map(id => S.profesores.find(p => p.id === id)?.nombre).filter(Boolean).join(' y ') || null;
+  return { ids, nombre };
 }
 
 function opcionesAsignaturas(profesorId, seleccionadaId) {
@@ -2958,11 +2972,14 @@ async function crearRecibo(alumno, { concepto, importe, recibiDe, fechaEmision, 
   // La fecha del PDF (DD/MM/AAAA, editable) y la de la BD deben coincidir.
   const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(fechaEmision || '');
   const fechaIso = m ? `${m[3]}-${m[2]}-${m[1]}` : new Date().toISOString().slice(0, 10);
+  const titulares = profesoresTitularesDeAlumno(alumno);
   const { data: fila, error } = await S.sb.from('recibos').insert({
     alumno_id: alumno.id,
     alumno_nombre: alumno.nombre, // copia fija: si algún día se borra la ficha, el recibo no se queda sin nombre
-    profesor_id: S.profesor.id, // quien emite el recibo
+    profesor_id: S.profesor.id, // quien emite el recibo (no confundir con profesor_titular_*, de quién es el alumno)
     profesor_nombre: S.profesor.nombre,
+    profesor_titular_ids: titulares.ids.length ? titulares.ids : null,
+    profesor_titular_nombre: titulares.nombre,
     fecha_emision: fechaIso,
     concepto,
     importe,
@@ -3504,7 +3521,7 @@ function recibosFiltrados() {
         || String(r.referencia).includes(t);
       if (!coincide) return false;
     }
-    return !f.profesor || r.profesor_id === f.profesor;
+    return !f.profesor || (r.profesor_titular_ids || []).includes(f.profesor);
   });
 }
 
@@ -3528,6 +3545,7 @@ function estadoRecibo(r, pagados) {
       ? { clase: 'envio-no', texto: 'Pendiente por cobrar' }
       : { clase: 'pendiente', texto: 'Pendiente de envío' };
   }
+  if (r.cobro_rapido) return { clase: 'cobro-rapido', texto: 'COBRO RÁPIDO' };
   return r.fecha_envio_whatsapp_pago
     ? { clase: 'pagado', texto: 'Cobrado y enviado' }
     : { clase: 'envio-no', texto: 'Cobrado y por enviar' };
@@ -3547,6 +3565,26 @@ function modalElegirCuentaCobro(titulo, mensaje, onElegir) {
   document.getElementById('m-cancelar').onclick = cerrarModal;
   document.getElementById('ec-efectivo').onclick = () => onElegir('efectivo');
   document.getElementById('ec-banco').onclick = () => onElegir('banco');
+}
+
+// Cobro rápido: la jefa cobra en persona nada más apuntarse (antes de
+// mandar nada) y se salta el trámite entero de enviar/esperar — pasa
+// directo a Cobrado, sin justificante pendiente. Aparte del cobro normal
+// para no liarlos: pregunta Efectivo/Tarjeta (Tarjeta se contabiliza igual
+// que Banco) y el resultado se marca con `cobro_rapido: true` para que se
+// identifique luego en la pestaña de Cobrados.
+function modalCobroRapido(mensaje, onElegir) {
+  abrirModal(`
+  <h2>⚡ Cobro rápido</h2>
+  <p class="ayuda">${mensaje} No se enviará ningún justificante — se marcará como cobrado directamente.</p>
+  <div class="pie-modal columna">
+    <button class="btn cobro-rapido" id="cr-efectivo">💶 Efectivo</button>
+    <button class="btn cobro-rapido" id="cr-tarjeta">💳 Tarjeta</button>
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+  </div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('cr-efectivo').onclick = () => onElegir('efectivo');
+  document.getElementById('cr-tarjeta').onclick = () => onElegir('banco');
 }
 
 // Anotación de "han pagado parte, no todo" — puramente visual/informativa:
@@ -3581,7 +3619,7 @@ function modalPagoIncompleto(r) {
   };
 }
 
-function filasRecibos(lista, esAdmin, pagados, seleccionables) {
+function filasRecibos(lista, esAdmin, pagados, seleccionables, permitirCobroRapido) {
   return `<table>
     <thead><tr>
       ${seleccionables ? '<th></th>' : ''}
@@ -3598,7 +3636,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
         <small>R-${String(r.referencia).padStart(5, '0')} · ${e((r.fecha_emision || '').split('-').reverse().join('/'))}</small></td>
       <td>${e(r.concepto)}</td>
       <td><strong>${formatoImporte(r.importe)}€</strong></td>
-      ${esAdmin ? `<td>${e(r.profesores?.nombre || '')}</td>` : ''}
+      ${esAdmin ? `<td>${e(r.profesor_titular_nombre || r.profesores?.nombre || '—')}</td>` : ''}
       <td><span class="chip ${estado.clase}">${estado.texto}</span>
         ${pagados && r.cuenta ? `<span class="chip activo">${r.cuenta === 'banco' ? 'Banco' : 'Efectivo'}</span>` : ''}
         ${!pagados && r.importe_parcial ? `<span class="chip pago-parcial">${formatoImporte(r.importe_parcial)}€ de ${formatoImporte(r.importe)}€ cobrados</span>` : ''}
@@ -3613,6 +3651,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables) {
           ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>
              <button class="btn chico liso" data-editar-cuenta="${r.id}" title="Corregir efectivo/banco">✎</button>` : '')
           : `<button class="btn chico pagar" data-pagar="${r.id}">✓ Cobrado</button>
+             ${permitirCobroRapido && esAdmin ? `<button class="btn chico cobro-rapido" data-cobro-rapido="${r.id}" title="Cobrado en persona al momento, sin enviar nada">⚡ Cobro rápido</button>` : ''}
              <button class="btn chico liso" data-pago-incompleto="${r.id}" title="Anotar que han pagado solo una parte">Pago incompleto</button>
              ${esAdmin ? `<button class="btn chico liso" data-wa="${r.id}">WhatsApp</button>` : ''}
              <button class="btn chico liso" data-editar-recibo="${r.id}" title="Editar recibo">✏️</button>`}
@@ -3674,7 +3713,7 @@ function renderRecibos() {
   // se manda — nunca están en las dos pestañas a la vez.
   const porEnviar = noPagados.filter(r => !r.fecha_envio_whatsapp);
   const pendientesCobro = noPagados.filter(r => r.fecha_envio_whatsapp);
-  const pagadosPorEnviar = pagados.filter(r => !r.fecha_envio_whatsapp_pago);
+  const pagadosPorEnviar = pagados.filter(r => !r.fecha_envio_whatsapp_pago && !r.cobro_rapido);
   // La pestaña activa (si es una de las dos "por enviar") y su tipo de envío,
   // para que el bloque de casillas/selección de abajo sirva para las dos.
   const listaEnviable = sub === 'pagados-enviar' ? pagadosPorEnviar : porEnviar;
@@ -3695,7 +3734,7 @@ function renderRecibos() {
           <small>${listaEnviable.length} ${etiquetaLista} · ${formatoImporte(total)}€</small>
           <button class="btn chico" id="rc-marcar-todos">${todosMarcados ? 'Quitar selección' : 'Seleccionar todos'}</button>
           <button class="btn primario chico" id="rc-enviar-seleccionados" ${nSeleccionados ? '' : 'disabled'}>📤 Enviar seleccionados (${nSeleccionados})</button></h3>
-        ${filasRecibos(listaEnviable, esAdmin, sub === 'pagados-enviar', true)}`;
+        ${filasRecibos(listaEnviable, esAdmin, sub === 'pagados-enviar', true, sub === 'enviar')}`;
   } else if (sub === 'pagados') {
     const total = pagados.reduce((s, r) => s + Number(r.importe), 0);
     cuerpo = pagados.length === 0
@@ -3788,7 +3827,7 @@ function renderRecibos() {
       `¿Cómo se ha cobrado el recibo de ${e(nombres)}${hermanos.length ? ' (recibo hermanos)' : ''} (${formatoImporte(r.importe)}€, ${e(r.concepto)})?`,
       async (cuenta) => {
         const { error } = await S.sb.from('recibos')
-          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta, importe_parcial: null })
+          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta, cobro_rapido: false, importe_parcial: null })
           .in('id', ids);
         cerrarModal();
         if (error) return avisar('Error al marcar como cobrado: ' + error.message, true);
@@ -3798,6 +3837,28 @@ function renderRecibos() {
         // desde la pestaña "Pagados por enviar" (así cualquier profesor puede
         // marcar el pago sin depender de tener acceso a WhatsApp).
         avisar('Marcado como cobrado.');
+      });
+  });
+  document.querySelectorAll('[data-cobro-rapido]').forEach(b => b.onclick = () => {
+    const r = S.recibos.find(x => x.id === b.dataset.cobroRapido);
+    if (!r) return;
+    // Mismo criterio que el cobro normal: si hay hermanos con recibo del
+    // mismo mes sin cobrar, se cobran juntos (lo normal si el padre paga en
+    // persona por los dos a la vez).
+    const hermanos = recibosHermanosDe(r).filter(h => h.estado !== 'pagado');
+    const nombres = [r, ...hermanos].map(x => x.alumnos?.nombre || 'este alumno').join(' y ');
+    const ids = [r.id, ...hermanos.map(h => h.id)];
+    modalCobroRapido(
+      `¿Cómo se ha cobrado en persona el recibo de ${e(nombres)}${hermanos.length ? ' (recibo hermanos)' : ''} (${formatoImporte(r.importe)}€, ${e(r.concepto)})?`,
+      async (cuenta) => {
+        const { error } = await S.sb.from('recibos')
+          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta, cobro_rapido: true, importe_parcial: null })
+          .in('id', ids);
+        cerrarModal();
+        if (error) return avisar('Error al marcar como cobro rápido: ' + error.message, true);
+        await cargarRecibos();
+        renderRecibos();
+        avisar('Marcado como cobro rápido.');
       });
   });
   document.querySelectorAll('[data-pago-incompleto]').forEach(b => b.onclick = () => {
@@ -3829,7 +3890,7 @@ function renderRecibos() {
     const nombres = [r, ...hermanos].map(x => x.alumnos?.nombre || 'este alumno').join(' y ');
     if (!confirm(`¿Estás seguro de que quieres volver a dejar PENDIENTE el recibo de ${nombres} (${formatoImporte(r.importe)}€, ${r.concepto})?`)) return;
     const ids = [r.id, ...hermanos.map(h => h.id)];
-    const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null, cuenta: null })
+    const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null, cuenta: null, cobro_rapido: false })
       .in('id', ids);
     if (error) return avisar('Error: ' + error.message, true);
     await cargarRecibos();
@@ -4078,7 +4139,7 @@ async function exportarRecibosCsv() {
     { titulo: 'Referencia', valor: r => 'R-' + String(r.referencia).padStart(5, '0') },
     { titulo: 'Fecha emisión', valor: r => r.fecha_emision },
     { titulo: 'Alumno', valor: r => r.alumnos?.nombre },
-    { titulo: 'Profesor', valor: r => r.profesores?.nombre },
+    { titulo: 'Profesor', valor: r => r.profesor_titular_nombre || r.profesores?.nombre || '' },
     { titulo: 'Concepto', valor: r => r.concepto },
     { titulo: 'Importe', valor: r => r.importe },
     { titulo: 'Importe en letras', valor: r => r.importe_letras },

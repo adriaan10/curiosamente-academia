@@ -157,9 +157,12 @@ td small { color: var(--gris); }
 .chip.wa-fallido { background: #fdecea; color: var(--rojo); }
 .chip.pago-parcial { background: #d9b3f0; color: #000; border: 1.5px solid #000; font-weight: 600; }
 .chip.desarrollador { background: #6b7280; color: #fff; border: 1.5px solid #000; font-weight: 600; }
+.chip.cobro-rapido { background: #ede9fe; color: #7c3aed; font-weight: 600; }
 
 .btn.pagar { border-color: var(--verde); color: var(--verde); font-weight: 600; }
 .btn.pagar:hover { background: var(--verde); color: #fff; }
+.btn.cobro-rapido { border-color: #7c3aed; color: #7c3aed; font-weight: 600; }
+.btn.cobro-rapido:hover { background: #7c3aed; color: #fff; }
 
 .mes-seccion { margin: 22px 0 10px; font-size: 15px; }
 .mes-seccion:first-of-type { margin-top: 4px; }

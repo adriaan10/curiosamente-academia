@@ -2227,3 +2227,90 @@ alter table public.alumnos
 --    profesor no-admin real: los botones desaparecen, y llamar a las dos
 --    funciones directamente también se bloquea con el aviso; restaurando
 --    la identidad de admin, los botones vuelven a aparecer con normalidad.
+
+-- ============================================================
+-- Cobro rápido + profesor real del alumno en el recibo (14/09/2026)
+-- ============================================================
+-- Feedback de la jefa, dos cambios pedidos juntos.
+
+-- 1) "Profesor" del recibo estaba mal desde que generar recibos pasó a ser
+--    solo-admin (arriba): recibos.profesor_id significa "quién lo EMITE", no
+--    "de qué profesor es el alumno" — y como ahora solo emiten Adrián/Dani/
+--    Judith, el recibo de un alumno de Carol podía aparecer con "Dani" o
+--    "Judith" según quién lo hubiera generado ese día. Confirmado con los 3
+--    recibos reales que había en producción: los 3 tenían el profesor mal
+--    antes de este cambio.
+--
+--    No se toca profesor_id/profesor_nombre (los usa ya
+--    resueltoParaTodosLosAdmins() en app.js para "altas fuera de fecha" —
+--    cambiar su significado lo habría roto). En su lugar, columnas nuevas:
+alter table public.recibos
+  add column profesor_titular_ids uuid[],
+  add column profesor_titular_nombre text,
+  add column cobro_rapido boolean not null default false;
+--
+--    profesores_titulares_alumno(alumno_id): función SQL que calcula el/los
+--    profesor(es) real(es) de un alumno a partir de matriculas.profesor_id
+--    (ya fijo, no adivinado — ver el cambio de "compartir asignaturas" más
+--    arriba), con el mismo fallback que la ficha para matrículas antiguas
+--    sin ese dato ("si la asignatura la da un único profesor, es ese").
+--    Puede devolver 2 nombres si la asignatura está compartida (ej. "Carol y
+--    Dani"). Usada por el backfill de abajo y por generar_recibos_mensuales().
+--    app.js tiene su propia copia en JS (profesoresTitularesDeAlumno()),
+--    usada por crearRecibo() — misma lógica, sin llamada de red.
+--
+--    Backfill: los 3 recibos reales existentes se recalcularon con el
+--    profesor ACTUAL de cada alumno (no hay forma de saber quién lo daba en
+--    el momento exacto del recibo si ha cambiado desde entonces — decisión
+--    explícita de la jefa: "corrige los históricos... pero ten cuidado").
+--
+--    app.js: columna "Profesor" de la lista de Recibos y el CSV pasan a
+--    mostrar profesor_titular_nombre (con el profesor_nombre del emisor
+--    como último recurso si algún recibo no tiene titular calculado). El
+--    filtro "Profesor" de Recibos pasa de comparar profesor_id a comprobar
+--    profesor_titular_ids.includes(...) — antes ese filtro no servía de
+--    nada para un profesor real, porque nunca coincidía con el emisor.
+--
+--    Probado en vivo con 2 alumnos de prueba matriculados con Carol como
+--    profesora y generados por Adrián (admin): "Profesor" salió "Carol" en
+--    la lista, en el filtro y en el CSV. Backfill de los 3 recibos reales
+--    verificado uno a uno contra sus matrículas actuales. Datos de prueba
+--    borrados después (alumnos, matrículas, recibos y su movimiento de
+--    Ingresos automático).
+
+-- 2) "Cobro rápido": para cuando pagan en persona al apuntarse y la jefa
+--    hace el recibo y el cobro a la vez, sin mandar nada por WhatsApp.
+--    Botón nuevo (⚡, morado, aparte del "✓ Cobrado" normal para no
+--    liarlos) SOLO en la pestaña "Pendientes de envío" — en cuanto se
+--    envía el recibo ya no sale, como se pidió. Solo lo ven los
+--    administradores (Adrián/Dani/Judith): esa pestaña entera ya era
+--    solo-admin desde el cambio 2 de arriba, y el botón lleva además su
+--    propio esAdmin por si acaso.
+--
+--    Al pulsarlo: Efectivo o Tarjeta (Tarjeta se contabiliza como Banco en
+--    Ingresos y gastos, tal cual se pidió) → recibo directo a Cobrado
+--    (estado='pagado', cobro_rapido=true), sin pasar por "enviado" ni dejar
+--    ningún justificante pendiente. Mismo trigger de siempre
+--    (sincronizar_finanzas_recibo(), sin tocar) genera el ingreso
+--    automático en la cuenta elegida. Si hay un hermano con recibo del
+--    mismo mes sin cobrar, se cobra a la vez (mismo criterio ya usado por
+--    el botón normal "✓ Cobrado" — confirmado explícitamente).
+--
+--    En la pestaña Cobrados, estadoRecibo() le pone el chip "COBRO RÁPIDO"
+--    en vez de "Cobrado y enviado/por enviar", y queda fuera de la cuenta y
+--    la lista de "Justificantes por enviar" (pagadosPorEnviar excluye
+--    cobro_rapido) — no tiene sentido pedir enviar algo que ya se resolvió
+--    en persona.
+--
+--    cobro_rapido se resetea a false tanto al cobrar normal ("✓ Cobrado")
+--    como al deshacer un cobro ("↩ Pendiente"): si no, un cobro rápido
+--    deshecho por error y vuelto a cobrar de forma normal se habría quedado
+--    con la etiqueta "COBRO RÁPIDO" para siempre. Probado en vivo el caso
+--    completo: cobro rápido con 2 hermanos → "↩ Pendiente" (los deshace a
+--    los dos) → cobro normal con "✓ Cobrado" → chip correcto ("Cobrado y
+--    por enviar"), sin rastro de COBRO RÁPIDO.
+--
+--    generar_recibos_mensuales() (el cron del día 1) también rellena
+--    profesor_titular_ids/nombre desde ahora — antes ni lo intentaba, el
+--    admin elegido para profesor_id ahí es literalmente "el primero que
+--    haya" (arbitrario).
