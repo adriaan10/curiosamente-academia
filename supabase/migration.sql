@@ -2314,3 +2314,22 @@ alter table public.recibos
 --    profesor_titular_ids/nombre desde ahora — antes ni lo intentaba, el
 --    admin elegido para profesor_id ahí es literalmente "el primero que
 --    haya" (arbitrario).
+
+-- ============================================================
+-- Chips del estado del recibo se pisaban en ventana estrecha (15/09/2026)
+-- ============================================================
+-- Solo app.js/styles.css, sin cambios en Supabase. Reportado con captura:
+-- en la columna "Estado" de Recibos, cuando había más de un chip (ej.
+-- "Pendiente de envío" + "65€ de 110€ cobrados" de un pago incompleto), al
+-- estrechar la ventana se pisaban entre sí en vez de bajar en una línea
+-- nueva limpia — venían sueltos dentro de la celda, sin ningún contenedor
+-- que controlara el ajuste de línea.
+--
+-- filasRecibos(): los chips del estado se envuelven ahora en
+-- <div class="estado-chips">. CSS nuevo: .estado-chips { display: flex;
+-- flex-wrap: wrap; align-items: center; gap: 4px; } — con esto, cuando no
+-- caben en una línea, el siguiente chip baja limpio con 4px de margen, no
+-- se solapa nunca. Probado en vivo emulando una ventana de 700px con un
+-- recibo de prueba con el mismo caso (pendiente + pago incompleto):
+-- medidas de posición confirmaron 0 solape (segundo chip empieza 4px
+-- después de que termina el primero). Dato de prueba borrado después.

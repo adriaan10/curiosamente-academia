@@ -136,6 +136,7 @@ td small { color: var(--gris); }
 .acciones { text-align: right; white-space: nowrap; }
 
 .chip { padding: 2px 10px; border-radius: 99px; font-size: 12px; }
+.estado-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .chip-asig {
   display: inline-block; background: var(--naranja-suave); color: var(--tinta);
   border-radius: 99px; padding: 2px 10px; font-size: 12px; margin: 1px 0;

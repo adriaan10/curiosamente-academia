@@ -3637,7 +3637,8 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables, permitirCobroRapi
       <td>${e(r.concepto)}</td>
       <td><strong>${formatoImporte(r.importe)}€</strong></td>
       ${esAdmin ? `<td>${e(r.profesor_titular_nombre || r.profesores?.nombre || '—')}</td>` : ''}
-      <td><span class="chip ${estado.clase}">${estado.texto}</span>
+      <td><div class="estado-chips">
+        <span class="chip ${estado.clase}">${estado.texto}</span>
         ${pagados && r.cuenta ? `<span class="chip activo">${r.cuenta === 'banco' ? 'Banco' : 'Efectivo'}</span>` : ''}
         ${!pagados && r.importe_parcial ? `<span class="chip pago-parcial">${formatoImporte(r.importe_parcial)}€ de ${formatoImporte(r.importe)}€ cobrados</span>` : ''}
         ${r.progenitor ? `<span class="chip envio-si" title="Recibo repartido entre los dos progenitores">${r.progenitor === 'madre' ? 'Madre' : 'Padre'}</span>` : ''}
@@ -3645,7 +3646,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables, permitirCobroRapi
         ${r.estado_whatsapp === 'fallido' ? '<span class="chip wa-fallido" title="WhatsApp no pudo entregarlo: revisa el teléfono">Fallido</span>'
           : r.estado_whatsapp === 'leido' ? '<span class="chip wa-leido">Leído</span>'
           : r.estado_whatsapp === 'entregado' ? '<span class="chip wa-por-leer">Por leer</span>'
-          : ''}</td>
+          : ''}</div></td>
       <td class="acciones">
         ${pagados
           ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>
