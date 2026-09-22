@@ -2490,3 +2490,47 @@ alter table public.alumnos add column matricula_importe numeric;
 --     nuevo marcando matrícula a mano, y editando un recibo para añadirla):
 --     las dos veces, la ficha se rellena sola y la insignia "M" aparece en
 --     la lista al momento, sin recargar nada.
+
+-- ============================================================
+-- Bloqueo de teclado y ratón en Windows: causa real encontrada (22/09/2026)
+-- ============================================================
+-- Solo app.js, sin cambios en Supabase. La jefa reportó el bloqueo otra vez
+-- después de publicar el punto 8 de arriba (el del menú oculto) — esa
+-- hipótesis no era la causa, o no la única. Repro exacto que dio esta vez:
+-- borrar un recibo, volver a generarlo, ir a "Pago incompleto" → ni ahí ni
+-- en ningún otro sitio dejaba escribir NI hacer clic con el ratón.
+--
+-- Causa encontrada (y reproducida aparte, sin relación con lo que reportó
+-- la jefa): el `confirm()` nativo del navegador, usado en 16 sitios de toda
+-- la app para "¿Estás segura?" antes de borrar/dar de baja/etc. — entre
+-- ellos, justo "Eliminar recibo" (el primer paso de su repro). Al probar
+-- en esta sesión el botón "↩ Pendiente" (que también usa confirm()), la
+-- ventana se quedó sin responder al instante, incluso a la conexión de
+-- depuración — hubo que matar el proceso entero para recuperarla. Electron
+-- en Windows tiene problemas conocidos con los cuadros nativos
+-- (confirm/alert) dejando la ventana sin foco de verdad después de
+-- cerrarse, a veces sin ningún aviso visual de que ha pasado algo raro.
+--
+-- confirmarAccion(mensaje) (nueva, en app.js): confirmación propia de la
+-- app, con la misma pinta que el resto (nada de cuadro nativo de Windows).
+-- Se pinta como una capa flotante APARTE, por encima de todo — no toca
+-- modal-raiz ni el modal que hubiera abierto detrás (si lo hay), así que
+-- cancelar nunca pierde lo que se estuviera editando ahí. Se sustituyeron
+-- los 16 confirm() de toda la app (borrar alumno/profesor/asignatura/
+-- clase/nota/movimiento, dar de baja alumno/asignatura/profesor,
+-- reactivar profesor, hacer/quitar admin, despagar un recibo, borrar
+-- recibo, cambiar precio en bloque, quitar una cuenta de una categoría de
+-- Ingresos y gastos, y la reestructuración de fin de curso) por
+-- `if (!(await confirmarAccion(mensaje))) return;` — mismo patrón en los
+-- 16 sitios.
+--
+-- Probado en vivo: "Eliminar recibo" desde la lista (sin modal detrás) →
+-- cuadro propio, confirmar borra bien. "Sistema de bajas" desde dentro de
+-- la ficha del alumno (con la ficha ya abierta y texto sin guardar en
+-- Notas) → cancelar deja la ficha exactamente igual que estaba (texto sin
+-- guardar intacto, botón "Guardar" seguía funcionando) → repetido
+-- confirmando esta vez, el alumno queda de baja de verdad y la ficha se
+-- cierra sola, como siempre. Dato de prueba borrado después.
+--
+-- De paso, "Pago incompleto" gana también las flechas de 5 en 5 (era el
+-- único campo de precio que se había quedado en step="0.01").

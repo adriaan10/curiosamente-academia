@@ -1257,7 +1257,7 @@ function renderAlumnos() {
     b.onclick = () => modalRecibo(S.alumnos.find(a => a.id === b.dataset.recibo)));
   document.querySelectorAll('[data-borrar-alumno]').forEach(b => b.onclick = async () => {
     const a = S.alumnos.find(x => x.id === b.dataset.borrarAlumno);
-    if (!confirm(`¿Borrar definitivamente la ficha de ${a?.nombre || 'este alumno'}? Sus recibos ya emitidos se conservan (quedan como "alumno eliminado"), pero esta acción no se puede deshacer.`)) return;
+    if (!(await confirmarAccion(`¿Borrar definitivamente la ficha de ${a?.nombre || 'este alumno'}? Sus recibos ya emitidos se conservan (quedan como "alumno eliminado"), pero esta acción no se puede deshacer.`))) return;
     const { error } = await S.sb.rpc('borrar_alumno', { p_alumno: b.dataset.borrarAlumno });
     if (error) return avisar('Error: ' + error.message, true);
     await cargarAlumnos();
@@ -1626,7 +1626,7 @@ function modalAlumno(alumno) {
 // pero conserva sus matrículas (por si vuelve, para no reintroducir precio
 // y horas de cero) y su ficha entera bajo el filtro "Bajas".
 async function confirmarBajaCompleta(alumno) {
-  if (!confirm(`Vas a dar de baja a ${alumno.nombre} de TODO: todas las asignaturas y todas las clases. La ficha se conserva en el filtro "Bajas" por si vuelve. ¿Continuar?`)) return;
+  if (!(await confirmarAccion(`Vas a dar de baja a ${alumno.nombre} de TODO: todas las asignaturas y todas las clases. La ficha se conserva en el filtro "Bajas" por si vuelve. ¿Continuar?`))) return;
   const { error } = await S.sb.rpc('dar_baja_alumno', { p_alumno: alumno.id });
   if (error) return avisar('Error: ' + error.message, true);
   cerrarModal();
@@ -1641,7 +1641,7 @@ async function confirmarBajaCompleta(alumno) {
 // es "todo el alumno" lo que pausa, solo esa asignatura concreta. El
 // histórico de recibos no depende de las matrículas, así que no se toca.
 async function confirmarBajaAsignatura(alumno, asignaturaId, nombreAsignatura) {
-  if (!confirm(`¿Dar de baja a ${alumno.nombre} de ${nombreAsignatura}? Dejará de salir en esa asignatura; su historial de recibos se conserva igual.`)) return;
+  if (!(await confirmarAccion(`¿Dar de baja a ${alumno.nombre} de ${nombreAsignatura}? Dejará de salir en esa asignatura; su historial de recibos se conserva igual.`))) return;
   const { error } = await S.sb.rpc('dar_baja_asignatura', { p_alumno: alumno.id, p_asignatura: asignaturaId });
   if (error) { avisar('Error: ' + error.message, true); return; }
   // Si lo hace un profesor (no la admin), se avisa a la admin para que
@@ -2247,7 +2247,7 @@ function modalDetalleAlternativa(exc) {
     if (clase) modalDetalleClase(clase, exc.fecha);
   };
   document.getElementById('alt-eliminar').onclick = async () => {
-    if (!confirm(`¿Eliminar la clase alternativa del ${fmtFecha(exc.fecha)} a las ${horaCorta(exc.hora)}?`)) return;
+    if (!(await confirmarAccion(`¿Eliminar la clase alternativa del ${fmtFecha(exc.fecha)} a las ${horaCorta(exc.hora)}?`))) return;
     await S.sb.from('clase_excepciones').delete().eq('id', exc.id);
     cerrarModal();
     await cargarClases();
@@ -2368,7 +2368,7 @@ function modalClase(clase) {
 
   const btnBorrar = document.getElementById('c-borrar');
   if (btnBorrar) btnBorrar.onclick = async () => {
-    if (!confirm(`¿Borrar la clase "${clase.nombre}"? Los alumnos no se borran, solo el grupo.`)) return;
+    if (!(await confirmarAccion(`¿Borrar la clase "${clase.nombre}"? Los alumnos no se borran, solo el grupo.`))) return;
     const { error } = await S.sb.from('clases').delete().eq('id', clase.id);
     if (error) return avisar('Error al borrar: ' + error.message, true);
     cerrarModal();
@@ -3648,7 +3648,7 @@ function modalPagoIncompleto(r) {
   <p class="ayuda">Solo es una nota para que se vea a simple vista cuánto han pagado ya de este recibo
   (${formatoImporte(r.importe)}€ en total). No cambia el estado ni mueve nada en Ingresos y gastos —
   eso pasa cuando se marque "✓ Cobrado" con el resto.</p>
-  <label>¿Cuánto han pagado? (€)<input id="pi-importe" type="number" min="0.01" step="0.01" value="${r.importe_parcial ?? ''}"></label>
+  <label>¿Cuánto han pagado? (€)<input id="pi-importe" type="number" min="0.01" step="5" value="${r.importe_parcial ?? ''}"></label>
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cancelar</button>
     <button class="btn primario" id="pi-guardar">Guardar</button>
@@ -3940,7 +3940,7 @@ function renderRecibos() {
     if (!r) return;
     const hermanos = recibosHermanosDe(r).filter(h => h.estado === 'pagado');
     const nombres = [r, ...hermanos].map(x => x.alumnos?.nombre || 'este alumno').join(' y ');
-    if (!confirm(`¿Estás seguro de que quieres volver a dejar PENDIENTE el recibo de ${nombres} (${formatoImporte(r.importe)}€, ${r.concepto})?`)) return;
+    if (!(await confirmarAccion(`¿Estás segura de que quieres volver a dejar PENDIENTE el recibo de ${nombres} (${formatoImporte(r.importe)}€, ${r.concepto})?`))) return;
     const ids = [r.id, ...hermanos.map(h => h.id)];
     const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null, cuenta: null, cobro_rapido: false })
       .in('id', ids);
@@ -3951,7 +3951,7 @@ function renderRecibos() {
   });
   document.querySelectorAll('[data-borrar-recibo]').forEach(b => b.onclick = async () => {
     const r = S.recibos.find(x => x.id === b.dataset.borrarRecibo);
-    if (!confirm(`¿Eliminar el recibo R-${String(r.referencia).padStart(5, '0')} de ${r.alumnos?.nombre || ''} (${formatoImporte(r.importe)}€, ${r.concepto})? Esta acción no se puede deshacer.`)) return;
+    if (!(await confirmarAccion(`¿Eliminar el recibo R-${String(r.referencia).padStart(5, '0')} de ${r.alumnos?.nombre || ''} (${formatoImporte(r.importe)}€, ${r.concepto})? Esta acción no se puede deshacer.`))) return;
     const { error } = await S.sb.from('recibos').delete().eq('id', r.id);
     if (error) return avisar('Error al eliminar: ' + error.message, true);
     await cargarRecibos();
@@ -4265,7 +4265,7 @@ function renderNotas() {
 
   document.querySelectorAll('[data-borrar-nota]').forEach(b => b.onclick = async () => {
     const nota = S.notas.find(n => n.id === b.dataset.borrarNota);
-    if (nota?.texto.trim() && !confirm('¿Borrar esta nota?')) return;
+    if (nota?.texto.trim() && !(await confirmarAccion('¿Borrar esta nota?'))) return;
     await S.sb.from('notas').delete().eq('id', b.dataset.borrarNota);
     await cargarNotas();
     renderNotas();
@@ -4352,7 +4352,7 @@ function renderProfesores() {
     b.onclick = () => modalEditarProfesor(S.profesores.find(p => p.id === b.dataset.editarMisAsig), true));
   document.querySelectorAll('[data-reactivar-prof]').forEach(b => b.onclick = async () => {
     const p = S.profesores.find(x => x.id === b.dataset.reactivarProf);
-    if (!confirm(`¿Reactivar a ${p.nombre}? Recuperará su acceso a la app con su misma contraseña.`)) return;
+    if (!(await confirmarAccion(`¿Reactivar a ${p.nombre}? Recuperará su acceso a la app con su misma contraseña.`))) return;
     const { error } = await S.sb.rpc('cambiar_estado_profesor', { p_profesor: p.id, p_estado: 'activo' });
     if (error) return avisar('Error: ' + error.message, true);
     await cargarTodo();
@@ -4361,7 +4361,7 @@ function renderProfesores() {
   });
   document.querySelectorAll('[data-borrar-prof]').forEach(b => b.onclick = async () => {
     const p = S.profesores.find(x => x.id === b.dataset.borrarProf);
-    if (!confirm(`¿Borrar definitivamente la ficha de ${p?.nombre || 'este profesor'}? Sus recibos y movimientos de finanzas ya registrados se conservan (quedan como "profesor eliminado"), pero esta acción no se puede deshacer.`)) return;
+    if (!(await confirmarAccion(`¿Borrar definitivamente la ficha de ${p?.nombre || 'este profesor'}? Sus recibos y movimientos de finanzas ya registrados se conservan (quedan como "profesor eliminado"), pero esta acción no se puede deshacer.`))) return;
     const { error } = await S.sb.rpc('borrar_profesor', { p_profesor: b.dataset.borrarProf });
     if (error) {
       return avisar(error.code === '23503'
@@ -4405,7 +4405,7 @@ function activarBorrarAsignaturaSuelta() {
   document.querySelectorAll('[data-borrar-asig-suelta]').forEach(b => b.onclick = async () => {
     const id = Number(b.dataset.borrarAsigSuelta);
     const asig = S.asignaturas.find(a => a.id === id);
-    if (!confirm(`¿Borrar la asignatura "${asig?.nombre || ''}" de toda la academia? Solo se puede borrar si ningún alumno está matriculado en ella ni hay clases suyas.`)) return;
+    if (!(await confirmarAccion(`¿Borrar la asignatura "${asig?.nombre || ''}" de toda la academia? Solo se puede borrar si ningún alumno está matriculado en ella ni hay clases suyas.`))) return;
     const { error } = await S.sb.from('asignaturas').delete().eq('id', id);
     const $msg = document.getElementById('asig-msg');
     if (error) {
@@ -4581,7 +4581,7 @@ function activarBotonesBorrarAsignatura() {
     ev.preventDefault();
     const id = Number(b.dataset.borrarAsig);
     const asig = S.asignaturas.find(a => a.id === id);
-    if (!confirm(`¿Borrar la asignatura "${asig?.nombre || ''}" de toda la academia? Solo se puede borrar si ningún alumno está matriculado en ella ni hay clases suyas.`)) return;
+    if (!(await confirmarAccion(`¿Borrar la asignatura "${asig?.nombre || ''}" de toda la academia? Solo se puede borrar si ningún alumno está matriculado en ella ni hay clases suyas.`))) return;
     const marcadasAhora = new Set(asignaturasMarcadas());
     const { error } = await S.sb.from('asignaturas').delete().eq('id', id);
     if (error) {
@@ -4717,7 +4717,7 @@ function modalEditarProfesor(prof, soloAsignaturas = false) {
       const msg = nuevo
         ? `¿Hacer administrador a ${prof.nombre}? Podrá ver y gestionar todo: alumnos, recibos, finanzas y profesores. Si tiene la app abierta, se le pedirá reiniciarla.`
         : `¿Quitar el admin a ${prof.nombre}? Dejará de ver finanzas y la gestión de profesores, y solo verá sus propias asignaturas. Si tiene la app abierta, se le pedirá reiniciarla.`;
-      if (!confirm(msg)) return;
+      if (!(await confirmarAccion(msg))) return;
       const { error } = await S.sb.rpc('cambiar_admin_profesor', { p_profesor: prof.id, p_es_admin: nuevo });
       if (error) {
         document.getElementById('m-msg').textContent = 'Error: ' + error.message;
@@ -4729,7 +4729,7 @@ function modalEditarProfesor(prof, soloAsignaturas = false) {
       avisar(`${prof.nombre} ${nuevo ? 'ya es administrador' : 'ya no es administrador'}.`);
     };
     document.getElementById('p-baja').onclick = async () => {
-      if (!confirm(`¿Dar de baja a ${prof.nombre}? No podrá volver a entrar en la app hasta que lo reactives. Sus recibos, clases y datos se conservan.`)) return;
+      if (!(await confirmarAccion(`¿Dar de baja a ${prof.nombre}? No podrá volver a entrar en la app hasta que lo reactives. Sus recibos, clases y datos se conservan.`))) return;
       const { error } = await S.sb.rpc('cambiar_estado_profesor', { p_profesor: prof.id, p_estado: 'baja' });
       if (error) {
         document.getElementById('m-msg').textContent = 'Error: ' + error.message;
@@ -4865,7 +4865,7 @@ function modalCambiarTarifaAsignatura(asignaturaId, tipoTarifa) {
       document.getElementById('m-msg').textContent = 'Introduce un precio válido.';
       return;
     }
-    if (!confirm(`¿Cambiar el precio de "${g.asignatura}" (${g.tipo_tarifa === 'clase' ? '€/clase' : '€/mes'}) a ${formatoImporte(nuevo)}€ para los ${n} alumnos matriculados? Los recibos ya generados no cambian, solo los que se generen a partir de ahora.`)) return;
+    if (!(await confirmarAccion(`¿Cambiar el precio de "${g.asignatura}" (${g.tipo_tarifa === 'clase' ? '€/clase' : '€/mes'}) a ${formatoImporte(nuevo)}€ para los ${n} alumnos matriculados? Los recibos ya generados no cambian, solo los que se generen a partir de ahora.`))) return;
     const btn = document.getElementById('ct-guardar');
     btn.disabled = true; btn.textContent = 'Aplicando…';
     const { error } = await S.sb.from('matriculas')
@@ -5363,7 +5363,7 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta = nul
 
   document.getElementById('m-cancelar').onclick = () => { cerrarModal(); renderFinanzas(); };
   document.querySelectorAll('[data-borrar-fin]').forEach(b => b.onclick = async () => {
-    if (!confirm('¿Eliminar este movimiento?')) return;
+    if (!(await confirmarAccion('¿Eliminar este movimiento?'))) return;
     await S.sb.from('finanzas_movimientos').delete().eq('id', b.dataset.borrarFin);
     await cargarFinanzas();
     modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta);
@@ -5412,7 +5412,7 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta = nul
       : (todos.length
         ? `¿Seguro que quieres eliminar del todo la columna "${categoria}"? Se borrarán también sus ${todos.length} movimiento${todos.length === 1 ? '' : 's'} de TODOS los meses y de las dos cuentas (${formatoImporte(totalTodos)}€ en total). Esta acción no se puede deshacer.`
         : `¿Eliminar del todo la columna "${categoria}"? No tiene ningún movimiento todavía.`);
-    if (!confirm(aviso)) {
+    if (!(await confirmarAccion(aviso))) {
       document.getElementById(cuentaCambiada === 'banco' ? 'fc-scope-banco' : 'fc-scope-efectivo').checked = true;
       return;
     }
@@ -5497,7 +5497,7 @@ function renderReestructuracion() {
   const $btn = document.getElementById('re-ejecutar');
   $input.oninput = () => { $btn.disabled = $input.value.trim() !== PALABRA_REESTRUCTURAR; };
   $btn.onclick = async () => {
-    if (!confirm(`Última confirmación: se dará de baja a ${nAlumnos} alumnos y se borrarán ${nClases} clases de TODA la academia. ¿Seguro?`)) return;
+    if (!(await confirmarAccion(`Última confirmación: se dará de baja a ${nAlumnos} alumnos y se borrarán ${nClases} clases de TODA la academia. ¿Seguro?`))) return;
     $btn.disabled = true;
     $btn.textContent = 'Reestructurando…';
     const { data, error } = await S.sb.rpc('reestructurar_academia');
@@ -5679,6 +5679,37 @@ function abrirModal(html) {
 function cerrarModal() {
   document.getElementById('modal-raiz').innerHTML = '';
   if (S.actualizacionPendiente) mostrarOReiniciar();
+}
+
+// Confirmación propia en vez del confirm() nativo del navegador — se ha
+// visto en producción (y reproducido aparte, probando la app) que ese
+// cuadro nativo puede dejar la ventana entera sin responder al ratón ni al
+// teclado en Windows después de usarlo, sin ningún aviso visible de que ha
+// pasado algo raro. Se pinta como una capa aparte por ENCIMA de todo,
+// incluso con un modal ya abierto detrás (por eso no usa modal-raiz/
+// abrirModal: si tocara modal-raiz y se cancelara, se perdería el modal de
+// debajo entero) — al cancelar, esta capa simplemente desaparece y lo que
+// hubiera debajo queda exactamente como estaba, intacto.
+function confirmarAccion(mensaje) {
+  return new Promise((resolve) => {
+    const capa = document.createElement('div');
+    capa.className = 'velo';
+    capa.style.zIndex = '60';
+    capa.innerHTML = `
+      <div class="modal" style="width:min(440px,90vw)">
+        <h2>¿Estás segura?</h2>
+        <p class="ayuda">${e(mensaje)}</p>
+        <div class="pie-modal">
+          <button class="btn liso" id="ca-cancelar">Cancelar</button>
+          <button class="btn liso peligro" id="ca-confirmar">Sí, continuar</button>
+        </div>
+      </div>`;
+    document.body.appendChild(capa);
+    const cerrar = (resultado) => { capa.remove(); resolve(resultado); };
+    capa.querySelector('#ca-cancelar').onclick = () => cerrar(false);
+    capa.querySelector('#ca-confirmar').onclick = () => cerrar(true);
+    capa.onclick = (ev) => { if (ev.target === capa) cerrar(false); };
+  });
 }
 
 let toastTimer;
