@@ -2333,3 +2333,160 @@ alter table public.recibos
 -- recibo de prueba con el mismo caso (pendiente + pago incompleto):
 -- medidas de posición confirmaron 0 solape (segundo chip empieza 4px
 -- después de que termina el primero). Dato de prueba borrado después.
+
+-- ============================================================
+-- Tanda de feedback: matrícula en ficha, cobro rápido, recibos (22/09/2026)
+-- ============================================================
+
+-- 1) Precio "de 5 en 5": las flechas ↑↓ de los campos de precio (tarifa por
+--    asignatura en la ficha, precio nuevo del modal "Modificación horas
+--    alumnos", y "Cambiar precio" en bloque por asignatura) iban de 0,01 en
+--    0,01 — molesto para precios que siempre son enteros. Los tres pasan a
+--    step="5" (se puede seguir escribiendo cualquier importe a mano, esto
+--    solo cambia el paso de las flechitas). "Descuento especial" no se
+--    toca, no es un precio.
+
+-- 2) Matrícula en la ficha del alumno (antes solo existía al vuelo, al
+--    generar un recibo):
+alter table public.alumnos add column matricula_importe numeric;
+--    Campo nuevo "Matrícula (€)" en la ficha, junto a "Descuento especial"
+--    (solo admin, mismo patrón — guardarFicha() lo guarda/borra igual que
+--    descuento_extra). Se cobra 1 sola vez: al abrir "Recibo" de un alumno,
+--    si la ficha tiene un importe puesto Y todavía no hay NINGÚN recibo
+--    suyo con incluye_matricula=true, la casilla "Añadir matrícula" sale ya
+--    marcada con ese importe puesto (antes había que acordarse de marcarla
+--    y escribir el número cada vez). Si ya se cobró alguna vez, no se
+--    vuelve a proponer sola (aviso "(ya se le cobró antes)"), pero se puede
+--    seguir marcando a mano si hiciera falta de verdad — no hay bloqueo
+--    duro, decisión deliberada: no se pidió impedirlo, solo dejar de
+--    sugerirlo dos veces.
+--
+--    Insignia "M" (círculo turquesa #17a2a2, junto al nombre en la lista de
+--    Alumnos) cuando la ficha tiene matricula_importe puesto — para ver de
+--    un vistazo quién la tiene rellena, sin tener que abrir cada ficha.
+--
+--    Probado en vivo con un alumno de prueba: ficha con matrícula a 60€ →
+--    insignia "M" visible en la lista → 1er recibo sale con la casilla
+--    marcada y 60€ prefijados (140€ = 80€ mensualidad + 60€ matrícula) →
+--    2º recibo del mismo alumno ya NO la marca sola ("ya se le cobró
+--    antes"). Dato de prueba borrado después.
+
+-- 3) Cobro rápido: el botón "💳 Tarjeta" pasa a "🏦 Banco" (mismo texto que
+--    ya usa el cobro normal) — el comportamiento no cambia, ya iba a la
+--    cuenta Banco desde el principio; solo confundía el nombre.
+
+-- 4) CORREGIDO el mismo día: el cambio de arriba (chip de cuenta oculto en
+--    "Justificantes por enviar") no era lo que se pidió — se revirtió del
+--    todo (quitado el parámetro `ocultarCuenta` de filasRecibos(), el chip
+--    vuelve a salir igual que siempre en esa pestaña). Lo que sí se pidió:
+--    hay dos formas de cobrar (cobro rápido, que se salta enviar y esperar;
+--    y el cobro normal en verde, que sigue los pasos: enviar → pendiente de
+--    cobro → cobrado) y en "Pendientes de envío" (antes de mandar nada)
+--    salían las DOS a la vez — el botón normal "✓ Cobrado" ahí permitía
+--    saltarse el envío igual que cobro rápido, pero sin quedar identificado
+--    como tal. Se quita el botón normal "✓ Cobrado" de esa pestaña del
+--    todo: en "Pendientes de envío" solo se puede cobrar con "⚡ Cobro
+--    rápido"; el botón normal sigue existiendo igual que siempre, pero solo
+--    en "Pendientes de cobrar" (una vez ya enviado). Probado en vivo: fila
+--    en "Pendientes de envío" con un único botón de cobro ("⚡ Cobro
+--    rápido"), sin "✓ Cobrado".
+
+-- 5) Editar recibo (modalEditarRecibo) exigía "concepto" incluso cuando lo
+--    único que hay es la matrícula (donde "Matrícula" ya lo dice todo). Se
+--    relaja: si el concepto se deja vacío Y la casilla de matrícula está
+--    marcada, se rellena solo con "+ Matrícula" (mismo formato que ya usa
+--    modalRecibo() para un recibo de solo matrícula) en vez de bloquear con
+--    "Concepto e importe son obligatorios". Si no hay matrícula marcada,
+--    sigue exigiéndose como antes (horas extra, ajustes...).
+--    De paso, se corrigió un bug real encontrado al revisar esto: al
+--    reabrir para editar un recibo que YA era solo matrícula (concepto "+
+--    Matrícula", sin espacio delante), la regex que le quita el sufijo
+--    antes de reconstruirlo solo buscaba " + Matrícula" CON espacio
+--    delante — no la reconocía, y al guardar de nuevo quedaba duplicado
+--    ("+ Matrícula + Matrícula"). Ahora se prueban las dos formas.
+--    Probado en vivo: concepto vacío + matrícula marcada → guarda como
+--    "Matrícula" (antes bloqueaba) → reabrir y tocar "Extra" → concepto
+--    "+ Matrícula" sin duplicar.
+
+-- 6) "Recibos del mes (en lote)": la protección contra duplicados por mes
+--    ya existía (de la revisión de "compartir asignaturas"), pero solo
+--    avisaba con un número ("3 ya tenían recibo de ese mes"). Ahora, si se
+--    salta a alguien, se abre un resumen aparte con el nombre de cada
+--    alumno saltado (modalResultadoBulk()), para poder verificar de un
+--    vistazo que no falta ni sobra nadie en vez de fiarse solo del número
+--    — sin cambiar la protección en sí, que sigue intacta. Probado en vivo
+--    filtrando la lista a un solo alumno de prueba con recibo ya generado
+--    ese mes: "Generados 0... 1 alumno ya tenía recibo" con su nombre en
+--    la lista.
+
+-- 7) Repintado en tiempo real fuera de un modal (recargarTrasCambioRemoto)
+--    pasa a ir envuelto en conFocoPreservado() — si llega un cambio remoto
+--    mientras se está escribiendo en un buscador/filtro de una lista (sin
+--    ningún modal abierto), ya no se pierde el foco ni la posición del
+--    cursor.
+
+-- 8) "A veces en Windows la app deja de responder al teclado en mitad de
+--    una ficha (sin cambiar de pantalla), nunca en Mac" (main.js, no
+--    Supabase). Descartada la hipótesis de que fuera el aviso de
+--    actualización tapando la ficha (confirmado con la jefa: la pantalla
+--    sigue siendo la misma, solo deja de escribir). Hipótesis nueva,
+--    bastante más probable: `autoHideMenuBar: true` no quita el menú de la
+--    ventana, solo lo esconde — sigue ahí "detrás" y Alt lo puede seguir
+--    abriendo. En teclado español, AltGr (el Alt derecho) se usa todo el
+--    rato para escribir @ y otros símbolos — justo lo típico al escribir un
+--    email o un importe en una ficha. Si Windows interpreta ese AltGr como
+--    un Alt suelto en el momento menos pensado, el foco del teclado se lo
+--    puede quedar el menú oculto en vez de la ficha, sin que se note nada
+--    raro en pantalla. Encaja con las tres pistas: solo Windows (en Mac el
+--    menú es de toda la aplicación, no de la ventana, y no tiene este
+--    comportamiento), "a veces" (solo cuando toca escribir algo con AltGr),
+--    y "la misma pantalla pero no responde" (nada se repinta, solo deja de
+--    llegar el teclado).
+--
+--    Arreglo: `win.setMenu(null)` justo después de crear la ventana, en vez
+--    de autoHideMenuBar — quita el menú del todo, no solo lo esconde, así
+--    no hay nada que Alt/AltGr puedan llegar a abrir. Sin riesgo en Mac
+--    (setMenu no hace nada ahí, según la documentación de Electron — el
+--    menú de Mac es aparte, de toda la app, y esta app nunca lo toca, así
+--    que los atajos de siempre — copiar/pegar, etc. — no cambian). Probado
+--    en vivo que la app arranca con normalidad tras el cambio.
+--
+--    Pendiente de confirmar del todo: es la hipótesis más sólida encontrada
+--    a partir de las pistas (Windows/Spanish keyboard/no cambia de
+--    pantalla), pero no hay forma de reproducirlo a voluntad para
+--    verificarlo al 100% antes de publicar — si volviera a pasar después de
+--    esta actualización, es la primera pista a descartar/confirmar.
+
+-- 9) Confirmado el punto 1 (precio de 5 en 5): ya solo afecta a precios
+--    (tarifa por asignatura, matrícula, "Modificación horas alumnos" y
+--    "Cambiar precio" en bloque) — las horas semanales (ficha y
+--    "Modificación horas alumnos") siguen en step="0.5", sin tocar.
+
+-- 10) Ficha del alumno más grande: tenía mucho contenido (datos, asignaturas,
+--     historial de recibos, notas) para el ancho de modal genérico
+--     (min(680px, 92vw)) — se veía con scroll casi siempre. Clase nueva
+--     `.modal.ancho` (min(920px, 95vw), max-height 94vh), añadida solo al
+--     modal de la ficha del alumno (modalAlumno) con
+--     `document.querySelector('.modal').classList.add('ancho')` justo
+--     después de abrirModal() — el resto de modales de la app (elegir
+--     cuenta, confirmar cobro, etc.) no se tocan, siguen con su tamaño
+--     pequeño de siempre.
+
+-- 11) La matrícula puesta desde un recibo (al generarlo marcando "Añadir
+--     matrícula", o al editar un recibo ya existente) ahora también rellena
+--     el campo de la ficha del alumno si estaba vacío — así la insignia "M"
+--     se ve aunque la matrícula se haya cobrado desde el recibo y no se
+--     haya escrito antes a mano en la ficha. crearRecibo() y el guardado de
+--     modalEditarRecibo() hacen el mismo `update alumnos set
+--     matricula_importe = ...` cuando `importeMatricula > 0` y la ficha
+--     todavía no tenía nada puesto (si ya tenía un importe, no se toca — se
+--     respeta lo que ya hubiera). Los sitios que llaman a esto ahora
+--     también recargan cargarAlumnos() (antes solo cargarRecibos()), y el
+--     "Cerrar" del aviso de "Recibo generado ✓" pasa de refrescar solo si
+--     estabas en Recibos a refrescar SIEMPRE la vista en la que estés
+--     (renderVistaActual(), no solo renderRecibos()) — si no, la insignia
+--     "M" no se veía hasta cambiar de pestaña y volver, aunque el dato ya
+--     estuviera bien guardado. Probado en vivo dos veces (generar recibo
+--     nuevo marcando matrícula a mano, y editando un recibo para añadirla):
+--     las dos veces, la ficha se rellena sola y la insignia "M" aparece en
+--     la lista al momento, sin recargar nada.

@@ -137,6 +137,11 @@ td small { color: var(--gris); }
 
 .chip { padding: 2px 10px; border-radius: 99px; font-size: 12px; }
 .estado-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.badge-matricula {
+  display: inline-block; width: 16px; height: 16px; line-height: 16px;
+  text-align: center; border-radius: 50%; background: #17a2a2; color: #fff;
+  font-size: 10px; font-weight: 700; vertical-align: middle;
+}
 .chip-asig {
   display: inline-block; background: var(--naranja-suave); color: var(--tinta);
   border-radius: 99px; padding: 2px 10px; font-size: 12px; margin: 1px 0;
@@ -181,6 +186,11 @@ td small { color: var(--gris); }
   width: min(680px, 92vw); max-height: 90vh; overflow-y: auto;
   box-shadow: 0 12px 40px rgba(0,0,0,.18);
 }
+/* Ficha del alumno: bastante más contenido (datos, asignaturas, historial de
+   recibos, notas) que el resto de modales — más ancha y más alta para que
+   quepa de un vistazo con menos scroll, sin agrandar los modales pequeños
+   (elegir cuenta, confirmar cobro...) que no lo necesitan. */
+.modal.ancho { width: min(920px, 95vw); max-height: 94vh; }
 .modal h2 { font-size: 17px; margin-bottom: 6px; }
 .modal label { display: block; margin-top: 10px; color: var(--gris); font-size: 13px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }

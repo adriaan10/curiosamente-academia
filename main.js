@@ -120,13 +120,25 @@ function createWindow() {
     // .ico es un formato de Windows — en Mac (y Linux) hay que darle el .png,
     // si no el icono de la ventana no carga bien.
     icon: path.join(__dirname, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
-    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false
     }
   });
+  // Sin menú de verdad (nada de File/Edit/View propio de la app), así que se
+  // quita del todo en vez de solo ocultarlo con autoHideMenuBar — con esa
+  // opción el menú sigue ahí "detrás", solo invisible, y Alt lo sigue
+  // pudiendo abrir. En teclado español (donde AltGr — el Alt derecho — se usa
+  // continuamente para arroba, símbolos, etc. al escribir un email o un
+  // importe) eso es sospechoso de ser la causa del aviso de "a veces en
+  // Windows deja de responder al teclado en mitad de una ficha, sin cambiar
+  // de pantalla": si Windows llega a interpretar ese AltGr como un Alt suelto,
+  // el foco del teclado se lo puede quedar el menú oculto en vez de la
+  // página, aunque visualmente no cambie nada. No hay menú propio que perder
+  // al quitarlo del todo (win.setMenu(null) no hace nada en Mac, donde el
+  // menú es de la aplicación entera, no de la ventana).
+  win.setMenu(null);
   // Sin esto, el <title> de index.html sobrescribe el título de la ventana
   // en cuanto carga la página, y la versión desaparece de la barra.
   win.on('page-title-updated', (event) => event.preventDefault());

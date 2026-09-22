@@ -284,7 +284,10 @@ async function recargarTrasCambioRemoto() {
     refrescarAvisoAbierto();
     return;
   }
-  renderVistaActual();
+  // conFocoPreservado: si se está escribiendo en un buscador/filtro de una
+  // lista (sin ningún modal abierto) justo cuando llega un cambio remoto, el
+  // repintado completo no debe hacer perder el foco ni la posición del cursor.
+  conFocoPreservado(renderVistaActual);
 }
 
 async function cargarCambiosHorario() {
@@ -1219,7 +1222,7 @@ function renderAlumnos() {
     </tr></thead>
     <tbody>
     ${lista.map(a => `<tr class="${a.estado === 'baja' ? 'apagado' : ''}">
-      <td><strong>${e(a.nombre)}</strong>${a.tutor_nombre ? `<br><small>Tutor: ${e(a.tutor_nombre)}</small>` : ''}${a.empieza_proximo_mes ? '<br><small>⏳ Empieza el próximo mes</small>' : ''}</td>
+      <td><strong>${e(a.nombre)}</strong>${a.matricula_importe != null ? ' <span class="badge-matricula" title="Tiene matrícula puesta en la ficha">M</span>' : ''}${a.tutor_nombre ? `<br><small>Tutor: ${e(a.tutor_nombre)}</small>` : ''}${a.empieza_proximo_mes ? '<br><small>⏳ Empieza el próximo mes</small>' : ''}</td>
       <td>${(a.matriculas || []).map(m => chipAsignatura(m)).join(' ')
         || '<small>Sin asignaturas</small>'}</td>
       <td>${e(telefonosParaLista(a))}</td>
@@ -1342,6 +1345,8 @@ function modalAlumno(alumno) {
     <label>Dirección de facturación<input id="a-fact-dir" value="${e(a.facturacion_direccion || '')}"></label>
     <label>Descuento especial (€/mes)${esAdmin ? '' : ' <small>(solo admin)</small>'}
       <input id="a-descuento" type="number" min="0" step="0.01" value="${a.descuento_extra || ''}" placeholder="0" ${esAdmin ? '' : 'disabled'}></label>
+    <label>Matrícula (€)${esAdmin ? ' <small>(se cobra 1 sola vez)</small>' : ' <small>(solo admin)</small>'}
+      <input id="a-matricula" type="number" min="0" step="5" value="${a.matricula_importe ?? ''}" placeholder="0" ${esAdmin ? '' : 'disabled'}></label>
   </div>
   <label class="check-inline" style="margin-top:10px">
     <input type="checkbox" id="a-empieza-prox-mes" ${a.empieza_proximo_mes ? 'checked' : ''}>
@@ -1402,6 +1407,7 @@ function modalAlumno(alumno) {
     <button class="btn primario" id="m-guardar">Guardar</button>
   </div>
   <p id="m-msg" class="error"></p>`);
+  document.querySelector('.modal').classList.add('ancho');
 
   const pintarMatriculas = () => {
     document.getElementById('a-matriculas').innerHTML = ms.map((m, i) => {
@@ -1424,7 +1430,7 @@ function modalAlumno(alumno) {
           ${profesoresActivos().map(p => `<option value="${p.id}" ${p.id === m._profSel ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
         </select>
         <select data-m-asig="${i}">${opcionesAsignaturas(m._profSel || null, m.asignatura_id)}</select>
-        <input type="number" data-m-tarifa="${i}" min="0" step="0.01" placeholder="${esAdmin ? '€' : 'lo pone el admin'}"
+        <input type="number" data-m-tarifa="${i}" min="0" step="5" placeholder="${esAdmin ? '€' : 'lo pone el admin'}"
           value="${m.tarifa ?? ''}" class="ancho-tarifa" ${esAdmin ? '' : 'disabled'}>
         <select data-m-tipo="${i}">
           <option value="mes" ${m.tipo_tarifa !== 'clase' ? 'selected' : ''}>€/mes</option>
@@ -1526,6 +1532,7 @@ function modalAlumno(alumno) {
       facturacion_direccion: v('a-fact-dir') || null,
       notas: v('a-notas') || null,
       descuento_extra: esAdmin ? (Number(v('a-descuento')) || 0) : undefined,
+      matricula_importe: esAdmin ? (v('a-matricula') ? Number(v('a-matricula')) : null) : undefined,
       empieza_proximo_mes: document.getElementById('a-empieza-prox-mes').checked
     };
     // Padres separados: si se desmarca, se limpian los datos del reparto (no
@@ -1547,7 +1554,7 @@ function modalAlumno(alumno) {
       fila.madre_porcentaje = 50;
     }
     if (estadoNuevo) fila.estado = estadoNuevo;
-    if (!esAdmin) delete fila.descuento_extra; // el profesor no lo toca, no se envía
+    if (!esAdmin) { delete fila.descuento_extra; delete fila.matricula_importe; } // el profesor no los toca, no se envían
     if (!nombreSolo) return msg('El nombre es obligatorio.');
     if (padresSeparados && (!fila.madre_telefono || !fila.padre_telefono)) {
       return msg('Si los padres están separados, hacen falta los dos teléfonos.');
@@ -1753,7 +1760,7 @@ function modalModificaciones() {
           <span class="md-asig">${e(m.asignaturas?.nombre || '')}</span>
           <span class="ayuda">ahora: ${m.horas_semana ?? '—'} h/sem${esAdmin ? ` · ${formatoImporte(m.tarifa)}€/${m.tipo_tarifa === 'clase' ? 'clase' : 'mes'}` : ''}</span>
           <input type="number" min="0" step="0.5" placeholder="horas nuevas" data-nueva-hora="${m.id}" class="ancho-horas">
-          ${esAdmin ? `<input type="number" min="0" step="0.01" placeholder="precio nuevo" data-nuevo-precio="${m.id}" class="ancho-tarifa">` : ''}
+          ${esAdmin ? `<input type="number" min="0" step="5" placeholder="precio nuevo" data-nuevo-precio="${m.id}" class="ancho-tarifa">` : ''}
           <button class="btn chico" data-guardar-hora="${m.id}" data-alumno="${a.id}" data-antes="${m.horas_semana ?? ''}">Guardar</button>
         </div>`).join('')}
       </div>`).join('');
@@ -2824,6 +2831,14 @@ function modalRecibo(alumno) {
   const idsMias = new Set(misMatriculas(alumno).map(m => m.id));
   if (!todasMats.length) return avisar('Este alumno no tiene ninguna asignatura apuntada.', true);
 
+  // La matrícula se cobra 1 sola vez: si la ficha tiene un importe puesto y
+  // este alumno todavía no tiene ningún recibo con matrícula incluida, se
+  // preselecciona sola (con el importe de la ficha) para no tener que
+  // acordarse de marcarla a mano. Si ya se cobró alguna vez, no se vuelve a
+  // proponer — pero se puede seguir marcando a mano si hiciera falta.
+  const matriculaYaCobrada = S.recibos.some(r => r.alumno_id === alumno.id && r.incluye_matricula);
+  const matriculaPendiente = !matriculaYaCobrada && alumno.matricula_importe != null;
+
   abrirModal(`
   <h2>Recibo — ${e(alumno.nombre)}</h2>
   <p class="ayuda">Marca las asignaturas a cobrar y los meses. El concepto y el importe se calculan
@@ -2846,9 +2861,11 @@ function modalRecibo(alumno) {
     <label>Fecha de emisión<input id="r-fecha" value="${hoyDDMMAAAA()}"></label>
   </div>
   <label class="check-inline" style="margin-top:10px">
-    <input type="checkbox" id="r-matricula"> Añadir matrícula (aparte, va a Ingresos &gt; Matrícula)
+    <input type="checkbox" id="r-matricula" ${matriculaPendiente ? 'checked' : ''}> Añadir matrícula (aparte, va a Ingresos &gt; Matrícula)
+    ${matriculaYaCobrada ? ' <small>(ya se le cobró antes)</small>' : ''}
   </label>
-  <input id="r-importe-matricula" type="number" min="0" step="0.01" placeholder="Importe de la matrícula (€)" style="display:none; margin-top:6px">
+  <input id="r-importe-matricula" type="number" min="0" step="0.01" placeholder="Importe de la matrícula (€)"
+    value="${matriculaPendiente ? alumno.matricula_importe : ''}" style="${matriculaPendiente ? '' : 'display:none'}; margin-top:6px">
   <p class="letras">La cantidad de: <strong id="r-letras"></strong>€</p>
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cancelar</button>
@@ -2955,7 +2972,9 @@ function modalRecibo(alumno) {
         importeMatricula: $matriculaChk.checked ? (Number($matriculaImporte.value) || 0) : 0
       });
       cerrarModal();
-      await cargarRecibos();
+      // cargarAlumnos() también, por si crearRecibo() acaba de rellenar la
+      // matrícula de la ficha: así la insignia "M" se ve sin recargar.
+      await Promise.all([cargarRecibos(), cargarAlumnos()]);
       modalReciboListo(recibos);
     } catch (err) {
       btn.disabled = false; btn.textContent = 'Generar recibo PDF';
@@ -2991,6 +3010,14 @@ async function crearRecibo(alumno, { concepto, importe, recibiDe, fechaEmision, 
     progenitor
   }).select('*').single();
   if (error) throw new Error(error.message);
+
+  // Si esta matrícula no estaba ya anotada en la ficha (se acaba de marcar
+  // aquí mismo, a mano, la primera vez), se deja constancia también ahí —
+  // así la insignia "M" y el autocompletado del próximo recibo ya la ven,
+  // aunque se haya añadido desde el recibo y no desde la ficha.
+  if (importeMatricula > 0 && alumno.matricula_importe == null) {
+    await S.sb.from('alumnos').update({ matricula_importe: importeMatricula }).eq('id', alumno.id);
+  }
 
   const referencia = 'R-' + String(fila.referencia).padStart(5, '0');
   const bytes = await generarReciboPdf({
@@ -3121,7 +3148,7 @@ function modalReciboListo(recibos) {
   </div>
   <p class="ayuda">Al pulsar “Enviar por WhatsApp” se abre el chat con el mensaje escrito y la carpeta
   del PDF: arrastra el archivo al chat y envíalo.</p>`);
-  document.getElementById('m-cancelar').onclick = () => { cerrarModal(); if (S.vista === 'recibos') renderRecibos(); };
+  document.getElementById('m-cancelar').onclick = () => { cerrarModal(); renderVistaActual(); };
   lista.forEach((recibo, i) => {
     document.querySelector(`[data-rl-abrir="${i}"]`).onclick = () => window.api.openPdf(recibo.pdf_path);
     document.querySelector(`[data-rl-carpeta="${i}"]`).onclick = () => window.api.revealPdf(recibo.pdf_path);
@@ -3445,6 +3472,7 @@ function modalReciboBulk() {
     const btn = document.getElementById('b-generar');
     btn.disabled = true;
     let ok = 0, mal = 0, repetidos = 0;
+    const nombresRepetidos = [];
     for (const a of candidatos) {
       btn.textContent = `Generando ${ok + mal + repetidos + 1}/${candidatos.length}…`;
       try {
@@ -3457,6 +3485,7 @@ function modalReciboBulk() {
         const { data: existentes } = await S.sb.from('recibos').select('periodos').eq('alumno_id', a.id);
         if ((existentes || []).some(r => (r.periodos || []).some(p => periodos.includes(p)))) {
           repetidos++;
+          nombresRepetidos.push(a.nombre);
           continue;
         }
         const misMats = misMatriculas(a);
@@ -3481,8 +3510,30 @@ function modalReciboBulk() {
     await cargarRecibos();
     S.vista = 'recibos';
     renderMain();
-    avisar(`Generados ${ok} recibos${mal ? `, ${mal} con error` : ''}${repetidos ? `, ${repetidos} ya tenían recibo de ese mes` : ''}. Los PDF están en la carpeta de recibos.`);
+    if (nombresRepetidos.length) {
+      modalResultadoBulk(ok, mal, nombresRepetidos);
+    } else {
+      avisar(`Generados ${ok} recibos${mal ? `, ${mal} con error` : ''}. Los PDF están en la carpeta de recibos.`);
+    }
   };
+}
+
+// Lista con nombre y apellidos a quién se le ha saltado la generación en
+// lote por ya tener recibo de ese mes — para poder verificar de un vistazo
+// que no se ha colado ni faltado nadie, en vez de fiarse solo de un número.
+function modalResultadoBulk(ok, mal, nombresRepetidos) {
+  abrirModal(`
+  <h2>Recibos del mes (en lote) — hecho</h2>
+  <p class="ayuda">Generados <strong>${ok}</strong> recibo${ok === 1 ? '' : 's'}${mal ? `, ${mal} con error` : ''}.
+  Los PDF están en la carpeta de recibos.</p>
+  <p class="ayuda"><strong>${nombresRepetidos.length}</strong> alumno${nombresRepetidos.length === 1 ? '' : 's'}
+  ya tenía${nombresRepetidos.length === 1 ? '' : 'n'} recibo de ese mes, así que no se
+  ${nombresRepetidos.length === 1 ? 'le generó otro' : 'les generó otro'} (revísalos si hace falta):</p>
+  <ul class="detalle-alumnos">
+    ${nombresRepetidos.map(n => `<li>${e(n)}</li>`).join('')}
+  </ul>
+  <div class="pie-modal"><button class="btn primario" id="m-cancelar">Entendido</button></div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
 }
 
 // Regenera el PDF de un recibo a partir de sus datos y actualiza la ruta en la BD.
@@ -3570,21 +3621,20 @@ function modalElegirCuentaCobro(titulo, mensaje, onElegir) {
 // Cobro rápido: la jefa cobra en persona nada más apuntarse (antes de
 // mandar nada) y se salta el trámite entero de enviar/esperar — pasa
 // directo a Cobrado, sin justificante pendiente. Aparte del cobro normal
-// para no liarlos: pregunta Efectivo/Tarjeta (Tarjeta se contabiliza igual
-// que Banco) y el resultado se marca con `cobro_rapido: true` para que se
-// identifique luego en la pestaña de Cobrados.
+// para no liarlos: pregunta Efectivo/Banco y el resultado se marca con
+// `cobro_rapido: true` para que se identifique luego en la pestaña de Cobrados.
 function modalCobroRapido(mensaje, onElegir) {
   abrirModal(`
   <h2>⚡ Cobro rápido</h2>
   <p class="ayuda">${mensaje} No se enviará ningún justificante — se marcará como cobrado directamente.</p>
   <div class="pie-modal columna">
     <button class="btn cobro-rapido" id="cr-efectivo">💶 Efectivo</button>
-    <button class="btn cobro-rapido" id="cr-tarjeta">💳 Tarjeta</button>
+    <button class="btn cobro-rapido" id="cr-banco">🏦 Banco</button>
     <button class="btn liso" id="m-cancelar">Cancelar</button>
   </div>`);
   document.getElementById('m-cancelar').onclick = cerrarModal;
   document.getElementById('cr-efectivo').onclick = () => onElegir('efectivo');
-  document.getElementById('cr-tarjeta').onclick = () => onElegir('banco');
+  document.getElementById('cr-banco').onclick = () => onElegir('banco');
 }
 
 // Anotación de "han pagado parte, no todo" — puramente visual/informativa:
@@ -3651,8 +3701,9 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables, permitirCobroRapi
         ${pagados
           ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>
              <button class="btn chico liso" data-editar-cuenta="${r.id}" title="Corregir efectivo/banco">✎</button>` : '')
-          : `<button class="btn chico pagar" data-pagar="${r.id}">✓ Cobrado</button>
-             ${permitirCobroRapido && esAdmin ? `<button class="btn chico cobro-rapido" data-cobro-rapido="${r.id}" title="Cobrado en persona al momento, sin enviar nada">⚡ Cobro rápido</button>` : ''}
+          : `${permitirCobroRapido
+               ? (esAdmin ? `<button class="btn chico cobro-rapido" data-cobro-rapido="${r.id}" title="Cobrado en persona al momento, sin enviar nada">⚡ Cobro rápido</button>` : '')
+               : `<button class="btn chico pagar" data-pagar="${r.id}">✓ Cobrado</button>`}
              <button class="btn chico liso" data-pago-incompleto="${r.id}" title="Anotar que han pagado solo una parte">Pago incompleto</button>
              ${esAdmin ? `<button class="btn chico liso" data-wa="${r.id}">WhatsApp</button>` : ''}
              <button class="btn chico liso" data-editar-recibo="${r.id}" title="Editar recibo">✏️</button>`}
@@ -4047,8 +4098,12 @@ function modalEditarRecibo(r) {
   // sigue marcada la casilla).
   const matriculaOriginal = Number(r.importe_matricula) || 0;
   const importeBase = Number(r.importe) - matriculaOriginal;
+  // Un recibo de solo matrícula (sin meses) se genera con concepto "+
+  // Matrícula" a secas (sin espacio delante, ver modalRecibo/recalcular);
+  // uno con mensualidad de por medio lo lleva como sufijo " + Matrícula".
+  // Hay que quitar el que corresponda, si no se duplica al reabrir para editar.
   const conceptoOriginal = r.incluye_matricula
-    ? r.concepto.replace(/ \+ Matrícula$/, '')
+    ? r.concepto.replace(/^\+ Matrícula$/, '').replace(/ \+ Matrícula$/, '')
     : r.concepto;
   abrirModal(`
   <h2>Editar recibo R-${String(r.referencia).padStart(5, '0')} — ${e(r.alumnos?.nombre || '')}</h2>
@@ -4103,13 +4158,18 @@ function modalEditarRecibo(r) {
 
   document.getElementById('m-cancelar').onclick = cerrarModal;
   document.getElementById('er-guardar').onclick = async () => {
-    const concepto = $concepto.value.trim();
+    const conMatricula = $matriculaChk.checked;
+    // Si es solo matrícula (nada de horas extra ni otro concepto), "+
+    // Matrícula" ya lo dice todo — no tiene sentido exigir que además se
+    // escriba algo. Mismo formato que genera modalRecibo() en este caso
+    // (nunca "Matrícula" a secas), para que conceptoOriginal lo reconozca
+    // bien si se vuelve a abrir para editar más adelante.
+    const concepto = $concepto.value.trim() || (conMatricula ? '+ Matrícula' : '');
     const importe = Number($importe.value);
     if (!concepto || !importe) {
       document.getElementById('m-msg').textContent = 'Concepto e importe son obligatorios.';
       return;
     }
-    const conMatricula = $matriculaChk.checked;
     const importeMatricula = conMatricula ? (Number($matriculaImporte.value) || 0) : 0;
     const btn = document.getElementById('er-guardar');
     btn.disabled = true; btn.textContent = 'Guardando…';
@@ -4126,7 +4186,14 @@ function modalEditarRecibo(r) {
       document.getElementById('m-msg').textContent = 'Error: ' + error.message;
       return;
     }
-    await cargarRecibos();
+    // Igual que al generar un recibo nuevo: si se acaba de marcar la
+    // matrícula aquí y la ficha todavía no la tenía, se deja constancia
+    // también ahí (insignia "M" + autocompletado del próximo recibo).
+    const alumnoDeEste = S.alumnos.find(a => a.id === r.alumno_id);
+    if (importeMatricula > 0 && alumnoDeEste && alumnoDeEste.matricula_importe == null) {
+      await S.sb.from('alumnos').update({ matricula_importe: importeMatricula }).eq('id', r.alumno_id);
+    }
+    await Promise.all([cargarRecibos(), cargarAlumnos()]);
     const actualizado = S.recibos.find(x => x.id === r.id);
     if (actualizado) await regenerarPdf(actualizado);
     cerrarModal();
@@ -4784,7 +4851,7 @@ function modalCambiarTarifaAsignatura(asignaturaId, tipoTarifa) {
   <p class="ayuda">Afecta a los <strong>${n}</strong> alumno${n === 1 ? '' : 's'} matriculados en esta
   asignatura con tarifa ${g.tipo_tarifa === 'clase' ? 'por clase' : 'mensual'}.
   Precio actual: ${precioActual}.</p>
-  <label>Nuevo precio (€)<input id="ct-precio" type="number" min="0" step="0.01"></label>
+  <label>Nuevo precio (€)<input id="ct-precio" type="number" min="0" step="5"></label>
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cancelar</button>
     <button class="btn primario" id="ct-guardar">Aplicar a los ${n} alumnos</button>
