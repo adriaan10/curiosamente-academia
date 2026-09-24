@@ -84,8 +84,18 @@ header {
 nav { display: flex; gap: 4px; }
 .tab {
   border: none; background: none; padding: 8px 16px; font-size: 14px;
-  color: var(--gris); cursor: pointer; border-radius: 99px;
+  color: var(--gris); cursor: pointer; border-radius: 99px; white-space: nowrap;
   transition: background .15s ease, color .15s ease;
+}
+/* En una sola fila la cabecera necesita ~1430px; por debajo de eso (la
+   ventana por defecto mide 1200 y el mínimo es 900) las pestañas pasan a una
+   segunda fila en vez de comprimirse y cortarse por la derecha. */
+@media (max-width: 1450px) {
+  header { flex-wrap: wrap; gap: 6px 16px; padding: 8px 20px 6px; }
+  nav { order: 3; flex: 1 1 100%; flex-wrap: wrap; }
+}
+@media (max-width: 1030px) {
+  .tab { padding: 8px 10px; }
 }
 .tab:hover { background: var(--naranja-suave); color: var(--granate); }
 .tab.activa { color: #fff; font-weight: 600; background: var(--granate); }
@@ -134,6 +144,11 @@ tr:hover td { background: var(--fondo); }
 tr.apagado { opacity: .5; }
 td small { color: var(--gris); }
 .acciones { text-align: right; white-space: nowrap; }
+/* Con la ventana estrecha, la fila de botones de cada recibo/alumno salta de
+   línea en vez de ensanchar la tabla más que la pantalla. */
+@media (max-width: 1100px) {
+  .acciones { white-space: normal; }
+}
 
 .chip { padding: 2px 10px; border-radius: 99px; font-size: 12px; }
 .estado-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
@@ -164,11 +179,17 @@ td small { color: var(--gris); }
 .chip.pago-parcial { background: #d9b3f0; color: #000; border: 1.5px solid #000; font-weight: 600; }
 .chip.desarrollador { background: #6b7280; color: #fff; border: 1.5px solid #000; font-weight: 600; }
 .chip.cobro-rapido { background: #ede9fe; color: #7c3aed; font-weight: 600; }
+.chip.hermanastros { background: #e0f2f1; color: #00695c; font-weight: 600; }
+.btns-columna { display: flex; flex-direction: column; gap: 6px; }
+.hs-lista { max-height: 240px; overflow-y: auto; border: 1px solid var(--borde); border-radius: 8px; padding: 4px 12px; margin-top: 4px; }
+.hs-fila { display: flex; align-items: center; gap: 8px; padding: 5px 0; }
 
 .btn.pagar { border-color: var(--verde); color: var(--verde); font-weight: 600; }
 .btn.pagar:hover { background: var(--verde); color: #fff; }
 .btn.cobro-rapido { border-color: #7c3aed; color: #7c3aed; font-weight: 600; }
 .btn.cobro-rapido:hover { background: #7c3aed; color: #fff; }
+.btn.pago-incompleto { border-color: var(--naranja-fuerte); color: var(--naranja-fuerte); font-weight: 600; white-space: nowrap; }
+.btn.pago-incompleto:hover { background: var(--naranja-fuerte); color: #fff; }
 
 .mes-seccion { margin: 22px 0 10px; font-size: 15px; }
 .mes-seccion:first-of-type { margin-top: 4px; }
@@ -196,6 +217,38 @@ td small { color: var(--gris); }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
 .pie-modal { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
 .pie-modal.columna { flex-wrap: wrap; justify-content: flex-start; }
+.pie-modal.grande .btn { padding: 13px 28px; font-size: 17px; border-radius: 10px; }
+
+/* Elegir Efectivo / Banco: dos recuadros grandes, el elegido en naranja */
+.cuenta-opciones { display: flex; gap: 14px; margin: 6px 0 4px; }
+.cuenta-opcion {
+  flex: 1; padding: 18px 12px; font: inherit; font-size: 19px; font-weight: 600;
+  background: #fff; color: var(--tinta); border: 2px solid var(--borde); border-radius: 12px;
+  cursor: pointer; transition: background .12s ease, border-color .12s ease, color .12s ease;
+}
+.cuenta-opcion:hover { border-color: var(--naranja); }
+
+/* Pago incompleto: resumen y historial de pagos, y recuadro previo al envío */
+.resumen-pagos { display: flex; gap: 10px; margin: 10px 0 12px; }
+.resumen-pagos > div { flex: 1; background: var(--naranja-suave); border-radius: 10px; padding: 10px 14px; display: flex; flex-direction: column; }
+.resumen-pagos small { color: var(--gris); font-size: 12px; }
+.resumen-pagos strong { font-size: 21px; }
+.lista-pagos { list-style: none; padding: 0; margin: 4px 0 10px; }
+.fila-pago { display: flex; align-items: center; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--borde); }
+.fila-pago:last-child { border-bottom: none; }
+.fila-pago .ayuda { margin-left: auto; }
+.caja-envio { border: 2px solid var(--borde); border-radius: 12px; padding: 12px 16px; margin: 10px 0; background: #fff; }
+.caja-envio p { margin: 6px 0; }
+.caja-envio .linea-total { padding-top: 8px; border-top: 1px solid var(--borde); }
+.chip.justificante-no { background: #fdecea; color: var(--rojo); font-weight: 600; }
+.chip.justificante-si { background: #e6f4ec; color: var(--verde); }
+.aviso-justificante { background: #fdecea; color: var(--rojo); border-radius: 10px; padding: 9px 14px; margin: 8px 0; font-size: 13.5px; font-weight: 600; }
+.btn.enviar-parcial { border-color: var(--granate); color: var(--granate); font-weight: 600; }
+.btn.enviar-parcial:hover { background: var(--granate); border-color: var(--granate); color: #fff; }
+.cuenta-opcion.activa { background: var(--naranja-fuerte); border-color: var(--naranja-fuerte); color: #fff; }
+/* Versión pequeña (una por fila de pago, al corregir cuentas) */
+.cuenta-opciones.compacta { margin: 0; gap: 8px; flex: 0 0 auto; }
+.cuenta-opciones.compacta .cuenta-opcion { flex: none; padding: 6px 12px; font-size: 14px; border-radius: 8px; }
 
 .ayuda { color: var(--gris); font-size: 13px; margin: 6px 0; line-height: 1.5; }
 .ayuda code { font-size: 12px; background: var(--fondo); padding: 1px 5px; border-radius: 4px; }
@@ -243,6 +296,13 @@ td small { color: var(--gris); }
 .portada-card.alerta .pc-num { color: var(--rojo); }
 .pc-titulo { font-weight: 600; margin: 2px 0 6px; }
 .pc-detalle { font-size: 12.5px; color: var(--gris); line-height: 1.4; }
+.portada-card.admin-revisor {
+  background: var(--granate); border-color: var(--granate);
+  max-width: 260px; margin: 0 auto; text-align: center;
+}
+.portada-card.admin-revisor .pc-titulo { color: #fff; letter-spacing: 1px; font-size: 13px; margin-bottom: 4px; }
+.portada-card.admin-revisor .pc-detalle { color: #e9c9ce; }
+.portada-card.admin-revisor:hover { border-color: var(--naranja); box-shadow: 0 6px 18px rgba(0,0,0,.18); }
 
 /* ---- ficha de clase (consulta) ---- */
 .detalle-cabecera { display: flex; align-items: flex-start; gap: 12px; padding-left: 12px; }
@@ -276,6 +336,33 @@ td small { color: var(--gris); }
 .seg { border: none; background: none; padding: 8px 18px; font: inherit; cursor: pointer; color: var(--gris); }
 .seg.activo { background: var(--granate); color: #fff; font-weight: 600; }
 .mes-nav { display: inline-flex; align-items: center; gap: 8px; }
+
+/* ---- rejillas Pagos/Recibos (admin revisor) ---- */
+/* El contenedor hace scroll horizontal si aun compactada la tabla no cabe
+   (ventana pequeña, muchos meses): nunca se corta ni se pisa nada, y la
+   columna del alumno se queda fija a la izquierda mientras se desplaza. */
+.rejilla-scroll { overflow-x: auto; background: #fff; border: 1px solid var(--borde); border-radius: 10px; }
+.rejilla-scroll .tabla-rejilla { border: none; border-radius: 0; }
+.tabla-rejilla { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid var(--borde); border-radius: 10px; }
+.tabla-rejilla th, .tabla-rejilla td { padding: 8px 5px; text-align: center; border-bottom: 1px solid var(--borde); white-space: nowrap; }
+.tabla-rejilla th { font-size: 11px; letter-spacing: 0; }
+.tabla-rejilla th:first-child, .tabla-rejilla td:first-child {
+  text-align: left; white-space: normal; min-width: 150px; max-width: 220px; padding-left: 12px;
+  position: sticky; left: 0; z-index: 1; background: #fff;
+}
+.tabla-rejilla th:first-child { background: #FFFBF6; }
+td.rej-tel { text-align: left; font-size: 12.5px; color: var(--gris); padding-left: 8px; }
+.tabla-rejilla th.rej-tel { text-align: left; padding-left: 8px; }
+.tabla-rejilla tr:last-child td { border-bottom: none; }
+.tabla-rejilla tr:hover td { background: var(--fondo); }
+.celda-grid { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 6px; font-weight: 700; }
+.celda-verde { background: var(--verde); color: #fff; }
+.celda-naranja { background: var(--naranja-fuerte); color: #fff; }
+.celda-roja { background: #fdecea; color: var(--rojo); }
+.celda-neutral { background: #f2f2f4; color: var(--gris); font-weight: 400; }
+.celda-grid.chico { width: 18px; height: 18px; font-size: 11px; }
+.rejilla-leyenda { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 14px; margin-bottom: 10px; }
+.leyenda-item { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--gris); }
 
 /* ---- ingresos y gastos: tablas de categoría ---- */
 .portada-card.estatica { cursor: default; }
@@ -407,3 +494,6 @@ td.celda-fin.vacia { color: var(--gris); }
 }
 #toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
 #toast.visible.error { background: var(--rojo); }
+
+/* El atributo hidden debe ganar siempre a los display de .btn y compañía */
+[hidden] { display: none !important; }

@@ -10,7 +10,6 @@ contextBridge.exposeInMainWorld('api', {
   pdfExists: (fullPath) => ipcRenderer.invoke('pdf:exists', fullPath),
   getRecibosDir: () => ipcRenderer.invoke('recibos:dir'),
   chooseRecibosDir: () => ipcRenderer.invoke('recibos:choose-dir'),
-  openWhatsApp: (tel, texto) => ipcRenderer.invoke('wa:open', { tel, texto }),
   saveCsv: (content, suggestedName) => ipcRenderer.invoke('csv:save', { content, suggestedName }),
   saveBackup: (json) => ipcRenderer.invoke('backup:save', json),
   getLogo: () => ipcRenderer.invoke('logo:get'),

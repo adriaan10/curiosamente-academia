@@ -18,6 +18,7 @@ const S = {
   profAsig: [],
   alumnos: [],
   recibos: [],
+  reciboPagos: [], // abonos de los recibos (con si ya se mandó su justificante)
   clases: [],
   excepciones: [],
   notas: [],
@@ -32,6 +33,9 @@ const S = {
   vista: 'inicio',
   vistaRecibos: 'pendientes',
   mesRecibos: '',
+  mesRevisor: '',
+  filtroRevisorProfesor: '',
+  vistaAdminRevisor: 'resumen',
   recibosSeleccionados: new Set(),
   vistaRosterRecibos: false,
   filtros: { texto: '', asignatura: '', estado: 'activo', profesor: '', textoRecibo: '' },
@@ -144,7 +148,7 @@ const TABLAS_TIEMPO_REAL = [
   'alumnos', 'matriculas', 'clases', 'clase_horarios', 'clase_alumnos', 'clase_excepciones',
   'recibos', 'notas', 'profesor_horario', 'cambios_horario', 'reactivaciones_alumno', 'bajas_asignatura',
   'finanzas_movimientos', 'finanzas_categorias', 'profesores', 'asignaturas', 'profesor_asignaturas',
-  'cuentas_saldo_inicial', 'avisos_descartados'
+  'cuentas_saldo_inicial', 'avisos_descartados', 'recibo_pagos'
 ];
 
 let canalTiempoReal = null;
@@ -408,11 +412,54 @@ function compararAlumnosPorApellido(a, b) {
   return (a.apellidos || '').localeCompare(b.apellidos || '') || (a.nombre || '').localeCompare(b.nombre || '');
 }
 
+// Pagos parciales de los recibos aún sin cobrar del todo, sin haberles mandado
+// justificante todavía (recibo_pagos.justificante_enviado_en vacío).
+function pagosSinJustificanteDe(reciboId) {
+  return S.reciboPagos.filter(p => p.recibo_id === reciboId && !p.justificante_enviado_en);
+}
+// Parte de lo pagado de un recibo que NO consta como pagos (recibo_pagos):
+// pagos parciales que se anotaron con la versión anterior de la app, que solo
+// guardaba un importe suelto — sin cuenta, sin fecha, sin pasar por Ingresos y
+// gastos, y sin que nadie les haya mandado nunca justificante. Es 0 en todo
+// recibo anotado con la versión nueva.
+function parcialSinDetalle(r) {
+  const suma = S.reciboPagos.filter(p => p.recibo_id === r.id).reduce((s, p) => s + Number(p.importe), 0);
+  const d = Math.round((Number(r.importe_parcial || 0) - suma) * 100) / 100;
+  return d > 0.005 ? d : 0;
+}
+// Cuántos pagos de este recibo siguen sin justificante enviado (lo anotado sin
+// detalle cuenta como uno más: nunca se ha avisado de ello).
+function nPagosSinAvisar(r) {
+  return pagosSinJustificanteDe(r.id).length + (parcialSinDetalle(r) > 0 ? 1 : 0);
+}
+// Etiqueta de las listas para un recibo con pagos parciales: cuántos pagos
+// están sin avisar (rojo) o que ya está todo avisado (verde).
+function chipJustificanteParcial(r) {
+  const n = nPagosSinAvisar(r);
+  return n
+    ? `<span class="chip justificante-no" title="Hay pagos de este recibo a los que todavía no se ha mandado el justificante">⚠ ${n} pago${n === 1 ? '' : 's'} sin justificante</span>`
+    : '<span class="chip justificante-si" title="Todos los pagos de este recibo ya tienen su justificante enviado">✓ Justificante enviado</span>';
+}
+
+// Cuenta(s) en las que se cobró un recibo: si se cobró en varios pagos
+// (recibo_pagos) pueden ser las dos, p. ej. "Efectivo + Banco".
+function textoCuentas(r) {
+  const deLosPagos = S.reciboPagos.filter(p => p.recibo_id === r.id).map(p => p.cuenta);
+  const cuentas = deLosPagos.length ? ['efectivo', 'banco'].filter(c => deLosPagos.includes(c)) : (r.cuenta ? [r.cuenta] : []);
+  return cuentas.map(c => c === 'banco' ? 'Banco' : 'Efectivo').join(' + ');
+}
+
 async function cargarRecibos() {
-  const { data, error } = await S.sb.from('recibos')
-    .select('*, alumnos(nombre, telefono, tutor_telefono, tutor_nombre, facturacion_nombre, madre_nombre, madre_telefono, padre_nombre, padre_telefono), profesores(nombre)')
-    .order('created_at', { ascending: false });
+  const [{ data, error }, resPagos] = await Promise.all([
+    S.sb.from('recibos')
+      .select('*, alumnos(nombre, telefono, tutor_telefono, tutor_nombre, facturacion_nombre, madre_nombre, madre_telefono, padre_nombre, padre_telefono), profesores(nombre)')
+      .order('created_at', { ascending: false }),
+    S.sb.from('recibo_pagos').select('id, recibo_id, importe, cuenta, fecha, creado_por, created_at, justificante_enviado_en, justificante_enviado_por')
+      .order('created_at')
+  ]);
   if (error) return avisar('Error cargando recibos: ' + error.message, true);
+  if (resPagos.error) avisar('Error cargando los pagos de los recibos: ' + resPagos.error.message, true);
+  else S.reciboPagos = resPagos.data || [];
   // Si el alumno o el profesor de un recibo se borraron de verdad (ver
   // borrar_alumno/borrar_profesor), el embed de Supabase llega a null — se
   // rellena aquí con el nombre guardado en el propio recibo (alumno_nombre/
@@ -690,6 +737,7 @@ function renderVistaActual() {
   else if (S.vista === 'profesores') renderProfesores();
   else if (S.vista === 'finanzas') renderFinanzas();
   else if (S.vista === 'reestructuracion') renderReestructuracion();
+  else if (S.vista === 'admin-revisor') renderAdminRevisor();
   else renderAjustes();
 }
 
@@ -729,9 +777,10 @@ function renderInicio() {
   const altasFueraDeFecha = esAdmin ? altasFueraDeFechaParaAdmin() : [];
   const reactivacionesSinVer = esAdmin ? reactivacionesParaAdmin() : [];
   const bajasAsignaturaSinVer = esAdmin ? bajasAsignaturaParaAdmin() : [];
-  const pagadosPorEnviar = esAdmin
-    ? S.recibos.filter(r => r.estado === 'pagado' && !r.fecha_envio_whatsapp_pago && !r.cobro_rapido)
-    : [];
+  // Igual que los demás avisos: los pendientes, más los que ya mandó el otro
+  // admin (con "Justificante enviado por X" hasta que se marquen como vistos).
+  const pagadosPorEnviar = esAdmin ? pagadosPorEnviarParaAdmin() : [];
+  const pagosParciales = esAdmin ? pagosParcialesParaAdmin() : [];
 
   document.getElementById('contenido').innerHTML = `
   <div class="portada">
@@ -742,6 +791,13 @@ function renderInicio() {
       <p class="portada-sub">tu centro de estudios</p>
     </div>
     <p class="portada-hola">Hola, <strong>${e(S.profesor?.nombre || '')}</strong> · ${e(fecha)}</p>
+    ${esAdmin ? `
+    <div class="portada-cards" style="margin-bottom:10px">
+      <div class="portada-card admin-revisor" id="pc-admin-revisor">
+        <div class="pc-titulo">ADMIN REVISOR</div>
+        <div class="pc-detalle">Vista completa de la academia, mes a mes</div>
+      </div>
+    </div>` : ''}
     <div class="portada-cards">
       ${daClases ? `
       <div class="portada-card" data-ir="horario">
@@ -767,7 +823,7 @@ function renderInicio() {
         <div class="pc-detalle">Tus pósits</div>
       </div>
     </div>
-    ${esAdmin && (fichasIncompletas.length || modificacionesSinVer.length || altasFueraDeFecha.length || reactivacionesSinVer.length || bajasAsignaturaSinVer.length || pagadosPorEnviar.length) ? `
+    ${esAdmin && (fichasIncompletas.length || modificacionesSinVer.length || altasFueraDeFecha.length || reactivacionesSinVer.length || bajasAsignaturaSinVer.length || pagadosPorEnviar.length || pagosParciales.length) ? `
     <h3 class="seccion" style="margin-top:28px">Pendiente de revisar</h3>
     <div class="portada-cards">
       ${pagadosPorEnviar.length ? `
@@ -775,6 +831,12 @@ function renderInicio() {
         <div class="pc-num">${pagadosPorEnviar.length}</div>
         <div class="pc-titulo">recibo${pagadosPorEnviar.length === 1 ? '' : 's'} cobrado${pagadosPorEnviar.length === 1 ? '' : 's'} por enviar</div>
         <div class="pc-detalle">Un profesor ha marcado un pago: manda el justificante</div>
+      </div>` : ''}
+      ${pagosParciales.length ? `
+      <div class="portada-card alerta" id="pc-pagos-parciales">
+        <div class="pc-num">${pagosParciales.length}</div>
+        <div class="pc-titulo">pago${pagosParciales.length === 1 ? '' : 's'} parcial${pagosParciales.length === 1 ? '' : 'es'}</div>
+        <div class="pc-detalle">Avísales de cuánto llevan pagado</div>
       </div>` : ''}
       ${fichasIncompletas.length ? `
       <div class="portada-card alerta" id="pc-fichas">
@@ -791,8 +853,8 @@ function renderInicio() {
       ${altasFueraDeFecha.length ? `
       <div class="portada-card alerta" id="pc-fuera-fecha">
         <div class="pc-num">${altasFueraDeFecha.length}</div>
-        <div class="pc-titulo">recibo${altasFueraDeFecha.length === 1 ? '' : 's'} para generar a mano</div>
-        <div class="pc-detalle">Alta posterior al día 1, fuera del envío automático</div>
+        <div class="pc-titulo">recibo${altasFueraDeFecha.length === 1 ? '' : 's'} de este mes sin generar</div>
+        <div class="pc-detalle">Revisa que no falte nadie por facturar</div>
       </div>` : ''}
       ${reactivacionesSinVer.length ? `
       <div class="portada-card alerta" id="pc-reactivaciones">
@@ -813,6 +875,8 @@ function renderInicio() {
     S.vista = c.dataset.ir;
     renderMain();
   });
+  const pcAdminRevisor = document.getElementById('pc-admin-revisor');
+  if (pcAdminRevisor) pcAdminRevisor.onclick = () => { S.vista = 'admin-revisor'; renderMain(); };
   const pcFichas = document.getElementById('pc-fichas');
   if (pcFichas) pcFichas.onclick = () => modalFichasIncompletas(fichasIncompletas);
   const pcMod = document.getElementById('pc-modificaciones');
@@ -824,12 +888,246 @@ function renderInicio() {
   const pcBajasAsig = document.getElementById('pc-bajas-asignatura');
   if (pcBajasAsig) pcBajasAsig.onclick = () => modalBajasAsignaturaSinVer(bajasAsignaturaSinVer);
   const pcPagados = document.getElementById('pc-pagados-enviar');
-  if (pcPagados) pcPagados.onclick = () => {
-    S.vista = 'recibos';
-    S.vistaRosterRecibos = false;
-    S.vistaRecibos = 'pagados-enviar';
-    renderMain();
-  };
+  if (pcPagados) pcPagados.onclick = () => modalPagadosPorEnviar(pagadosPorEnviar);
+  const pcPagosParciales = document.getElementById('pc-pagos-parciales');
+  if (pcPagosParciales) pcPagosParciales.onclick = () => modalPagosParcialesSinEnviar(pagosParciales);
+}
+
+// ------------------------------------------------------- admin revisor ----
+// Vista de solo lectura, solo para el admin: toda la academia de un vistazo,
+// mes a mes, sin ir pestaña por pestaña. Junta las mismas 5 categorías que
+// ya existen repartidas en Recibos, más los alumnos que ni siquiera tienen
+// recibo generado ese mes — nada de acciones desde aquí, es un panel de
+// revisión, no de gestión (para eso ya está la pestaña Recibos).
+
+// Mismo criterio que candidataAltaFueraDeFecha(), pero para un mes cualquiera
+// en vez de "hoy" — usa el estado ACTUAL del alumno (no hay histórico de
+// bajas/altas), así que para meses pasados es una aproximación razonable,
+// no un dato exacto.
+function alumnosSinReciboDelMes(mes) {
+  const mesNum = Number(mes.split('-')[1]);
+  if ([7, 8].includes(mesNum)) return []; // julio/agosto, sin actividad
+  return S.alumnos.filter(a => {
+    if (a.empieza_proximo_mes) return false;
+    if (a.estado !== 'activo') return false;
+    if (!(a.matriculas || []).some(m => m.tipo_tarifa === 'mes' && m.tarifa != null)) return false;
+    return !S.recibos.some(r => r.alumno_id === a.id && (r.periodos || []).includes(mes));
+  });
+}
+
+function profesoresDeAlumno(a) {
+  const asigIds = new Set((a.matriculas || []).map(m => m.asignatura_id));
+  const ids = new Set(S.profAsig.filter(x => asigIds.has(x.asignatura_id)).map(x => x.profesor_id));
+  const nombres = [...ids].map(id => S.profesores.find(p => p.id === id)?.nombre).filter(Boolean);
+  return nombres.length ? nombres.join(', ') : '—';
+}
+
+// Teléfono(s) de un alumno para el panel Admin Revisor: el de siempre, o los
+// dos (madre y padre, cada uno en su línea) si tiene los padres separados.
+function telefonosRevisor(a) {
+  if (!a) return '—';
+  if (a.padres_separados && (a.madre_telefono || a.padre_telefono)) {
+    return [a.madre_telefono && `Madre: ${a.madre_telefono}`, a.padre_telefono && `Padre: ${a.padre_telefono}`]
+      .filter(Boolean).map(t => e(t)).join('<br>');
+  }
+  return e(a.telefono || a.tutor_telefono || '—');
+}
+
+function filaRevisorRecibo(r) {
+  const estado = estadoRecibo(r, r.estado === 'pagado');
+  return `<tr>
+    <td><strong>${e(r.alumnos?.nombre || '')}</strong> ${chipHermanastros(nombresHermanastrosDe(r.alumno_id))}<br><small>R-${String(r.referencia).padStart(5, '0')}</small></td>
+    <td class="rej-tel">${telefonosRevisor(S.alumnos.find(a => a.id === r.alumno_id))}</td>
+    <td>${e(r.profesor_titular_nombre || r.profesores?.nombre || '—')}</td>
+    <td>${e(r.concepto)}</td>
+    <td><strong>${formatoImporte(r.importe)}€</strong></td>
+    <td><div class="estado-chips">
+      <span class="chip ${estado.clase}">${estado.texto}</span>
+      ${r.importe_parcial && r.estado !== 'pagado' ? `<span class="chip pago-parcial" title="Ya han pagado ${formatoImporte(r.importe_parcial)}€ de ${formatoImporte(r.importe)}€">Quedan ${formatoImporte(r.importe - r.importe_parcial)}€</span> ${chipJustificanteParcial(r)}` : ''}
+    </div></td>
+  </tr>`;
+}
+
+function filaRevisorSinRecibo(a) {
+  return `<tr>
+    <td><strong>${e(a.nombre)}</strong></td>
+    <td class="rej-tel">${telefonosRevisor(a)}</td>
+    <td>${e(profesoresDeAlumno(a))}</td>
+    <td colspan="2">—</td>
+    <td><span class="chip pendiente">Sin recibo generado</span></td>
+  </tr>`;
+}
+
+function tablaRevisor(titulo, filasHtml) {
+  if (!filasHtml.length) return '';
+  return `<h3 class="mes-seccion">${titulo} <small>${filasHtml.length}</small></h3>
+    <table><thead><tr><th>Alumno</th><th>Teléfono</th><th>Profesor</th><th>Concepto</th><th>Total</th><th>Estado</th></tr></thead>
+    <tbody>${filasHtml.join('')}</tbody></table>`;
+}
+
+// Los 11 meses del curso, septiembre → julio (sin agosto: reutiliza
+// mesesDelCurso()/cursoActual(), ya usadas en Ingresos y gastos, y le quita
+// el último mes — agosto — porque aquí no interesa como columna).
+function mesesCursoRevisor() {
+  return mesesDelCurso(cursoActual()).slice(0, 11);
+}
+// Columnas de las rejillas "Pagos" y "Recibos": el mes actual y los dos
+// siguientes de entrada — y a partir de ahí NUNCA se quita una columna ya
+// mostrada, solo se añade la siguiente según pasan los meses, hasta llegar
+// a julio.
+function mesesVisiblesRevisor() {
+  const curso = mesesCursoRevisor();
+  const idx = curso.indexOf(claveMes(new Date().toISOString()));
+  const limite = idx === -1 ? 2 : Math.min(idx + 2, curso.length - 1);
+  return curso.slice(0, limite + 1);
+}
+
+// Recibo de un alumno que cubre un mes concreto (mismo criterio que
+// reciboDelPeriodoActual, para cualquier mes en vez de solo "ahora").
+function reciboDelAlumnoEnMes(alumnoId, mes) {
+  return S.recibos.find(r => r.alumno_id === alumnoId && (r.periodos || []).includes(mes));
+}
+// Celda de la rejilla "Pagos": verde=cobrado del todo, naranja=pago
+// parcial (con lo que falta en el título), rojo=nada pagado (haya recibo o
+// no) — se recalcula siempre de recibos/recibo_pagos en vivo, así que
+// deshacer un cobro o un pago parcial lo devuelve a rojo solo.
+// Un mes que todavía no ha empezado no puede estar "sin pagar" de verdad
+// (nadie debería nada todavía) — se enseña con un guion neutro en vez de la
+// cruz roja, para no liarlo con un mes que sí tocaba y no se ha pagado. Si
+// ya hay recibo aunque el mes no haya empezado (alguien se adelantó), se
+// respeta su estado real en vez de ocultarlo.
+function celdaFutura(mes) {
+  return mes > claveMes(new Date().toISOString());
+}
+function celdaPago(alumnoId, mes) {
+  const r = reciboDelAlumnoEnMes(alumnoId, mes);
+  if (r?.estado === 'pagado') return '<span class="celda-grid celda-verde" title="Cobrado">✓</span>';
+  if (r?.importe_parcial) return `<span class="celda-grid celda-naranja" title="Pago parcial — quedan ${formatoImporte(r.importe - r.importe_parcial)}€">✓</span>`;
+  if (!r && celdaFutura(mes)) return '<span class="celda-grid celda-neutral" title="Este mes todavía no ha empezado">–</span>';
+  return '<span class="celda-grid celda-roja" title="Sin pagar">✕</span>';
+}
+// Celda de la rejilla "Recibos": verde=generado y enviado, naranja=generado
+// sin enviar, rojo=no generado — igual, en vivo desde recibos.
+function celdaRecibo(alumnoId, mes) {
+  const r = reciboDelAlumnoEnMes(alumnoId, mes);
+  if (r?.fecha_envio_whatsapp) return '<span class="celda-grid celda-verde" title="Generado y enviado">✓</span>';
+  if (r) return '<span class="celda-grid celda-naranja" title="Generado, falta enviar">✓</span>';
+  if (celdaFutura(mes)) return '<span class="celda-grid celda-neutral" title="Este mes todavía no ha empezado">–</span>';
+  return '<span class="celda-grid celda-roja" title="Recibo no generado">✕</span>';
+}
+
+function renderAdminRevisor() {
+  if (!S.profesor?.es_admin) { S.vista = 'inicio'; renderInicio(); return; }
+  const sub = S.vistaAdminRevisor || 'resumen';
+  const filtroProf = S.filtroRevisorProfesor || '';
+
+  document.getElementById('contenido').innerHTML = `
+  <div class="barra">
+    <button class="btn liso" id="ar-volver">← Inicio</button>
+    <div class="segmentos">
+      <button class="seg ${sub === 'resumen' ? 'activo' : ''}" data-sub-ar="resumen">Resumen</button>
+      <button class="seg ${sub === 'pagos' ? 'activo' : ''}" data-sub-ar="pagos">Pagos</button>
+      <button class="seg ${sub === 'recibos' ? 'activo' : ''}" data-sub-ar="recibos">Recibos</button>
+    </div>
+    <select id="ar-prof">
+      <option value="">Toda la academia</option>
+      ${profesoresActivos().map(p => `<option value="${p.id}" ${p.id === filtroProf ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
+    </select>
+    <span class="flex1"></span>
+  </div>
+  <div id="ar-cuerpo"></div>`;
+
+  document.getElementById('ar-volver').onclick = () => { S.vista = 'inicio'; renderMain(); };
+  document.querySelectorAll('[data-sub-ar]').forEach(b => b.onclick = () => { S.vistaAdminRevisor = b.dataset.subAr; renderAdminRevisor(); });
+  document.getElementById('ar-prof').onchange = (ev) => { S.filtroRevisorProfesor = ev.target.value; renderAdminRevisor(); };
+
+  if (sub === 'pagos') renderRevisorGrid('pagos', filtroProf);
+  else if (sub === 'recibos') renderRevisorGrid('recibos', filtroProf);
+  else renderRevisorResumen(filtroProf);
+}
+
+function renderRevisorResumen(filtroProf) {
+  const meses = mesesConRecibos();
+  const mesActual = claveMes(new Date().toISOString());
+  if (!S.mesRevisor || !meses.includes(S.mesRevisor)) S.mesRevisor = meses.includes(mesActual) ? mesActual : (meses[0] || mesActual);
+  const mes = S.mesRevisor;
+  const esElMasReciente = mes === meses[0];
+  const esElMasAntiguo = mes === meses[meses.length - 1];
+
+  const recibosDelMes = juntarHermanastros(S.recibos.filter(r => claveMes(r.fecha_emision) === mes
+    && (!filtroProf || (r.profesor_titular_ids || []).includes(filtroProf))), r => r.alumno_id);
+  const sinRecibo = alumnosSinReciboDelMes(mes).filter(a => !filtroProf || matriculasDeProfesor(a, filtroProf).length > 0);
+
+  const porEnviar = recibosDelMes.filter(r => r.estado !== 'pagado' && !r.importe_parcial && !r.fecha_envio_whatsapp);
+  const pendientesPago = recibosDelMes.filter(r => r.estado !== 'pagado' && !r.importe_parcial && r.fecha_envio_whatsapp);
+  const parciales = recibosDelMes.filter(r => r.estado !== 'pagado' && r.importe_parcial);
+  const pagadosPorEnviar = recibosDelMes.filter(r => r.estado === 'pagado' && !r.fecha_envio_whatsapp_pago && !r.cobro_rapido);
+  const cobrados = recibosDelMes.filter(r => r.estado === 'pagado' && (r.fecha_envio_whatsapp_pago || r.cobro_rapido));
+
+  // Cobrado = lo de los recibos ya pagados + lo que llevan pagado los de pago parcial
+  const totalCobrado = [...cobrados, ...pagadosPorEnviar].reduce((s, r) => s + Number(r.importe), 0)
+    + parciales.reduce((s, r) => s + Number(r.importe_parcial), 0);
+  const totalGeneral = recibosDelMes.reduce((s, r) => s + Number(r.importe), 0);
+  const totalAlumnos = sinRecibo.length + recibosDelMes.length;
+
+  document.getElementById('ar-cuerpo').innerHTML = `
+  <div class="barra">
+    <div class="mes-nav">
+      <button class="btn chico liso" id="ar-mes-ant" ${esElMasAntiguo ? 'disabled' : ''}>‹</button>
+      <select id="ar-mes">${meses.map(m => `<option value="${m}" ${m === mes ? 'selected' : ''}>${tituloMes(m)}</option>`).join('')}</select>
+      <button class="btn chico liso" id="ar-mes-sig" ${esElMasReciente ? 'disabled' : ''}>›</button>
+    </div>
+    <span class="flex1"></span>
+    <small class="ayuda">${totalAlumnos} alumno${totalAlumnos === 1 ? '' : 's'} · ${formatoImporte(totalCobrado)}€ cobrados de ${formatoImporte(totalGeneral)}€</small>
+  </div>
+  ${totalAlumnos === 0 ? '<div class="vacio">No hay nada que mostrar este mes.</div>' : ''}
+  ${tablaRevisor('⚠ Sin recibo generado', sinRecibo.map(filaRevisorSinRecibo))}
+  ${tablaRevisor('Pendientes de envío', porEnviar.map(filaRevisorRecibo))}
+  ${tablaRevisor('Pendientes de pago', pendientesPago.map(filaRevisorRecibo))}
+  ${tablaRevisor('Pagos parciales', parciales.map(filaRevisorRecibo))}
+  ${tablaRevisor('Justificantes por enviar', pagadosPorEnviar.map(filaRevisorRecibo))}
+  ${tablaRevisor('Cobrados', cobrados.map(filaRevisorRecibo))}`;
+
+  const arMesAnt = document.getElementById('ar-mes-ant');
+  const arMesSig = document.getElementById('ar-mes-sig');
+  if (arMesAnt) arMesAnt.onclick = () => { S.mesRevisor = meses[meses.indexOf(mes) + 1]; renderAdminRevisor(); };
+  if (arMesSig) arMesSig.onclick = () => { S.mesRevisor = meses[meses.indexOf(mes) - 1]; renderAdminRevisor(); };
+  document.getElementById('ar-mes').onchange = (ev) => { S.mesRevisor = ev.target.value; renderAdminRevisor(); };
+}
+
+// Rejillas "Pagos"/"Recibos": todos los alumnos activos de la academia (o
+// los de un profesor si se filtra) en filas, meses del curso en columnas.
+// Solo lectura, sin ninguna acción — un vistazo para detectar huecos.
+// Chip pequeño de leyenda: mismo estilo que las celdas de la rejilla, en
+// tamaño reducido, con su etiqueta al lado.
+function chipLeyenda(clase, simbolo, texto) {
+  return `<span class="leyenda-item"><span class="celda-grid chico ${clase}">${simbolo}</span> ${texto}</span>`;
+}
+function leyendaRevisorGrid(tipo) {
+  const items = tipo === 'pagos'
+    ? [chipLeyenda('celda-verde', '✓', 'Cobrado'), chipLeyenda('celda-naranja', '✓', 'Pago parcial'), chipLeyenda('celda-roja', '✕', 'Sin pagar')]
+    : [chipLeyenda('celda-verde', '✓', 'Generado y enviado'), chipLeyenda('celda-naranja', '✓', 'Generado, sin enviar'), chipLeyenda('celda-roja', '✕', 'No generado')];
+  items.push(chipLeyenda('celda-neutral', '–', 'Mes sin empezar'));
+  return `<div class="rejilla-leyenda">${items.join('')}</div>`;
+}
+
+function renderRevisorGrid(tipo, filtroProf) {
+  const meses = mesesVisiblesRevisor();
+  const alumnos = juntarHermanastros(S.alumnos
+    .filter(a => a.estado === 'activo' && (!filtroProf || matriculasDeProfesor(a, filtroProf).length > 0))
+    .slice().sort(compararAlumnosPorApellido), a => a.id);
+  const celda = tipo === 'pagos' ? celdaPago : celdaRecibo;
+
+  document.getElementById('ar-cuerpo').innerHTML = leyendaRevisorGrid(tipo) + (alumnos.length === 0
+    ? '<div class="vacio">No hay alumnos que mostrar.</div>'
+    : `<div class="rejilla-scroll"><table class="tabla-rejilla"><thead><tr>
+        <th>Alumno</th>${tipo === 'pagos' ? '<th class="rej-tel">Teléfono</th>' : ''}${meses.map(m => `<th>${nombreCortoMes(m)} ${m.slice(2, 4)}</th>`).join('')}
+      </tr></thead>
+      <tbody>${alumnos.map(a => `<tr>
+        <td><strong>${e(a.nombre)}</strong> ${chipHermanastros(nombresHermanastrosDe(a.id))}</td>
+        ${tipo === 'pagos' ? `<td class="rej-tel">${telefonosRevisor(a)}</td>` : ''}
+        ${meses.map(m => `<td>${celda(a.id, m)}</td>`).join('')}
+      </tr>`).join('')}</tbody></table></div>`);
 }
 
 // Alumnos dados de alta este mes DESPUÉS del día 1 (fuera de la generación
@@ -841,25 +1139,28 @@ function periodoActualClave() {
   return `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}`;
 }
 
-// ¿Este alumno pudo quedarse fuera del envío automático del mes? (alta tardía,
-// con precio ya puesto). No dice nada de si YA tiene recibo o no — eso se
-// mira aparte, para poder reusar este mismo criterio tanto para "todavía
-// pendiente" como para "ya se generó, pero por otro admin".
+// ¿Debería este alumno tener un recibo de mensualidad este mes? (activo, con
+// una asignatura de tarifa mensual puesta, sin "empieza el próximo mes").
+// Antes solo miraba altas tardías (después del día 1, fuera del envío
+// automático); ahora cubre a cualquiera que se quede sin recibo este mes,
+// sea cual sea el motivo (alta tardía, un fallo puntual del automático,
+// septiembre entero al ser manual...) — así el aviso de Inicio sirve de
+// comprobación completa de que no falta nadie por facturar. No dice nada de
+// si YA tiene recibo o no — eso se mira aparte (reciboDelPeriodoActual),
+// para poder reusar este mismo criterio tanto para "todavía pendiente" como
+// para "ya se generó, pero por otro admin".
 function candidataAltaFueraDeFecha(a) {
   const hoy = new Date();
-  // En julio, agosto y septiembre no hay generación automática de recibos
-  // (receso de verano, ver generar_recibos_mensuales() en el servidor), así
-  // que no tiene sentido avisar de "se quedó fuera del envío automático" en
-  // esos meses — nadie tiene recibo automático esos meses, se den de alta
-  // cuando se den de alta.
-  if ([6, 7, 8].includes(hoy.getMonth())) return false;
+  // En julio y agosto apenas hay actividad (receso de verano, ver
+  // generar_recibos_mensuales() en el servidor) — no tiene sentido avisar
+  // de recibos sin generar esos meses. Septiembre SÍ cuenta: ahí la
+  // generación es manual en vez de automática, pero sigue habiendo que
+  // facturar con normalidad.
+  if ([6, 7].includes(hoy.getMonth())) return false;
   // Marcado como "empieza el próximo mes": no se le genera nada este mes a
-  // propósito, así que tampoco tiene sentido avisar de "se quedó fuera".
+  // propósito, así que tampoco tiene sentido avisar de que falta.
   if (a.empieza_proximo_mes) return false;
-  if (a.estado !== 'activo' || !a.fecha_alta) return false;
-  const alta = new Date(a.fecha_alta + 'T00:00:00');
-  if (alta.getFullYear() !== hoy.getFullYear() || alta.getMonth() !== hoy.getMonth()) return false;
-  if (alta.getDate() <= 1) return false;
+  if (a.estado !== 'activo') return false;
   return (a.matriculas || []).some(m => m.tipo_tarifa === 'mes' && m.tarifa != null);
 }
 // Recibo ya generado para este alumno en el mes actual (si lo hay).
@@ -909,12 +1210,43 @@ function resueltoParaTodosLosAdmins(tipo, referencia, actorId) {
 // vuelve a salirle a él, siga o no abierto el modal, entre cuando entre). En
 // modo desarrollador no hay botón: no le toca actuar, solo desaparece sola
 // cuando el resto de admins de verdad ya la hayan visto (ver arriba).
-function filaAvisoResuelto(tipo, id, etiquetaHtml, nombreQuien) {
+function filaAvisoResuelto(tipo, id, etiquetaHtml, nombreQuien, accion = 'Hecho por') {
   const boton = S.profesor?.es_desarrollador ? '' :
     `<button class="btn chico liso" data-marcar-visto-tipo="${tipo}" data-marcar-visto-ref="${e(String(id))}">Marcar visto</button>`;
   return `<li data-item="${e(String(id))}">${etiquetaHtml}
-    <br><span class="chip envio-si">✓ Hecho por ${e(nombreQuien)}</span>
+    <br><span class="chip envio-si">✓ ${e(accion)} ${e(nombreQuien)}</span>
     ${boton}</li>`;
+}
+// "Marcar todo lo hecho como visto": para los avisos que pueden acumular
+// muchas filas ya resueltas por el otro admin (un envío en bloque de
+// justificantes deja decenas). Solo aparece si hay alguna fila resuelta.
+function botonMarcarTodoVisto() {
+  return S.profesor?.es_desarrollador ? ''
+    : '<button class="btn liso" id="av-marcar-todos-hechos" hidden>Marcar todo lo hecho como visto</button>';
+}
+function activarMarcarTodoVisto() {
+  const btn = document.getElementById('av-marcar-todos-hechos');
+  if (!btn) return;
+  const lista = btn.closest('.modal')?.querySelector('ul.detalle-alumnos');
+  btn.hidden = !lista?.querySelector('[data-marcar-visto-tipo]');
+  btn.onclick = async () => {
+    const botones = [...document.querySelectorAll('[data-marcar-visto-tipo]')];
+    if (!botones.length) return;
+    const { error } = await S.sb.from('avisos_descartados').insert(botones.map(b => ({
+      tipo: b.dataset.marcarVistoTipo, referencia: b.dataset.marcarVistoRef, profesor_id: S.profesor.id
+    })));
+    if (error) return avisar('Error: ' + error.message, true);
+    await cargarAvisosDescartados();
+    botones.forEach(b => b.closest('[data-item]')?.remove());
+    btn.hidden = true;
+    if (S.vista === 'inicio') renderInicio();
+  };
+}
+// Cierra un aviso de Inicio y repinta la portada: los contadores de detrás
+// se quedaban con la foto de cuando se abrió.
+function cerrarAviso() {
+  cerrarModal();
+  if (S.vista === 'inicio') renderInicio();
 }
 function activarMarcarVistoAviso() {
   document.querySelectorAll('[data-marcar-visto-tipo]').forEach(b => b.onclick = async () => {
@@ -974,7 +1306,7 @@ function modalFichasIncompletas(lista) {
   </ul>
   <div class="pie-modal"><button class="btn liso" id="m-cancelar">Cerrar</button></div>`);
   avisoAbierto = { tipo: 'fichas', ids: lista.map(({ alumno, matricula }) => `${alumno.id}|${matricula.asignatura_id}`) };
-  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('m-cancelar').onclick = cerrarAviso;
   activarBotonesFichasIncompletas();
   activarMarcarVistoAviso();
 }
@@ -997,13 +1329,11 @@ function altasFueraDeFechaParaAdmin() {
 function filaAltaFueraDeFecha({ alumno: a, resuelto }) {
   if (resuelto) {
     const recibo = reciboDelPeriodoActual(a.id);
-    return filaAvisoResuelto('alta_fuera_fecha', a.id,
-      `${e(a.nombre)} <small>· alta ${fmtFecha(a.fecha_alta)}</small>`,
-      nombreProfesor(recibo?.profesor_id));
+    return filaAvisoResuelto('alta_fuera_fecha', a.id, e(a.nombre), nombreProfesor(recibo?.profesor_id));
   }
   return `<li data-item="${a.id}">
     <button class="btn chico" data-generar="${a.id}">Generar recibo</button>
-    &nbsp;${e(a.nombre)} <small>· alta ${fmtFecha(a.fecha_alta)}</small>
+    &nbsp;${e(a.nombre)}
   </li>`;
 }
 function activarBotonesAltasFueraDeFecha() {
@@ -1025,15 +1355,15 @@ function activarBotonesAltasFueraDeFecha() {
 }
 function modalRecibosFueraDeFecha(lista) {
   abrirModal(`
-  <h2>Recibos para generar a mano</h2>
-  <p class="ayuda">Se dieron de alta después del día 1, así que el envío automático de este mes
-  ya no los recogió. Genera su recibo con el botón y listo.</p>
+  <h2>Recibos de este mes sin generar</h2>
+  <p class="ayuda">Alumnos activos con tarifa mensual que todavía no tienen recibo de este mes
+  (alta tardía, un fallo puntual, o porque este mes toca a mano). Genera su recibo con el botón y listo.</p>
   <ul class="detalle-alumnos" id="av-altas">
     ${lista.map(filaAltaFueraDeFecha).join('')}
   </ul>
   <div class="pie-modal"><button class="btn liso" id="m-cancelar">Cerrar</button></div>`);
   avisoAbierto = { tipo: 'altas', ids: lista.map(({ alumno }) => alumno.id) };
-  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('m-cancelar').onclick = cerrarAviso;
   activarBotonesAltasFueraDeFecha();
   activarMarcarVistoAviso();
 }
@@ -1057,6 +1387,118 @@ function bajasAsignaturaParaAdmin() {
   return S.bajasAsignatura.filter(b => pendienteParaAdmin(b, 'baja_asignatura'));
 }
 
+// ---- pagos parciales sin justificante / cobrados por enviar ----
+// Mismo patrón, pero aquí "hecho" = mandar el justificante (se hace en la
+// pestaña Recibos, no desde el aviso). Cada elemento: { recibo, resuelto,
+// ref, quien }. resuelto=true cuando el justificante ya lo mandó OTRO admin
+// y yo no lo he descartado. `ref` lleva la fecha del envío: si luego hay un
+// pago nuevo y otro envío, es un aviso distinto.
+
+// Último envío de justificante de pago parcial de un recibo: { en, por } o
+// null. Los envíos anteriores a que se guardara quién lo mandó no tienen "por".
+function ultimoEnvioParcial(reciboId) {
+  const enviados = S.reciboPagos.filter(p => p.recibo_id === reciboId && p.justificante_enviado_en);
+  if (!enviados.length) return null;
+  const en = enviados.map(p => p.justificante_enviado_en).sort().pop();
+  return { en, por: enviados.find(p => p.justificante_enviado_en === en)?.justificante_enviado_por || null };
+}
+function pagosParcialesParaAdmin() {
+  const esDev = S.profesor?.es_desarrollador;
+  const items = [];
+  for (const r of S.recibos) {
+    if (r.estado === 'pagado' || !r.importe_parcial) continue;
+    if (nPagosSinAvisar(r)) { items.push({ recibo: r, resuelto: false }); continue; }
+    const envio = ultimoEnvioParcial(r.id);
+    if (!envio?.por) continue;
+    const ref = `${r.id}|${envio.en}`;
+    const pendiente = esDev
+      ? !resueltoParaTodosLosAdmins('pago_parcial', ref, envio.por)
+      : envio.por !== S.profesor.id && !descartado('pago_parcial', ref);
+    if (pendiente) items.push({ recibo: r, resuelto: true, ref, quien: envio.por });
+  }
+  return items;
+}
+function pagadosPorEnviarParaAdmin() {
+  const esDev = S.profesor?.es_desarrollador;
+  const items = [];
+  for (const r of S.recibos) {
+    if (r.estado !== 'pagado' || r.cobro_rapido) continue;
+    if (!r.fecha_envio_whatsapp_pago) { items.push({ recibo: r, resuelto: false }); continue; }
+    if (!r.envio_pago_por) continue;
+    const ref = `${r.id}|${r.fecha_envio_whatsapp_pago}`;
+    const pendiente = esDev
+      ? !resueltoParaTodosLosAdmins('pago_por_enviar', ref, r.envio_pago_por)
+      : r.envio_pago_por !== S.profesor.id && !descartado('pago_por_enviar', ref);
+    if (pendiente) items.push({ recibo: r, resuelto: true, ref, quien: r.envio_pago_por });
+  }
+  return items;
+}
+
+function cabeceraReciboAviso(r) {
+  return `<strong>${e(r.alumnos?.nombre || '')}</strong> <small>· R-${String(r.referencia).padStart(5, '0')} · ${e(r.concepto)}</small>`;
+}
+function filaPagoParcialAviso({ recibo: r, resuelto, ref, quien }) {
+  const cabecera = `${cabeceraReciboAviso(r)}<br><small>Pagado ${formatoImporte(r.importe_parcial)}€ de ${formatoImporte(r.importe)}€ · quedan ${formatoImporte(r.importe - r.importe_parcial)}€</small>`;
+  if (resuelto) return filaAvisoResuelto('pago_parcial', ref, cabecera, nombreProfesor(quien), 'Justificante enviado por');
+  // Solo los pagos que aún no se han avisado: son los que llevará el
+  // justificante (los ya avisados salen en Recibos → Pago incompleto).
+  const lineas = pagosSinJustificanteDe(r.id).map(p => {
+    const quienAnoto = S.profesores.find(x => x.id === p.creado_por)?.nombre;
+    return `<small>• <strong>${formatoImporte(p.importe)}€</strong> · ${etiquetaCuenta(p.cuenta)} · ${fmtFecha(String(p.fecha).slice(0, 10))}${quienAnoto ? ' · anotado por ' + e(quienAnoto) : ''}</small>`;
+  });
+  if (parcialSinDetalle(r) > 0) lineas.push(`<small>• <strong>${formatoImporte(parcialSinDetalle(r))}€</strong> · anotados con la versión anterior</small>`);
+  return `<li data-item="${r.id}">${cabecera} ${chipJustificanteParcial(r)}<br>${lineas.join('<br>')}</li>`;
+}
+function filaPagadoPorEnviarAviso({ recibo: r, resuelto, ref, quien }) {
+  const cabecera = `${cabeceraReciboAviso(r)}<br><small>${formatoImporte(r.importe)}€${textoCuentas(r) ? ' · ' + textoCuentas(r) : ''}${r.fecha_pago ? ' · cobrado el ' + fmtFecha(String(r.fecha_pago).slice(0, 10)) : ''}</small>`;
+  if (resuelto) return filaAvisoResuelto('pago_por_enviar', ref, cabecera, nombreProfesor(quien), 'Justificante enviado por');
+  return `<li data-item="${r.id}">${cabecera} <span class="chip justificante-no">⚠ Justificante sin enviar</span></li>`;
+}
+
+function irARecibos(sub) {
+  cerrarModal();
+  S.vista = 'recibos';
+  S.vistaRosterRecibos = false;
+  S.vistaRecibos = sub;
+  renderMain();
+}
+function modalPagosParcialesSinEnviar(lista) {
+  abrirModal(`
+  <h2>Pagos parciales</h2>
+  <p class="ayuda">Recibos con pagos anotados (por un profesor o por ti) a los que todavía no se ha mandado el
+  justificante. Para mandarlos ve a Recibos → "Pagos parciales": ahí ves lo que se envía antes de confirmar.
+  Cuando lo manda uno de los admins, al otro le aparece aquí como hecho.</p>
+  <ul class="detalle-alumnos" id="av-parciales">${lista.map(filaPagoParcialAviso).join('')}</ul>
+  <div class="pie-modal">
+    ${botonMarcarTodoVisto()}
+    <button class="btn liso" id="m-cancelar">Cerrar</button>
+    <button class="btn primario" id="pp-ir">Ir a Pagos parciales</button>
+  </div>`);
+  avisoAbierto = { tipo: 'parciales', ids: null };
+  document.getElementById('m-cancelar').onclick = cerrarAviso;
+  document.getElementById('pp-ir').onclick = () => irARecibos('parciales');
+  activarMarcarVistoAviso();
+  activarMarcarTodoVisto();
+}
+function modalPagadosPorEnviar(lista) {
+  abrirModal(`
+  <h2>Recibos cobrados por enviar</h2>
+  <p class="ayuda">Recibos ya cobrados (por un profesor o por ti) a los que falta mandar el justificante de pago.
+  Para mandarlos ve a Recibos → "Justificantes por enviar". Cuando lo manda uno de los admins, al otro le aparece
+  aquí como hecho.</p>
+  <ul class="detalle-alumnos" id="av-cobrados">${lista.map(filaPagadoPorEnviarAviso).join('')}</ul>
+  <div class="pie-modal">
+    ${botonMarcarTodoVisto()}
+    <button class="btn liso" id="m-cancelar">Cerrar</button>
+    <button class="btn primario" id="pe-ir">Ir a Justificantes por enviar</button>
+  </div>`);
+  avisoAbierto = { tipo: 'cobrados', ids: null };
+  document.getElementById('m-cancelar').onclick = cerrarAviso;
+  document.getElementById('pe-ir').onclick = () => irARecibos('pagados-enviar');
+  activarMarcarVistoAviso();
+  activarMarcarTodoVisto();
+}
+
 // Refresca en su sitio el aviso que se tenga abierto (si hay uno) cuando
 // llega un cambio en tiempo real, en vez de dejarlo con la foto fija de
 // cuando se abrió. La llama recargarTrasCambioRemoto().
@@ -1070,21 +1512,29 @@ function refrescarAvisoAbierto() {
     altas: () => altasFueraDeFechaParaAdmin().filter(it => avisoAbierto.ids.includes(it.alumno.id)),
     cambios: () => cambiosParaAdmin().filter(c => avisoAbierto.ids.includes(c.id)),
     reactivaciones: () => reactivacionesParaAdmin().filter(r => avisoAbierto.ids.includes(r.id)),
-    bajas: () => bajasAsignaturaParaAdmin().filter(b => avisoAbierto.ids.includes(b.id))
+    bajas: () => bajasAsignaturaParaAdmin().filter(b => avisoAbierto.ids.includes(b.id)),
+    // Estos dos enseñan siempre la lista actual entera (no solo lo que había
+    // al abrir): un profesor puede anotar otro pago mientras se mira.
+    parciales: () => pagosParcialesParaAdmin(),
+    cobrados: () => pagadosPorEnviarParaAdmin()
   };
   const FILAS = {
     fichas: filaFichaIncompleta, altas: filaAltaFueraDeFecha,
-    cambios: filaCambioHorario, reactivaciones: filaReactivacion, bajas: filaBajaAsignatura
+    cambios: filaCambioHorario, reactivaciones: filaReactivacion, bajas: filaBajaAsignatura,
+    parciales: filaPagoParcialAviso, cobrados: filaPagadoPorEnviarAviso
   };
   const ACTIVAR = {
     fichas: activarBotonesFichasIncompletas, altas: activarBotonesAltasFueraDeFecha,
-    cambios: activarBotonesCambiosHorario, reactivaciones: activarBotonesReactivaciones, bajas: activarBotonesBajasAsignatura
+    cambios: activarBotonesCambiosHorario, reactivaciones: activarBotonesReactivaciones, bajas: activarBotonesBajasAsignatura,
+    parciales: () => {}, cobrados: () => {}
   };
   const fuente = FUENTES[avisoAbierto.tipo];
   if (!fuente) return;
-  cont.innerHTML = fuente().map(FILAS[avisoAbierto.tipo]).join('');
+  cont.innerHTML = fuente().map(FILAS[avisoAbierto.tipo]).join('')
+    || '<li class="ayuda">Ya no queda nada pendiente aquí.</li>';
   ACTIVAR[avisoAbierto.tipo]();
   activarMarcarVistoAviso();
+  activarMarcarTodoVisto();
 }
 
 // ---------------------------------------------------------------- alumnos
@@ -1210,7 +1660,10 @@ function renderAlumnos() {
     </select>` : `<label class="check-inline"><input type="checkbox" id="f-todos" ${S.filtros.verTodos ? 'checked' : ''}> Toda la academia</label>`}
     <span class="flex1"></span>
     <button class="btn" id="btn-csv">Exportar CSV</button>
-    <button class="btn" id="btn-modificaciones">🔧 Modificación horas alumnos</button>
+    <div class="btns-columna">
+      <button class="btn" id="btn-modificaciones">🔧 Modificación horas alumnos</button>
+      ${esAdmin ? `<button class="btn" id="btn-hermanastros">👪 Función hermanastros</button>` : ''}
+    </div>
     ${esAdmin ? `<button class="btn" id="btn-bulk">Recibos del mes</button>` : ''}
     <button class="btn primario" id="btn-nuevo">+ Nuevo alumno</button>
   </div>
@@ -1221,8 +1674,8 @@ function renderAlumnos() {
       <th>Alumno</th><th>Asignaturas</th><th>Teléfono</th><th>Estado</th><th></th>
     </tr></thead>
     <tbody>
-    ${lista.map(a => `<tr class="${a.estado === 'baja' ? 'apagado' : ''}">
-      <td><strong>${e(a.nombre)}</strong>${a.matricula_importe != null ? ' <span class="badge-matricula" title="Tiene matrícula puesta en la ficha">M</span>' : ''}${a.tutor_nombre ? `<br><small>Tutor: ${e(a.tutor_nombre)}</small>` : ''}${a.empieza_proximo_mes ? '<br><small>⏳ Empieza el próximo mes</small>' : ''}</td>
+    ${juntarHermanastros(lista, a => a.id).map(a => `<tr class="${a.estado === 'baja' ? 'apagado' : ''}">
+      <td><strong>${e(a.nombre)}</strong>${a.matricula_importe != null ? ' <span class="badge-matricula" title="Tiene matrícula puesta en la ficha">M</span>' : ''}${chipHermanastros(nombresHermanastrosDe(a.id)) ? ' ' + chipHermanastros(nombresHermanastrosDe(a.id)) : ''}${a.tutor_nombre ? `<br><small>Tutor: ${e(a.tutor_nombre)}</small>` : ''}${a.empieza_proximo_mes ? '<br><small>⏳ Empieza el próximo mes</small>' : ''}</td>
       <td>${(a.matriculas || []).map(m => chipAsignatura(m)).join(' ')
         || '<small>Sin asignaturas</small>'}</td>
       <td>${e(telefonosParaLista(a))}</td>
@@ -1248,6 +1701,8 @@ function renderAlumnos() {
   if (ft) ft.onchange = (ev) => { S.filtros.verTodos = ev.target.checked; rerender(); };
   document.getElementById('btn-nuevo').onclick = () => modalAlumno(null);
   document.getElementById('btn-modificaciones').onclick = () => modalModificaciones();
+  const btnHermanastros = document.getElementById('btn-hermanastros');
+  if (btnHermanastros) btnHermanastros.onclick = () => modalHermanastros();
   const btnBulk = document.getElementById('btn-bulk');
   if (btnBulk) btnBulk.onclick = () => modalReciboBulk();
   document.getElementById('btn-csv').onclick = exportarAlumnosCsv;
@@ -1487,7 +1942,6 @@ function modalAlumno(alumno) {
         return;
       }
       const partes = [];
-      if (d.descuento_hermano > 0) partes.push(`−${formatoImporte(d.descuento_hermano)}€ por hermano/a matriculado/a`);
       if (d.descuento_extra > 0) partes.push(`−${formatoImporte(d.descuento_extra)}€ descuento especial`);
       cont.innerHTML = `<p class="letras">Precio base: ${formatoImporte(d.base)}€${partes.length ? '<br>' + partes.join('<br>') : ''}<br>
         <strong>Total mensual: ${formatoImporte(d.total)}€</strong></p>`;
@@ -1801,6 +2255,145 @@ function modalModificaciones() {
   $buscar.oninput = () => conFocoPreservado(pintarResultados);
 }
 
+// ---- Función hermanastros ----
+// Junta a alumnos que son hermanastros (sin apellidos en común, así que la
+// app no lo puede detectar sola) en un mismo grupo — alumnos.grupo_hermanastros,
+// un uuid compartido, sin tabla aparte: unir A+B y luego B+C deja un grupo
+// de 3. Los recibos de un grupo se envían en un solo PDF y se cobran juntos
+// (mismo mecanismo que los hermanos, ver recibosHermanosDe), pero en la app
+// siguen apareciendo por separado, uno al lado del otro, con su etiqueta.
+// Nunca lleva descuento automático.
+function nuevoUuid() {
+  if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+function modalHermanastros() {
+  if (!S.profesor?.es_admin) return avisar('Solo un administrador puede juntar hermanastros.', true);
+  const seleccion = new Set(); // ids elegidos (como mucho 2 a la vez)
+
+  abrirModal(`
+  <h2>Función hermanastros</h2>
+  <p class="ayuda">Para alumnos que son hermanastros y no comparten apellidos (la app no puede saberlo
+  sola). Busca a los dos, márcalos y pulsa Guardar: sus recibos del mismo mes se enviarán en un solo PDF
+  y se cobrarán juntos, igual que los hermanos. Sin ningún descuento automático. Los alumnos que ya son
+  hermanos (mismos apellidos) no salen en la lista: la app los junta sola.</p>
+  <label>Buscar alumno<input id="hs-buscar" type="search" placeholder="Nombre del alumno…"></label>
+  <div id="hs-lista" class="hs-lista"></div>
+  <p class="ayuda" id="hs-resumen"></p>
+  <div id="hs-grupos"></div>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cerrar</button>
+    <button class="btn primario" id="hs-guardar" disabled>Guardar</button>
+  </div>`);
+
+  const $buscar = document.getElementById('hs-buscar');
+  const $lista = document.getElementById('hs-lista');
+  const $resumen = document.getElementById('hs-resumen');
+  const $guardar = document.getElementById('hs-guardar');
+  const alumnoDe = (id) => S.alumnos.find(a => a.id === id);
+  document.getElementById('m-cancelar').onclick = () => { cerrarModal(); if (S.vista === 'alumnos') renderAlumnos(); };
+
+  const pintarLista = () => {
+    const texto = $buscar.value.trim().toLowerCase();
+    // Los que ya son hermanos (comparten apellidos con otro alumno activo) no
+    // salen aquí: la app ya los junta sola, no tiene sentido ofrecerlos.
+    const alumnosPorApellido = new Map();
+    S.alumnos.filter(a => a.estado === 'activo' && a.apellidos?.trim()).forEach(a => {
+      const k = apellidosNormalizados(a.apellidos);
+      alumnosPorApellido.set(k, (alumnosPorApellido.get(k) || 0) + 1);
+    });
+    const esHermano = (a) => a.apellidos?.trim() && alumnosPorApellido.get(apellidosNormalizados(a.apellidos)) > 1;
+    const visibles = S.alumnos.filter(a => a.estado === 'activo' && !esHermano(a)
+      && (!texto || seleccion.has(a.id) || a.nombre.toLowerCase().includes(texto)));
+    const scroll = $lista.scrollTop;
+    $lista.innerHTML = visibles.length === 0
+      ? '<p class="ayuda">Sin resultados.</p>'
+      : visibles.map(a => {
+        const marcado = seleccion.has(a.id);
+        return `<label class="check-inline hs-fila">
+          <input type="checkbox" data-hs="${a.id}" ${marcado ? 'checked' : ''} ${!marcado && seleccion.size >= 2 ? 'disabled' : ''}>
+          ${e(a.nombre)} ${chipHermanastros(nombresHermanastrosDe(a.id))}</label>`;
+      }).join('');
+    $lista.scrollTop = scroll;
+    $lista.querySelectorAll('[data-hs]').forEach(ch => ch.onchange = () => {
+      if (ch.checked) seleccion.add(ch.dataset.hs); else seleccion.delete(ch.dataset.hs);
+      pintarLista();
+    });
+    const nombres = [...seleccion].map(id => alumnoDe(id)?.nombre || '');
+    $resumen.textContent = seleccion.size === 0 ? 'Elige a los dos alumnos.'
+      : seleccion.size === 1 ? `Elegido: ${nombres[0]}. Falta uno más.`
+      : `Se juntarán: ${nombres[0]} y ${nombres[1]}.`;
+    $guardar.disabled = seleccion.size !== 2;
+  };
+
+  // Grupos que ya existen, con "quitar" por alumno para deshacer un enlace
+  // hecho por error (si en un grupo solo queda uno, se disuelve entero).
+  const pintarGrupos = () => {
+    const porGrupo = new Map();
+    S.alumnos.filter(a => a.grupo_hermanastros && a.estado === 'activo').forEach(a => {
+      if (!porGrupo.has(a.grupo_hermanastros)) porGrupo.set(a.grupo_hermanastros, []);
+      porGrupo.get(a.grupo_hermanastros).push(a);
+    });
+    const grupos = [...porGrupo.values()].filter(g => g.length >= 2);
+    document.getElementById('hs-grupos').innerHTML = grupos.length === 0 ? '' : `
+      <h3 class="seccion">Ya juntados como hermanastros</h3>
+      <ul class="detalle-alumnos">
+        ${grupos.map(g => `<li>${g.map(a => `${e(a.nombre)}
+          <button class="btn chico liso peligro" data-hs-quitar="${a.id}" title="Quitar de este grupo">✕</button>`).join(' + ')}</li>`).join('')}
+      </ul>`;
+    document.querySelectorAll('[data-hs-quitar]').forEach(b => b.onclick = async () => {
+      const a = alumnoDe(b.dataset.hsQuitar);
+      if (!a) return;
+      if (!(await confirmarAccion(`¿Quitar a ${a.nombre} del grupo de hermanastros? Sus recibos dejarán de enviarse y cobrarse junto con los del resto del grupo.`))) return;
+      const resto = S.alumnos.filter(x => x.grupo_hermanastros === a.grupo_hermanastros && x.id !== a.id);
+      const ids = [a.id, ...(resto.length <= 1 ? resto.map(x => x.id) : [])];
+      const { error } = await S.sb.from('alumnos').update({ grupo_hermanastros: null }).in('id', ids);
+      if (error) return avisar('Error: ' + error.message, true);
+      await cargarAlumnos();
+      pintarLista(); pintarGrupos();
+      if (S.vista === 'alumnos') renderAlumnos();
+      avisar('Hermanastros separados.');
+    });
+  };
+
+  $guardar.onclick = async () => {
+    const [idA, idB] = [...seleccion];
+    const A = alumnoDe(idA), B = alumnoDe(idB);
+    if (!A || !B) return;
+    const gA = A.grupo_hermanastros, gB = B.grupo_hermanastros;
+    if (gA && gA === gB) return avisar('Ya están juntados como hermanastros.', true);
+
+    const destino = gA || gB || nuevoUuid();
+    // Si alguno ya tenía su propio grupo, todo ese grupo se une también.
+    const ids = new Set([idA, idB]);
+    [gA, gB].filter(g => g && g !== destino).forEach(g =>
+      S.alumnos.filter(x => x.grupo_hermanastros === g).forEach(x => ids.add(x.id)));
+    const yaEnGrupo = [...new Set([gA, gB].filter(Boolean))].length > 0;
+
+    const confirmado = await confirmarAccion(
+      `Vas a juntar a ${A.nombre} y ${B.nombre} como hermanastros.` +
+      (yaEnGrupo ? ' Además se unirán a los hermanastros que alguno de los dos ya tenía.' : '') +
+      ` A partir de ahora, sus recibos del mismo mes se enviarán en un solo PDF conjunto y se cobrarán juntos (igual que los hermanos), pero en la app seguirán viéndose por separado, uno al lado del otro, con la etiqueta "Hermanastros". No lleva ningún descuento automático. Puedes deshacerlo cuando quieras desde esta misma ventana. ¿Continuar?`);
+    if (!confirmado) return;
+
+    const { error } = await S.sb.from('alumnos').update({ grupo_hermanastros: destino }).in('id', [...ids]);
+    if (error) return avisar('Error: ' + error.message, true);
+    await cargarAlumnos();
+    seleccion.clear();
+    pintarLista(); pintarGrupos();
+    if (S.vista === 'alumnos') renderAlumnos();
+    avisar('Hermanastros juntados.');
+  };
+
+  $buscar.oninput = () => conFocoPreservado(pintarLista);
+  pintarLista();
+  pintarGrupos();
+}
+
 // Vista para el administrador de los cambios de horas que no ha revisado aún.
 function etiquetaCambioHorario(c) {
   return `<strong>${e(c.alumnos?.nombre || '')}</strong> — ${c.horas_antes ?? '—'} → ${c.horas_despues} h/sem
@@ -1851,7 +2444,7 @@ function modalModificacionesSinVer(lista) {
     <button class="btn primario" id="md-marcar-vistas">Marcar todas como vistas</button>
   </div>`);
   avisoAbierto = { tipo: 'cambios', ids: lista.map(c => c.id) };
-  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('m-cancelar').onclick = cerrarAviso;
   document.getElementById('md-marcar-vistas').onclick = async () => {
     await Promise.all(lista.map(resolverCambioHorario));
     await Promise.all([cargarCambiosHorario(), cargarAvisosDescartados()]);
@@ -1912,7 +2505,7 @@ function modalReactivacionesSinVer(lista) {
     <button class="btn primario" id="rv-marcar-vistas">Marcar todas como vistas</button>
   </div>`);
   avisoAbierto = { tipo: 'reactivaciones', ids: lista.map(r => r.id) };
-  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('m-cancelar').onclick = cerrarAviso;
   document.getElementById('rv-marcar-vistas').onclick = async () => {
     await Promise.all(lista.map(resolverReactivacion));
     await Promise.all([cargarReactivaciones(), cargarAvisosDescartados()]);
@@ -1974,7 +2567,7 @@ function modalBajasAsignaturaSinVer(lista) {
     <button class="btn primario" id="ba-marcar-vistas">Marcar todas como vistas</button>
   </div>`);
   avisoAbierto = { tipo: 'bajas', ids: lista.map(b => b.id) };
-  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('m-cancelar').onclick = cerrarAviso;
   document.getElementById('ba-marcar-vistas').onclick = async () => {
     await Promise.all(lista.map(resolverBajaAsignatura));
     await Promise.all([cargarBajasAsignatura(), cargarAvisosDescartados()]);
@@ -2861,8 +3454,8 @@ function modalRecibo(alumno) {
     <label>Fecha de emisión<input id="r-fecha" value="${hoyDDMMAAAA()}"></label>
   </div>
   <label class="check-inline" style="margin-top:10px">
-    <input type="checkbox" id="r-matricula" ${matriculaPendiente ? 'checked' : ''}> Añadir matrícula (aparte, va a Ingresos &gt; Matrícula)
-    ${matriculaYaCobrada ? ' <small>(ya se le cobró antes)</small>' : ''}
+    <input type="checkbox" id="r-matricula" ${matriculaPendiente ? 'checked' : ''} ${matriculaYaCobrada ? 'disabled' : ''}> Añadir matrícula (aparte, va a Ingresos &gt; Matrícula)
+    ${matriculaYaCobrada ? ' <small>(ya se le cobró antes — no se puede volver a añadir; corrígelo desde "Editar recibo" del recibo que la lleva si hace falta)</small>' : ''}
   </label>
   <input id="r-importe-matricula" type="number" min="0" step="0.01" placeholder="Importe de la matrícula (€)"
     value="${matriculaPendiente ? alumno.matricula_importe : ''}" style="${matriculaPendiente ? '' : 'display:none'}; margin-top:6px">
@@ -2882,8 +3475,9 @@ function modalRecibo(alumno) {
   const $matriculaChk = document.getElementById('r-matricula');
   const $matriculaImporte = document.getElementById('r-importe-matricula');
 
-  // Descuentos del alumno (hermanos, varias asignaturas, especial), consultados
-  // una vez al abrir el recibo — misma fuente que usa la generación automática.
+  // Descuento especial del alumno, consultado una vez al abrir el recibo —
+  // misma fuente que usa la generación automática. (El descuento automático
+  // por hermanos se quitó: ni existe ya en el servidor ni se resta aquí.)
   let descuentos = { descuento_multi: 0, descuento_hermano: 0, descuento_extra: 0 };
   S.sb.rpc('calcular_descuentos_alumno', { p_alumno_id: alumno.id }).then(({ data }) => {
     const $descuentos = document.getElementById('r-descuentos');
@@ -2892,7 +3486,6 @@ function modalRecibo(alumno) {
     if (d) {
       descuentos = d;
       const partes = [];
-      if (d.descuento_hermano > 0) partes.push(`−${formatoImporte(d.descuento_hermano)}€/mes por hermano/a`);
       if (d.descuento_extra > 0) partes.push(`−${formatoImporte(d.descuento_extra)}€/mes descuento especial`);
       $descuentos.textContent = partes.length ? 'Descuentos: ' + partes.join(' · ') : '';
     }
@@ -2921,10 +3514,9 @@ function modalRecibo(alumno) {
     // mismo profesor da dos asignaturas de Bachillerato con un precio ya
     // combinado, no tiene sentido restar más — la jefa lo ajusta a mano con
     // el "Descuento especial" caso por caso si hace falta.
-    const descHermano = (descuentos.descuento_hermano > 0 && marcadasMes.length) ? descuentos.descuento_hermano * meses.length : 0;
     const descExtra = (descuentos.descuento_extra > 0 && marcadasMes.length) ? descuentos.descuento_extra * meses.length : 0;
 
-    const total = Math.max(0, baseMes - descHermano - descExtra) + baseClase + extra + importeMatricula;
+    const total = Math.max(0, baseMes - descExtra) + baseClase + extra + importeMatricula;
     $importe.value = total || '';
     $letras.textContent = importeALetras($importe.value || 0);
   };
@@ -3130,50 +3722,33 @@ function conceptoSinProgenitor(concepto) {
 
 function modalReciboListo(recibos) {
   const lista = Array.isArray(recibos) ? recibos : [recibos];
+  const esAdmin = S.profesor?.es_admin;
   abrirModal(`
   <h2>Recibo${lista.length > 1 ? 's' : ''} generado${lista.length > 1 ? 's' : ''} ✓</h2>
-  ${lista.map((recibo, i) => {
-    const tel = telefonoDeRecibo(recibo);
-    return `
+  ${lista.map((recibo, i) => `
     <p>${recibo.progenitor ? `<strong>${recibo.progenitor === 'madre' ? 'Madre' : 'Padre'}:</strong> ` : ''}${e(recibo.alumnos?.nombre || '')} — ${e(recibo.concepto)} — <strong>${formatoImporte(recibo.importe)}€</strong></p>
     <p class="ayuda">PDF guardado como <code>${e(recibo.pdf_path)}</code></p>
     <div class="pie-modal columna">
       <button class="btn" data-rl-abrir="${i}">Ver PDF</button>
       <button class="btn" data-rl-carpeta="${i}">Mostrar en carpeta</button>
-      <button class="btn primario" data-rl-wa="${i}" ${tel ? '' : 'disabled title="No hay teléfono registrado"'}>Enviar por WhatsApp</button>
-    </div>`;
-  }).join('<hr>')}
+    </div>`).join('<hr>')}
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cerrar</button>
-  </div>
-  <p class="ayuda">Al pulsar “Enviar por WhatsApp” se abre el chat con el mensaje escrito y la carpeta
-  del PDF: arrastra el archivo al chat y envíalo.</p>`);
+    ${esAdmin ? '<button class="btn primario" id="rl-ir-enviar">📤 Ir a Pendientes de envío</button>' : ''}
+  </div>`);
   document.getElementById('m-cancelar').onclick = () => { cerrarModal(); renderVistaActual(); };
+  const irEnviar = document.getElementById('rl-ir-enviar');
+  if (irEnviar) irEnviar.onclick = () => {
+    cerrarModal();
+    S.vista = 'recibos';
+    S.vistaRosterRecibos = false;
+    S.vistaRecibos = 'enviar';
+    renderMain();
+  };
   lista.forEach((recibo, i) => {
     document.querySelector(`[data-rl-abrir="${i}"]`).onclick = () => window.api.openPdf(recibo.pdf_path);
     document.querySelector(`[data-rl-carpeta="${i}"]`).onclick = () => window.api.revealPdf(recibo.pdf_path);
-    const wa = document.querySelector(`[data-rl-wa="${i}"]`);
-    if (telefonoDeRecibo(recibo)) wa.onclick = () => enviarWhatsApp(recibo);
   });
-}
-
-async function enviarWhatsApp(recibo) {
-  const tel = telefonoDeRecibo(recibo);
-  const msg = `Hola, te adjunto el recibo de la Academia Curiosamente.\nConcepto: ${recibo.concepto}\nTotal: ${formatoImporte(recibo.importe)}€\n¡Gracias!`;
-  const telWa = telefonoWa(tel);
-  if (!telWa) return avisar('Teléfono no válido para WhatsApp.', true);
-  // Asegura que el PDF está en este equipo antes de abrir el chat.
-  let ruta = recibo.pdf_path;
-  if (!(await window.api.pdfExists(ruta))) ruta = await regenerarPdf(recibo);
-  await window.api.openWhatsApp(telWa, msg);
-  await window.api.revealPdf(ruta);
-  // El envío no cambia el estado: sigue pendiente hasta que se marque pagado.
-  await S.sb.from('recibos').update({
-    fecha_envio_whatsapp: new Date().toISOString()
-  }).eq('id', recibo.id);
-  await cargarRecibos();
-  if (S.vista === 'recibos') renderRecibos();
-  avisar('Chat de WhatsApp abierto. Arrastra el PDF al chat para enviarlo.');
 }
 
 // ---- Envío automático por la API oficial de WhatsApp ----
@@ -3192,6 +3767,11 @@ function bytesABase64(bytes) {
 // Envía un recibo (o el justificante de pago) con el PDF ya adjunto.
 // Devuelve { ok, simulado, error } — nunca lanza, para poder usarlo en tandas.
 async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
+  // El justificante de pago PARCIAL es un caso aparte: no se agrupa con
+  // hermanos (cada recibo lleva su propio importe_parcial, puede ir distinto
+  // en cada uno) y su PDF/mensaje son diferentes — delega entero en
+  // enviarJustificanteParcial().
+  if (tipo === 'parcial') return enviarJustificanteParcial(recibo);
   // Si tiene hermanos con un recibo pendiente de este mismo envío, se manda
   // todo junto en un solo mensaje/PDF en vez de uno por hermano.
   const esPago = tipo === 'pago';
@@ -3219,6 +3799,7 @@ async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
       fechaPago: esPago ? fmtFecha((recibo.fecha_pago || new Date().toISOString()).slice(0, 10)) : null
     });
 
+    const nombreArchivo = nombreArchivoRecibo(alumno.nombre || 'alumno', recibo.concepto, esPago);
     const { data, error } = await S.sb.functions.invoke('enviar-whatsapp', {
       body: {
         tipo,
@@ -3227,27 +3808,162 @@ async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
         concepto: conceptoSinProgenitor(recibo.concepto),
         importe: formatoImporte(recibo.importe),
         pdfBase64: bytesABase64(bytes),
-        nombreArchivo: nombreArchivoRecibo(alumno.nombre || 'alumno', recibo.concepto, esPago)
+        nombreArchivo
       }
     });
     if (error) return { ok: false, error: 'el servidor rechazó el envío' };
     if (!data?.ok) return { ok: false, error: data?.error || 'error desconocido' };
 
+    // Se guarda también en este equipo el MISMO pdf que se acaba de mandar
+    // (con el sello PAGADO si tocaba) — así el botón "PDF" enseña siempre lo
+    // último enviado en vez de una versión vieja sin sello.
+    const ruta = await window.api.savePdf(Array.from(bytes), nombreArchivo);
     // Con un envío real (no simulado) guardamos el id del mensaje: es lo que
     // luego usa el webhook para saber a qué recibo corresponde cada aviso de
     // "entregado"/"leído"/"fallido" que llegue de Meta.
-    const actualizacion = {};
-    if (esPago) actualizacion.fecha_envio_whatsapp_pago = new Date().toISOString();
-    else actualizacion.fecha_envio_whatsapp = new Date().toISOString();
+    const actualizacion = { pdf_path: ruta };
+    if (esPago) {
+      actualizacion.fecha_envio_whatsapp_pago = new Date().toISOString();
+      actualizacion.envio_pago_por = S.profesor.id; // para el "Hecho por X" del otro admin
+    } else actualizacion.fecha_envio_whatsapp = new Date().toISOString();
     if (!data.simulado && data.mensajeId) {
       actualizacion.whatsapp_message_id = data.mensajeId;
       actualizacion.estado_whatsapp = 'enviado';
     }
-    if (Object.keys(actualizacion).length) {
-      const { error: errorUpdate } = await S.sb.from('recibos').update(actualizacion).eq('id', recibo.id);
-      if (errorUpdate) return { ok: false, error: 'enviado, pero no se pudo guardar el estado: ' + errorUpdate.message };
-    }
+    const { error: errorUpdate } = await S.sb.from('recibos').update(actualizacion).eq('id', recibo.id);
+    if (errorUpdate) return { ok: false, error: 'enviado, pero no se pudo guardar el estado: ' + errorUpdate.message };
     return { ok: true, simulado: Boolean(data.simulado), idsIncluidos: [recibo.id] };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// Justificante de un pago PARCIAL, botón aparte "Enviar justificante pago
+// parcial" (admin-only, en filasRecibos y en el aviso de Inicio) — se manda
+// con lo ACUMULADO hasta ahora (recibo.importe_parcial), no con "el último
+// abono": puede haber varios profesores anotando plazos antes de que el
+// admin mande ningún aviso, así que lo que se comunica es el total real.
+// Datos del sello y de la línea "La cantidad de:" del PDF de pago parcial: lo
+// pagado hasta ahora y lo pendiente (acumulado, del recibo) más el ÚLTIMO
+// abono con su fecha — la cantidad que sale en el PDF es la de ese momento.
+// `estricto`: si no se pueden leer los pagos devuelve null (para no mandar
+// un PDF a medias); si no, se apaña sin el último abono.
+// Qué recoge el próximo justificante de pago parcial: los pagos que aún no se
+// han avisado (más lo anotado con la versión anterior, que no tiene fila). Su
+// SUMA es lo que sale en "La cantidad de:" del PDF. Si ya no queda nada sin
+// avisar (p. ej. al volver a generar el PDF), se enseña lo que recogió el
+// último justificante enviado: los pagos con la fecha de envío más reciente
+// (un envío marca todos sus pagos con el mismo instante).
+// Devuelve { ids (filas sin avisar), n (nº de pagos), importe, fecha }.
+function resumenJustificanteParcial(pagos, importeParcial) {
+  const r2 = (n) => Math.round(n * 100) / 100;
+  const suma = (ps) => r2(ps.reduce((s, p) => s + Number(p.importe), 0));
+  const sinAvisar = pagos.filter(p => !p.justificante_enviado_en);
+  const anteriores = Math.max(0, r2(Number(importeParcial || 0) - suma(pagos)));
+  if (sinAvisar.length || anteriores > 0) {
+    return {
+      ids: sinAvisar.map(p => p.id),
+      n: sinAvisar.length + (anteriores > 0 ? 1 : 0),
+      importe: r2(suma(sinAvisar) + anteriores),
+      fecha: sinAvisar.length ? sinAvisar[sinAvisar.length - 1].fecha : null
+    };
+  }
+  const ultimoEnvio = pagos.map(p => p.justificante_enviado_en).filter(Boolean).sort().pop();
+  const lote = ultimoEnvio ? pagos.filter(p => p.justificante_enviado_en === ultimoEnvio) : [];
+  return {
+    ids: [],
+    n: lote.length,
+    importe: lote.length ? suma(lote) : null,
+    fecha: lote.length ? lote[lote.length - 1].fecha : null
+  };
+}
+
+async function datosPagoParcialPdf(recibo, estricto = false) {
+  const pagos = await pagosDeRecibo(recibo.id);
+  if (!pagos && estricto) return null;
+  const resumen = pagos ? resumenJustificanteParcial(pagos, recibo.importe_parcial) : null;
+  const pagado = Number(recibo.importe_parcial) || 0;
+  return {
+    pagoParcial: {
+      pagadoCifra: formatoImporte(pagado),
+      pendienteCifra: formatoImporte(Number(recibo.importe) - pagado),
+      ultimoCifra: resumen?.importe != null ? formatoImporte(resumen.importe) : undefined
+    },
+    fechaPago: resumen?.fecha ? fmtFecha(String(resumen.fecha).slice(0, 10)) : hoyDDMMAAAA(),
+    pagosIds: resumen ? resumen.ids : [] // solo los que aún no tenían justificante: son los que marca este envío
+  };
+}
+
+// Usa la plantilla propia de Meta 'pagado_parcial' (tipo:'parcial' en la
+// función enviar-whatsapp), cuyo texto lleva el importe que queda pendiente
+// ({{3}}); el PDF adjunto lleva el sello "PAGO PARCIAL" con el desglose en
+// vez de "PAGADO". No toca fecha_envio_whatsapp_pago (ese campo es del
+// justificante de pago COMPLETO — el recibo aquí sigue pendiente de verdad)
+// ni agrupa hermanos (cada uno puede deber un resto distinto).
+async function enviarJustificanteParcial(recibo) {
+  const tel = telefonoDeRecibo(recibo);
+  if (!telefonoWa(tel)) return { ok: false, error: 'sin teléfono válido' };
+  const destinatario = destinatarioDeRecibo(recibo);
+  const nombrePdf = nombreParaReciboPdf(recibo);
+  const pagado = Number(recibo.importe_parcial) || 0;
+  const pendiente = Number(recibo.importe) - pagado;
+  try {
+    const parcial = await datosPagoParcialPdf(recibo, true);
+    if (!parcial) return { ok: false, error: 'no se pudieron leer los pagos del recibo' };
+    const letras = recibo.importe_letras || importeALetras(recibo.importe);
+    const bytes = await generarReciboPdf({
+      fechaEmision: fmtFecha(recibo.fecha_emision),
+      recibiDe: nombrePdf,
+      cantidadLetras: letras,
+      concepto: recibo.concepto,
+      desglose: desgloseDeRecibo(recibo.concepto, recibo.importe, recibo.importe_matricula) || undefined,
+      totalCifra: formatoImporte(recibo.importe),
+      referencia: 'R-' + String(recibo.referencia).padStart(5, '0'),
+      logoPngBase64: S.logoBase64,
+      pagoParcial: parcial.pagoParcial,
+      fechaPago: parcial.fechaPago
+    });
+    const nombreArchivo = nombreArchivoRecibo(recibo.alumnos?.nombre || recibo.alumno_nombre || 'alumno', recibo.concepto, 'parcial');
+    const { data, error } = await S.sb.functions.invoke('enviar-whatsapp', {
+      body: {
+        tipo: 'parcial',
+        telefono: tel,
+        nombre: destinatario.split(' ')[0] || destinatario,
+        concepto: conceptoSinProgenitor(recibo.concepto),
+        pendiente: formatoImporte(pendiente),
+        pdfBase64: bytesABase64(bytes),
+        nombreArchivo
+      }
+    });
+    if (error) return { ok: false, error: 'el servidor rechazó el envío' };
+    if (!data?.ok) return { ok: false, error: data?.error || 'error desconocido' };
+    // Igual que con el justificante completo: se guarda el mismo PDF que se
+    // acaba de mandar, para que el botón "PDF" enseñe lo último de verdad.
+    const ruta = await window.api.savePdf(Array.from(bytes), nombreArchivo);
+    // El "Leído"/"Por leer" que se ve en Recibos es el del ÚLTIMO mensaje: al
+    // mandar este justificante se apunta su id (el webhook de Meta solo
+    // actualiza el estado del mensaje que consta aquí, así que un "leído" del
+    // mensaje anterior ya no puede colarse) y el estado vuelve a "enviado"
+    // (sin chip) hasta que llegue el "entregado"/"leído" del nuevo. Si Meta no
+    // devolviera id, se quita igualmente el estado viejo para no dar por leído
+    // este mensaje con el "Leído" del anterior. Con un envío simulado no se ha
+    // mandado nada, así que se deja como estaba.
+    const actualizacion = { pdf_path: ruta };
+    if (!data.simulado) {
+      actualizacion.whatsapp_message_id = data.mensajeId || null;
+      actualizacion.estado_whatsapp = data.mensajeId ? 'enviado' : null;
+    }
+    const { error: errEstado } = await S.sb.from('recibos').update(actualizacion).eq('id', recibo.id);
+    // Los pagos que recoge este justificante quedan marcados como avisados
+    // (así en "Pago incompleto" se ve cuáles faltan por avisar). Con un envío
+    // simulado no se ha mandado nada de verdad, así que no se marca.
+    let errorMarca = errEstado ? 'no se pudo guardar el estado del mensaje: ' + errEstado.message : null;
+    if (!data.simulado && parcial.pagosIds.length) {
+      const { error: errUpd } = await S.sb.from('recibo_pagos')
+        .update({ justificante_enviado_en: new Date().toISOString(), justificante_enviado_por: S.profesor.id }).in('id', parcial.pagosIds);
+      if (errUpd) errorMarca = errUpd.message;
+    }
+    return { ok: true, simulado: Boolean(data.simulado), idsIncluidos: [recibo.id], errorMarca };
   } catch (err) {
     return { ok: false, error: err.message };
   }
@@ -3312,6 +4028,7 @@ async function enviarPorWhatsAppApiConjunto(recibos, tipo = 'recibo') {
     // (comparten el mismo envío, así que su estado de entrega también vale).
     const fechaCampo = esPago ? 'fecha_envio_whatsapp_pago' : 'fecha_envio_whatsapp';
     const actualizacionPrimero = { [fechaCampo]: new Date().toISOString() };
+    if (esPago) actualizacionPrimero.envio_pago_por = S.profesor.id; // para el "Hecho por X" del otro admin
     if (!data.simulado && data.mensajeId) {
       actualizacionPrimero.whatsapp_message_id = data.mensajeId;
       actualizacionPrimero.estado_whatsapp = 'enviado';
@@ -3322,7 +4039,7 @@ async function enviarPorWhatsAppApiConjunto(recibos, tipo = 'recibo') {
     const resto = recibos.slice(1);
     if (resto.length) {
       const { error: errorResto } = await S.sb.from('recibos')
-        .update({ [fechaCampo]: actualizacionPrimero[fechaCampo] })
+        .update({ [fechaCampo]: actualizacionPrimero[fechaCampo], ...(esPago ? { envio_pago_por: S.profesor.id } : {}) })
         .in('id', resto.map(r => r.id));
       if (errorResto) return { ok: false, error: 'enviado, pero no se pudo guardar el estado de todos: ' + errorResto.message };
     }
@@ -3334,18 +4051,31 @@ async function enviarPorWhatsAppApiConjunto(recibos, tipo = 'recibo') {
 
 // Envío masivo por tandas, con progreso y resumen final. tipo='recibo' manda
 // el recibo normal; tipo='pago' manda el justificante de pago (mismo PDF,
-// sellado como PAGADO).
+// sellado como PAGADO); tipo='parcial' manda el aviso de pago parcial
+// (sello PAGO PARCIAL, con lo acumulado y lo pendiente de cada uno).
 function modalEnvioMasivo(lista, tipo = 'recibo') {
-  const esPago = tipo === 'pago';
+  // En bloque, el justificante de pago parcial solo se manda a los recibos que
+  // tienen algún pago SIN justificante enviado: los ya avisados se omiten, así
+  // nunca se repite un mensaje a una familia. (Para repetir uno a propósito,
+  // está el botón "Enviar justificante pago parcial" de cada recibo.)
+  let yaAvisados = [];
+  if (tipo === 'parcial') {
+    yaAvisados = lista.filter(r => !nPagosSinAvisar(r));
+    lista = lista.filter(r => nPagosSinAvisar(r));
+  }
+  const esPago = tipo !== 'recibo';
+  const etiquetaLista = tipo === 'parcial' ? 'justificantes de pago parcial' : esPago ? 'justificantes de pago' : 'recibos';
   const conTelefono = lista.filter(r => telefonoWa(telefonoDeRecibo(r)));
   const sinTelefono = lista.length - conTelefono.length;
   const TANDA = 10;
 
   abrirModal(`
-  <h2>Enviar ${esPago ? 'justificantes de pago' : 'recibos'} por WhatsApp</h2>
-  <p class="ayuda">Se enviarán <strong>${conTelefono.length}</strong> ${esPago ? 'justificantes' : 'recibos'} con el PDF ya adjunto,
+  <h2>Enviar ${etiquetaLista} por WhatsApp</h2>
+  <p class="ayuda">Se ${conTelefono.length === 1 ? 'enviará' : 'enviarán'} <strong>${conTelefono.length}</strong> ${esPago ? 'justificante' : 'recibo'}${conTelefono.length === 1 ? '' : 's'} con el PDF ya adjunto,
   en tandas de ${TANDA} para poder seguirlo con calma.
   ${sinTelefono ? `<br>⚠ ${sinTelefono} ${esPago ? 'justificante' : 'recibo'}${sinTelefono === 1 ? '' : 's'} sin teléfono válido se omitirá${sinTelefono === 1 ? '' : 'n'}.` : ''}</p>
+  ${tipo === 'parcial' ? `<ul class="detalle-alumnos">${lista.map(r => `<li>${e(r.alumnos?.nombre || '')} — pagado ${formatoImporte(r.importe_parcial)}€ de ${formatoImporte(r.importe)}€, quedan ${formatoImporte(r.importe - r.importe_parcial)}€ ${chipJustificanteParcial(r)}</li>`).join('')}</ul>` : ''}
+  ${yaAvisados.length ? `<p class="ayuda">ℹ ${yaAvisados.length} ${yaAvisados.length === 1 ? 'recibo ya tenía' : 'recibos ya tenían'} todos sus pagos avisados y no se vuelve${yaAvisados.length === 1 ? '' : 'n'} a mandar: ${yaAvisados.map(r => e(r.alumnos?.nombre || '')).join(', ')}.</p>` : ''}
   <div id="em-progreso"></div>
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cancelar</button>
@@ -3396,48 +4126,89 @@ function modalEnvioMasivo(lista, tipo = 'recibo') {
   };
 }
 
-// Mismo criterio que usa el servidor para el descuento de hermanos, pero en
-// local (evita una llamada por alumno dentro de un bucle de generación).
-function tieneHermano(alumno) {
-  if (!alumno.apellidos || !alumno.apellidos.trim()) return false;
-  const norm = (s) => s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
-  const miApellido = norm(alumno.apellidos);
-  return S.alumnos.some(a2 => a2.id !== alumno.id && a2.estado === 'activo' && a2.apellidos && norm(a2.apellidos) === miApellido);
+// ---- Hermanos y hermanastros ----
+// Solo sirven para JUNTAR recibos al enviar y al cobrar (un único PDF y un
+// único cobro por familia). Ya no hay ningún descuento automático por
+// hermanos: se quitó del servidor y de la app — si a una familia le toca
+// rebaja, va a mano en el "Descuento especial" de la ficha.
+
+function apellidosNormalizados(s) {
+  return s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
 }
 
-// De un grupo de hermanos, solo UNO se lleva el descuento de 5€ (no cada
-// uno por separado — se envían en un recibo conjunto, así que restarlo a
-// cada uno lo contaría 2 o 3 veces). El "designado" es el de id más bajo
-// del grupo, incluyéndose a sí mismo — mismo criterio que usa el servidor
-// en calcular_descuentos_alumno(), para que ambos coincidan siempre.
-function esHermanoDesignado(alumno) {
-  if (!tieneHermano(alumno)) return false; // sin hermano de verdad, no hay descuento que designar
-  const norm = (s) => s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
-  const miApellido = norm(alumno.apellidos);
-  const idsFamilia = S.alumnos
-    .filter(a2 => a2.estado === 'activo' && a2.apellidos && norm(a2.apellidos) === miApellido)
-    .map(a2 => a2.id);
-  return idsFamilia.every(id => id >= alumno.id);
-}
-
-// Recibos de hermanos de `r` que están en el MISMO paso de la cadena
-// (pendientes con pendientes, pagados con pagados — no tiene sentido
-// juntar un pendiente con uno ya cobrado) y del mismo mes de emisión. No se
-// guarda ningún enlace en la base de datos: se calcula al vuelo cada vez,
-// igual que tieneHermano(), así que funciona con 2 hermanos o con 3 (ya hay
-// una familia real de 3 en la base de datos) y da igual quién ni cuándo
-// generó cada recibo por separado.
-function recibosHermanosDe(r) {
-  const alumno = S.alumnos.find(a => a.id === r.alumno_id);
-  if (!alumno || !tieneHermano(alumno)) return [];
-  const norm = (s) => s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
-  const miApellido = norm(alumno.apellidos);
-  const idsHermanos = new Set(S.alumnos
-    .filter(a2 => a2.id !== alumno.id && a2.estado === 'activo' && a2.apellidos && norm(a2.apellidos) === miApellido)
+// Otros alumnos activos con los mismos apellidos ("hermanos" de siempre,
+// detectados solos).
+function idsHermanosPorApellido(alumno) {
+  if (!alumno?.apellidos || !alumno.apellidos.trim()) return new Set();
+  const mio = apellidosNormalizados(alumno.apellidos);
+  return new Set(S.alumnos
+    .filter(a2 => a2.id !== alumno.id && a2.estado === 'activo' && a2.apellidos && apellidosNormalizados(a2.apellidos) === mio)
     .map(a2 => a2.id));
+}
+
+// Hermanastros: enlace manual (alumnos.grupo_hermanastros) para quienes NO
+// comparten apellidos y por eso no se pueden detectar solos. Mismo grupo =
+// mismo id; el admin los junta desde "Función hermanastros" en Alumnos.
+function idsHermanastrosDe(alumno) {
+  if (!alumno?.grupo_hermanastros) return new Set();
+  return new Set(S.alumnos
+    .filter(a2 => a2.id !== alumno.id && a2.estado === 'activo' && a2.grupo_hermanastros === alumno.grupo_hermanastros)
+    .map(a2 => a2.id));
+}
+
+// Recibos de esos alumnos que están en el MISMO paso de la cadena que `r`
+// (pendientes con pendientes, pagados con pagados — no tiene sentido juntar
+// un pendiente con uno ya cobrado) y del mismo mes de emisión. No se guarda
+// ningún enlace entre recibos: se calcula al vuelo cada vez, así que
+// funciona con 2 o con 3 y da igual quién ni cuándo generó cada uno.
+function recibosDeAlumnosEnMismoPaso(r, ids) {
+  if (!ids.size) return [];
   const mesR = claveMes(r.fecha_emision);
-  return S.recibos.filter(r2 => r2.id !== r.id && idsHermanos.has(r2.alumno_id)
+  return S.recibos.filter(r2 => r2.id !== r.id && ids.has(r2.alumno_id)
     && claveMes(r2.fecha_emision) === mesR && r2.estado === r.estado);
+}
+function recibosHermanosPorApellidoDe(r) {
+  return recibosDeAlumnosEnMismoPaso(r, idsHermanosPorApellido(S.alumnos.find(a => a.id === r.alumno_id)));
+}
+function recibosHermanastrosDe(r) {
+  return recibosDeAlumnosEnMismoPaso(r, idsHermanastrosDe(S.alumnos.find(a => a.id === r.alumno_id)));
+}
+// Todos los recibos con los que se junta `r` (hermanos + hermanastros): es
+// lo que usan el envío conjunto y el cobro conjunto.
+function recibosHermanosDe(r) {
+  const vistos = new Set();
+  return [...recibosHermanosPorApellidoDe(r), ...recibosHermanastrosDe(r)]
+    .filter(x => !vistos.has(x.id) && vistos.add(x.id));
+}
+
+// Nombres de los hermanastros de un alumno (vacío si no tiene ninguno) y la
+// etiqueta que se pone junto a su nombre en los listados.
+function nombresHermanastrosDe(alumnoId) {
+  const alumno = S.alumnos.find(a => a.id === alumnoId);
+  return [...idsHermanastrosDe(alumno)].map(id => S.alumnos.find(a => a.id === id)?.nombre).filter(Boolean);
+}
+function chipHermanastros(nombres) {
+  return nombres.length
+    ? `<span class="chip hermanastros" title="Hermanastros de: ${e(nombres.join(', '))}">Hermanastros</span>`
+    : '';
+}
+
+// Deja los hermanastros uno al lado del otro en un listado, sin tocar el
+// orden del resto: cada grupo se coloca donde aparece su primer miembro.
+// `alumnoIdDe` dice de cada elemento a qué alumno corresponde.
+function juntarHermanastros(lista, alumnoIdDe) {
+  const grupoPorAlumno = new Map(S.alumnos.map(a => [a.id, a.grupo_hermanastros || null]));
+  const grupoDe = (item) => grupoPorAlumno.get(alumnoIdDe(item)) || null;
+  const puestos = new Set();
+  const salida = [];
+  for (const item of lista) {
+    const g = grupoDe(item);
+    if (!g) { salida.push(item); continue; }
+    if (puestos.has(g)) continue;
+    puestos.add(g);
+    for (const otro of lista) if (grupoDe(otro) === g) salida.push(otro);
+  }
+  return salida;
 }
 
 function modalReciboBulk() {
@@ -3493,9 +4264,8 @@ function modalReciboBulk() {
         const misClaseMats = misMats.filter(m => m.tipo_tarifa === 'clase' && m.tarifa != null);
         const baseMes = misMesMats.reduce((s, m) => s + Number(m.tarifa), 0) * meses.length;
         const baseClase = misClaseMats.reduce((s, m) => s + Number(m.tarifa), 0);
-        const descHermano = (misMesMats.length && esHermanoDesignado(a)) ? 5 * meses.length : 0;
         const descExtra = (misMesMats.length && a.descuento_extra > 0) ? a.descuento_extra * meses.length : 0;
-        const importe = Math.max(0, baseMes - descHermano - descExtra) + baseClase;
+        const importe = Math.max(0, baseMes - descExtra) + baseClase;
         if (importe <= 0) { mal++; continue; }
         const generados = await crearRecibos(a, {
           concepto, importe,
@@ -3538,12 +4308,19 @@ function modalResultadoBulk(ok, mal, nombresRepetidos) {
 
 // Regenera el PDF de un recibo a partir de sus datos y actualiza la ruta en la BD.
 // Los recibos automáticos llegan sin el importe en letras: se completa aquí.
+// Reconoce el estado ACTUAL del recibo (cobrado del todo, pago parcial, o
+// normal) para poner el sello que toque — así el botón "PDF" nunca enseña
+// una versión vieja (ej. sin sello) de un recibo que ya se cobró o que tiene
+// un pago parcial más reciente.
 async function regenerarPdf(r) {
   let letras = r.importe_letras;
   if (!letras) {
     letras = importeALetras(r.importe);
     await S.sb.from('recibos').update({ importe_letras: letras }).eq('id', r.id);
   }
+  const pagado = r.estado === 'pagado';
+  const pendienteParcial = !pagado && Number(r.importe_parcial) > 0;
+  const parcial = pendienteParcial ? await datosPagoParcialPdf(r) : null;
   const bytes = await generarReciboPdf({
     fechaEmision: (r.fecha_emision || '').split('-').reverse().join('/'),
     recibiDe: nombreParaReciboPdf(r),
@@ -3552,9 +4329,12 @@ async function regenerarPdf(r) {
     desglose: desgloseDeRecibo(r.concepto, r.importe, r.importe_matricula) || undefined,
     totalCifra: formatoImporte(r.importe),
     referencia: 'R-' + String(r.referencia).padStart(5, '0'),
-    logoPngBase64: S.logoBase64
+    logoPngBase64: S.logoBase64,
+    pagado,
+    fechaPago: pagado ? fmtFecha((r.fecha_pago || new Date().toISOString()).slice(0, 10)) : (parcial?.fechaPago ?? null),
+    pagoParcial: parcial?.pagoParcial
   });
-  const ruta = await window.api.savePdf(Array.from(bytes), nombreArchivoRecibo(r.alumnos?.nombre || 'alumno', r.concepto));
+  const ruta = await window.api.savePdf(Array.from(bytes), nombreArchivoRecibo(r.alumnos?.nombre || 'alumno', r.concepto, pagado || (pendienteParcial && 'parcial')));
   await S.sb.from('recibos').update({ pdf_path: ruta }).eq('id', r.id);
   await cargarRecibos();
   return ruta;
@@ -3604,6 +4384,44 @@ function estadoRecibo(r, pagados) {
 
 // Modal pequeño de "¿efectivo o banco?", reutilizado tanto al marcar un
 // recibo cobrado como al corregir la cuenta de uno ya cobrado.
+// Al marcar "✓ Cobrado"/"⚡ Cobro rápido", registra en recibo_pagos solo lo
+// que falte de cada recibo que YA tuviera algún pago parcial anotado antes
+// (importe - lo ya anotado) — así el pago final no vuelve a contabilizar en
+// Ingresos y gastos lo que esos abonos ya habían sumado por su cuenta. Los
+// recibos que se cobran de un tirón, SIN haber pasado nunca por "Pago
+// incompleto", no se tocan aquí a propósito: se deja que el trigger de
+// siempre (sincronizar_finanzas_recibo, en Supabase) haga su trabajo tal
+// cual, con la separación Mensualidad/Matrícula que ya hacía — meterlos
+// también por aquí perdería esa separación (recibo_pagos solo categoriza
+// "Mensualidad", sin repartir la matrícula). Devuelve el mensaje de error,
+// o null si fue bien (incluido el caso de no haber nada que registrar).
+// Nota para la ventana de cobro cuando algún recibo tiene pagos anotados con
+// la versión anterior (que se contabilizan ahora, junto con el resto).
+function notaPagosAnteriores(recibos) {
+  const total = recibos.reduce((s, r) => s + parcialSinDetalle(r), 0);
+  return total > 0
+    ? `<br><small>Incluye ${formatoImporte(total)}€ anotados con la versión anterior, que se contabilizan ahora en Ingresos y gastos junto con el resto, en la cuenta que elijas.</small>`
+    : '';
+}
+
+async function registrarPagosRestantes(recibos, cuenta) {
+  // Recibos con pagos anotados con la versión anterior (sin cuenta ni
+  // detalle, ver parcialSinDetalle): aquella versión no los contabilizaba, el
+  // dinero entraba de golpe al cobrar. Se sigue igual: junto con el resto, en
+  // la cuenta elegida ahora. Van PRIMERO (es dinero anterior), para que la
+  // matrícula se cubra con ese antes que con el resto.
+  const previos = recibos
+    .filter(r => parcialSinDetalle(r) > 0)
+    .map(r => ({ recibo_id: r.id, importe: parcialSinDetalle(r), cuenta, creado_por: S.profesor.id }));
+  const pagos = [...previos, ...recibos
+    .filter(r => Number(r.importe_parcial) > 0)
+    .map(r => ({ recibo_id: r.id, importe: Number(r.importe) - Number(r.importe_parcial), cuenta, creado_por: S.profesor.id }))
+    .filter(p => p.importe > 0)];
+  if (!pagos.length) return null;
+  const { error } = await S.sb.from('recibo_pagos').insert(pagos);
+  return error ? error.message : null;
+}
+
 function modalElegirCuentaCobro(titulo, mensaje, onElegir) {
   abrirModal(`
   <h2>${e(titulo)}</h2>
@@ -3637,35 +4455,215 @@ function modalCobroRapido(mensaje, onElegir) {
   document.getElementById('cr-banco').onclick = () => onElegir('banco');
 }
 
-// Anotación de "han pagado parte, no todo" — puramente visual/informativa:
-// no toca estado ni Ingresos y gastos, solo deja constancia de cuánto han
-// dado ya para que el personal lo vea de un vistazo. El recibo sigue en
-// Pendiente de cobrar hasta que se marque "✓ Cobrado" de verdad con el
-// resto (ahí sí se contabiliza el total, por la cuenta que se elija).
-function modalPagoIncompleto(r) {
+// Registra un pago PARCIAL real: cada abono pide su cuenta (Efectivo o
+// Banco) y se suma a Ingresos y gastos en el momento en que se cobra — ver
+// recibo_pagos y su disparador en Supabase.
+// Cualquier profesor puede registrar un abono (igual que "✓ Cobrado", que
+// tampoco es solo-admin) — lo que sí sigue siendo solo del admin es MANDAR
+// el justificante, con el botón aparte "Enviar justificante pago parcial"
+// que solo sale cuando el recibo ya tiene algo pagado.
+//
+// El campo pide siempre el importe de ESTE pago (queda en blanco cada vez que
+// se abre) — arriba se ve el historial de lo ya registrado (fecha, importe,
+// cuenta, quién lo anotó) y lo que falta, así que no hace falta acordarse de
+// cuánto llevaban. Cada abono es una fila en recibo_pagos.
+function etiquetaCuenta(c) { return c === 'banco' ? '🏦 Banco' : '💶 Efectivo'; }
+
+async function pagosDeRecibo(reciboId) {
+  const { data, error } = await S.sb.from('recibo_pagos').select('*').eq('recibo_id', reciboId).order('created_at');
+  return error ? null : (data || []);
+}
+
+function filasPagosRecibo(pagos, conQuitar) {
+  return pagos.map(p => {
+    const quien = S.profesores.find(x => x.id === p.creado_por)?.nombre;
+    const aviso = p.justificante_enviado_en
+      ? `<span class="chip justificante-si" title="Justificante enviado el ${e(fmtFecha(String(p.justificante_enviado_en).slice(0, 10)))}">✓ Justificante enviado ${e(fmtFecha(String(p.justificante_enviado_en).slice(0, 10)).slice(0, 5))}</span>`
+      : '<span class="chip justificante-no" title="Todavía no se ha mandado el justificante de este pago">⚠ Justificante sin enviar</span>';
+    return `<li class="fila-pago">
+      <span><strong>${formatoImporte(p.importe)}€</strong> · ${etiquetaCuenta(p.cuenta)}</span>
+      ${aviso}
+      <span class="ayuda">${fmtFecha(String(p.fecha).slice(0, 10))}${quien ? ' · ' + e(quien) : ''}</span>
+      ${conQuitar ? `<button class="btn chico liso peligro" data-quitar-pago="${p.id}" title="Quitar este pago (también se resta de Ingresos y gastos)">✕</button>` : ''}
+    </li>`;
+  }).join('');
+}
+
+async function modalPagoIncompleto(r) {
+  const pagos = await pagosDeRecibo(r.id);
+  if (!pagos) return avisar('No se pudieron cargar los pagos de este recibo.', true);
+  const total = Number(r.importe);
+  const pagadoFilas = pagos.reduce((s, p) => s + Number(p.importe), 0);
+  const esAdmin = S.profesor?.es_admin;
+  // Pagos anotados con la versión anterior de la app (sin cuenta ni detalle,
+  // no contabilizados): se registran ahora junto con el pago nuevo — si no,
+  // lo pagado (que se recalcula solo de las filas de pago) los perdería. Hay
+  // que preguntar en qué cuenta se cobraron.
+  const previo = Math.max(0, Math.round((Number(r.importe_parcial || 0) - pagadoFilas) * 100) / 100);
+  const pagado = pagadoFilas + previo; // todo lo pagado hasta ahora
   abrirModal(`
   <h2>Pago incompleto — ${e(r.alumnos?.nombre || '')}</h2>
-  <p class="ayuda">Solo es una nota para que se vea a simple vista cuánto han pagado ya de este recibo
-  (${formatoImporte(r.importe)}€ en total). No cambia el estado ni mueve nada en Ingresos y gastos —
-  eso pasa cuando se marque "✓ Cobrado" con el resto.</p>
-  <label>¿Cuánto han pagado? (€)<input id="pi-importe" type="number" min="0.01" step="5" value="${r.importe_parcial ?? ''}"></label>
-  <div class="pie-modal">
+  <p class="ayuda">Apunta cada abono por separado: el importe de <strong>este</strong> pago, no el total. Se suma a
+  Ingresos y gastos con la cuenta y la fecha de hoy. El recibo sigue "Pendiente de cobrar" hasta que se
+  complete con "✓ Cobrado"; el justificante lo manda el admin después con "Enviar justificante pago parcial".</p>
+  <div class="resumen-pagos">
+    <div><small>Total del recibo</small><strong>${formatoImporte(total)}€</strong></div>
+    <div><small>Pagado hasta ahora</small><strong>${formatoImporte(pagado)}€</strong></div>
+    <div><small>Quedan</small><strong>${formatoImporte(total - pagado)}€</strong></div>
+  </div>
+  ${(() => {
+    const sinEnviar = pagos.filter(p => !p.justificante_enviado_en);
+    const n = sinEnviar.length + (previo > 0 ? 1 : 0);
+    const importe = sinEnviar.reduce((s, p) => s + Number(p.importe), 0) + previo;
+    return n
+      ? `<p class="aviso-justificante">⚠ ${n === 1 ? 'Hay 1 pago' : `Hay ${n} pagos`} (${formatoImporte(importe)}€) sin justificante enviado${esAdmin ? ' — mándalo con "Enviar justificante pago parcial".' : ': avisa al admin para que lo mande.'}</p>`
+      : '';
+  })()}
+  ${previo > 0 ? `<div class="caja-envio">
+    <p class="aviso-justificante" style="margin-top:0">⚠ ${formatoImporte(previo)}€ de este recibo se anotaron con la versión anterior de la app, sin decir si fue en efectivo o banco, y todavía no constan en Ingresos y gastos.</p>
+    <p>Al guardar este pago se registrarán también ahora. <strong>¿En qué cuenta se cobraron esos ${formatoImporte(previo)}€?</strong></p>
+    <div class="cuenta-opciones" id="pi-cuenta-previo">
+      <button type="button" class="cuenta-opcion" data-cuenta="efectivo">💶 Efectivo</button>
+      <button type="button" class="cuenta-opcion" data-cuenta="banco">🏦 Banco</button>
+    </div>
+  </div>` : ''}
+  ${pagos.length || previo > 0
+    ? `<h3 class="seccion">Pagos ya registrados</h3><ul class="lista-pagos">${previo > 0
+      ? `<li class="fila-pago"><span><strong>${formatoImporte(previo)}€</strong> · anotados con la versión anterior</span><span class="chip justificante-no">⚠ Justificante sin enviar</span></li>` : ''}${filasPagosRecibo(pagos, esAdmin)}</ul>`
+    : '<p class="ayuda">Todavía no hay ningún pago registrado en este recibo.</p>'}
+  <label>Importe de este pago (€)<input id="pi-importe" type="number" min="0.01" step="5" placeholder="0"></label>
+  <p class="ayuda" id="pi-pendiente"></p>
+  <p class="ayuda" style="margin:14px 0 4px">¿Cómo han pagado ${previo > 0 ? 'este pago' : ''}?</p>
+  <div class="cuenta-opciones" id="pi-cuenta-nueva">
+    <button type="button" class="cuenta-opcion activa" data-cuenta="efectivo">💶 Efectivo</button>
+    <button type="button" class="cuenta-opcion" data-cuenta="banco">🏦 Banco</button>
+  </div>
+  <div class="pie-modal grande">
     <button class="btn liso" id="m-cancelar">Cancelar</button>
     <button class="btn primario" id="pi-guardar">Guardar</button>
   </div>
   <p id="m-msg" class="error"></p>`);
   document.getElementById('m-cancelar').onclick = cerrarModal;
+
+  // Efectivo o Banco: dos recuadros, el elegido queda en naranja. Uno para
+  // este pago (Efectivo preseleccionado) y, si hay pagos de la versión
+  // anterior, otro para ellos (sin preselección: hay que elegir a propósito).
+  let cuentaElegida = 'efectivo';
+  let cuentaPrevio = null;
+  document.querySelectorAll('#pi-cuenta-nueva .cuenta-opcion').forEach(b => b.onclick = () => {
+    cuentaElegida = b.dataset.cuenta;
+    document.querySelectorAll('#pi-cuenta-nueva .cuenta-opcion').forEach(o => o.classList.toggle('activa', o === b));
+  });
+  document.querySelectorAll('#pi-cuenta-previo .cuenta-opcion').forEach(b => b.onclick = () => {
+    cuentaPrevio = b.dataset.cuenta;
+    document.querySelectorAll('#pi-cuenta-previo .cuenta-opcion').forEach(o => o.classList.toggle('activa', o === b));
+  });
+
+  const $importe = document.getElementById('pi-importe');
+  const $pendiente = document.getElementById('pi-pendiente');
+  const actualizarPendiente = () => {
+    const n = Number($importe.value) || 0;
+    const resto = total - pagado - n;
+    if (n <= 0) { $pendiente.textContent = ''; return; }
+    $pendiente.textContent = resto <= 0
+      ? `Con esto ya estaría todo pagado (${formatoImporte(total)}€): usa "✓ Cobrado" en vez de "Pago incompleto".`
+      : `Con este pago llevarán ${formatoImporte(pagado + n)}€ de ${formatoImporte(total)}€. Quedarán ${formatoImporte(resto)}€ por pagar.`;
+  };
+  $importe.oninput = actualizarPendiente;
+
   document.getElementById('pi-guardar').onclick = async () => {
-    const importe = Number(document.getElementById('pi-importe').value);
+    const importe = Number($importe.value);
     const msg = document.getElementById('m-msg');
-    if (!importe || importe <= 0) { msg.textContent = 'Pon un importe mayor que 0.'; return; }
-    if (importe >= Number(r.importe)) { msg.textContent = `Tiene que ser menos que el total del recibo (${formatoImporte(r.importe)}€) — si ya han pagado todo, usa "✓ Cobrado".`; return; }
-    const { error } = await S.sb.from('recibos').update({ importe_parcial: importe }).eq('id', r.id);
+    if (!importe || importe <= 0) { msg.textContent = 'Pon el importe de este pago (mayor que 0).'; return; }
+    if (pagado + importe >= total) { msg.textContent = `Con este pago ya llegarían al total del recibo (${formatoImporte(total)}€) — si han pagado todo, usa "✓ Cobrado".`; return; }
+    if (previo > 0 && !cuentaPrevio) { msg.textContent = `Elige en qué cuenta se cobraron los ${formatoImporte(previo)}€ anotados antes (efectivo o banco).`; return; }
+    // Los de la versión anterior van primero (es dinero anterior: cubre antes
+    // la matrícula) y todo en un solo insert, para que no quede a medias.
+    const filas = [];
+    if (previo > 0) filas.push({ recibo_id: r.id, importe: previo, cuenta: cuentaPrevio, creado_por: S.profesor.id });
+    filas.push({ recibo_id: r.id, importe, cuenta: cuentaElegida, creado_por: S.profesor.id });
+    const { error } = await S.sb.from('recibo_pagos').insert(filas);
     if (error) { msg.textContent = 'Error: ' + error.message; return; }
+    // El PDF local queda desactualizado en cuanto cambia lo pagado — se
+    // limpia para que la próxima vez que se pida (o se mande) se regenere
+    // solo con el importe nuevo, en vez de enseñar uno con datos viejos.
+    await S.sb.from('recibos').update({ pdf_path: null }).eq('id', r.id);
+    await Promise.all([cargarRecibos(), cargarFinanzas()]);
+    cerrarModal();
+    renderRecibos();
+    avisar(`Pago de ${formatoImporte(importe)}€ registrado. Llevan ${formatoImporte(pagado + importe)}€ de ${formatoImporte(total)}€ (quedan ${formatoImporte(total - pagado - importe)}€).`);
+  };
+
+  // Quitar un pago anotado por error (solo admin): también desaparece de
+  // Ingresos y gastos (el movimiento cuelga del pago) y lo pendiente se
+  // recalcula solo.
+  document.querySelectorAll('[data-quitar-pago]').forEach(b => b.onclick = async () => {
+    const p = pagos.find(x => x.id === b.dataset.quitarPago);
+    if (!p) return;
+    if (!(await confirmarAccion(`¿Quitar el pago de ${formatoImporte(p.importe)}€ (${etiquetaCuenta(p.cuenta)}, ${fmtFecha(String(p.fecha).slice(0, 10))})? También se resta de Ingresos y gastos.`))) return;
+    const { error } = await S.sb.from('recibo_pagos').delete().eq('id', p.id);
+    if (error) return avisar('Error: ' + error.message, true);
+    await S.sb.from('recibos').update({ pdf_path: null }).eq('id', r.id);
+    await Promise.all([cargarRecibos(), cargarFinanzas()]);
+    renderRecibos();
+    const fresco = S.recibos.find(x => x.id === r.id);
+    if (fresco) modalPagoIncompleto(fresco); else cerrarModal();
+    avisar('Pago quitado.');
+  });
+}
+
+// Recuadro previo al envío del justificante de pago parcial: enseña lo que
+// se va a mandar (pagos registrados, lo pagado/pendiente, y qué llevan el
+// WhatsApp y el PDF) y no envía nada hasta que se pulsa "Enviar ahora".
+async function modalConfirmarEnvioParcial(r) {
+  const pagos = await pagosDeRecibo(r.id);
+  if (!pagos) return avisar('No se pudieron cargar los pagos de este recibo.', true);
+  const total = Number(r.importe);
+  const pagado = Number(r.importe_parcial) || 0; // lo mismo que usa enviarJustificanteParcial
+  const pendiente = total - pagado;
+  const envio = resumenJustificanteParcial(pagos, r.importe_parcial); // su importe es "La cantidad de:" del PDF
+  const fechaEnvio = envio.fecha ? fmtFecha(String(envio.fecha).slice(0, 10)) : '';
+  const tel = telefonoDeRecibo(r);
+  const valido = Boolean(telefonoWa(tel));
+  const destinatario = destinatarioDeRecibo(r);
+  abrirModal(`
+  <h2>Enviar justificante de pago parcial</h2>
+  <p class="ayuda">Revisa lo que se va a mandar. No se envía nada hasta que pulses "Enviar ahora".</p>
+  <div class="caja-envio">
+    <p><strong>Para:</strong> ${e(destinatario)} · ${e(tel || 'sin teléfono')}</p>
+    <p><strong>Recibo:</strong> ${e(r.alumnos?.nombre || '')} — ${e(r.concepto)} (${formatoImporte(total)}€)</p>
+    <h3 class="seccion">Pagos registrados</h3>
+    <ul class="lista-pagos">${filasPagosRecibo(pagos, false)}${parcialSinDetalle(r) > 0
+      ? `<li class="fila-pago"><span><strong>${formatoImporte(parcialSinDetalle(r))}€</strong> · anotados con la versión anterior</span><span class="chip justificante-no">⚠ Justificante sin enviar</span></li>`
+      : ''}</ul>
+    <p class="linea-total">Pagado hasta ahora: <strong>${formatoImporte(pagado)}€</strong> de ${formatoImporte(total)}€ · Quedan <strong>${formatoImporte(pendiente)}€</strong></p>
+    <p class="ayuda">Al enviarlo, los pagos con "⚠ Justificante sin enviar" quedan marcados como "justificante enviado".</p>
+  </div>
+  <div class="caja-envio">
+    <h3 class="seccion">Lo que recibirá</h3>
+    <p>📱 <strong>WhatsApp</strong> (plantilla pagado_parcial) a nombre de ${e(destinatario.split(' ')[0] || destinatario)}, con el concepto "${e(conceptoSinProgenitor(r.concepto))}" y "te quedan ${formatoImporte(pendiente)}€ pendientes".</p>
+    <p>📄 <strong>PDF adjunto</strong>: en "La cantidad de:" ${envio.n > 1
+      ? `la suma de los ${envio.n} pagos que aún no se habían avisado (<strong>${formatoImporte(envio.importe)}€</strong>)`
+      : `lo pagado en ese momento (<strong>${envio.importe != null ? formatoImporte(envio.importe) : '—'}€</strong>${fechaEnvio ? `, ${fechaEnvio}` : ''})`}; en el "Total:" ${formatoImporte(pagado)}/${formatoImporte(total)}€ y el sello PAGO PARCIAL con "Pagado ${formatoImporte(pagado)}€ · Pendiente ${formatoImporte(pendiente)}€".</p>
+  </div>
+  ${valido ? '' : '<p class="error">No hay un teléfono válido para WhatsApp en este recibo: corrígelo en la ficha del alumno antes de enviar.</p>'}
+  <div class="pie-modal grande">
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+    <button class="btn primario" id="ep-enviar" ${valido && pagado > 0 ? '' : 'disabled'}>📤 Enviar ahora</button>
+  </div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('ep-enviar').onclick = async () => {
+    const btn = document.getElementById('ep-enviar');
+    btn.disabled = true; btn.textContent = 'Enviando…';
+    const resultado = await enviarJustificanteParcial(r);
     await cargarRecibos();
     cerrarModal();
     renderRecibos();
-    avisar('Anotado.');
+    if (!resultado.ok) return avisar('No se pudo avisar por WhatsApp: ' + resultado.error, true);
+    if (resultado.errorMarca) return avisar('Justificante enviado, pero no se pudieron marcar los pagos como avisados: ' + resultado.errorMarca, true);
+    avisar(resultado.simulado
+      ? 'WhatsApp aún no está configurado: ha sido una simulación, no se ha enviado nada real.'
+      : 'Justificante de pago parcial enviado.');
   };
 }
 
@@ -3677,9 +4675,10 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables, permitirCobroRapi
       ${esAdmin ? '<th>Profesor</th>' : ''}<th>Estado</th><th></th>
     </tr></thead>
     <tbody>
-    ${lista.map(r => {
+    ${juntarHermanastros(lista, r => r.alumno_id).map(r => {
       const estado = estadoRecibo(r, pagados);
-      const hermanos = recibosHermanosDe(r);
+      const hermanos = recibosHermanosPorApellidoDe(r);
+      const hermanastros = nombresHermanastrosDe(r.alumno_id);
       return `<tr>
       ${seleccionables ? `<td><input type="checkbox" data-check="${r.id}" ${S.recibosSeleccionados.has(r.id) ? 'checked' : ''}></td>` : ''}
       <td><strong>${e(r.alumnos?.nombre || '')}</strong><br>
@@ -3689,10 +4688,12 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables, permitirCobroRapi
       ${esAdmin ? `<td>${e(r.profesor_titular_nombre || r.profesores?.nombre || '—')}</td>` : ''}
       <td><div class="estado-chips">
         <span class="chip ${estado.clase}">${estado.texto}</span>
-        ${pagados && r.cuenta ? `<span class="chip activo">${r.cuenta === 'banco' ? 'Banco' : 'Efectivo'}</span>` : ''}
-        ${!pagados && r.importe_parcial ? `<span class="chip pago-parcial">${formatoImporte(r.importe_parcial)}€ de ${formatoImporte(r.importe)}€ cobrados</span>` : ''}
+        ${pagados && textoCuentas(r) ? `<span class="chip activo">${textoCuentas(r)}</span>` : ''}
+        ${!pagados && r.importe_parcial ? `<span class="chip pago-parcial" title="Ya han pagado ${formatoImporte(r.importe_parcial)}€ de ${formatoImporte(r.importe)}€">Quedan ${formatoImporte(r.importe - r.importe_parcial)}€</span>` : ''}
+        ${esAdmin && !pagados && r.importe_parcial ? chipJustificanteParcial(r) : ''}
         ${r.progenitor ? `<span class="chip envio-si" title="Recibo repartido entre los dos progenitores">${r.progenitor === 'madre' ? 'Madre' : 'Padre'}</span>` : ''}
         ${hermanos.length ? `<span class="chip activo" title="Junto con: ${e(hermanos.map(h => h.alumnos?.nombre || '').join(', '))}">👪 Recibo hermanos</span>` : ''}
+        ${chipHermanastros(hermanastros)}
         ${r.estado_whatsapp === 'fallido' ? '<span class="chip wa-fallido" title="WhatsApp no pudo entregarlo: revisa el teléfono">Fallido</span>'
           : r.estado_whatsapp === 'leido' ? '<span class="chip wa-leido">Leído</span>'
           : r.estado_whatsapp === 'entregado' ? '<span class="chip wa-por-leer">Por leer</span>'
@@ -3704,8 +4705,8 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables, permitirCobroRapi
           : `${permitirCobroRapido
                ? (esAdmin ? `<button class="btn chico cobro-rapido" data-cobro-rapido="${r.id}" title="Cobrado en persona al momento, sin enviar nada">⚡ Cobro rápido</button>` : '')
                : `<button class="btn chico pagar" data-pagar="${r.id}">✓ Cobrado</button>`}
-             <button class="btn chico liso" data-pago-incompleto="${r.id}" title="Anotar que han pagado solo una parte">Pago incompleto</button>
-             ${esAdmin ? `<button class="btn chico liso" data-wa="${r.id}">WhatsApp</button>` : ''}
+             <button class="btn chico pago-incompleto" data-pago-incompleto="${r.id}" title="Registrar un pago parcial">Pago incompleto</button>
+             ${esAdmin && r.importe_parcial ? `<button class="btn chico enviar-parcial" data-enviar-parcial="${r.id}" title="Avisar por WhatsApp de cuánto llevan pagado (antes te enseña lo que se va a mandar)">📤 Enviar justificante pago parcial</button>` : ''}
              <button class="btn chico liso" data-editar-recibo="${r.id}" title="Editar recibo">✏️</button>`}
         <button class="btn chico liso" data-pdf="${r.id}">PDF</button>
         <button class="btn chico liso peligro" data-borrar-recibo="${r.id}" title="Eliminar recibo">✕</button>
@@ -3760,33 +4761,63 @@ function renderRecibos() {
   const noPagados = delMes.filter(r => r.estado !== 'pagado');
   const pagados = delMes.filter(r => r.estado === 'pagado');
   // Cadena de estados: sin enviar el recibo no tiene sentido "pendiente de
-  // cobro" (el alumno/tutor ni sabe que hay que pagar), así que un recibo sin
+  // pago" (el alumno/tutor ni sabe que hay que pagar), así que un recibo sin
   // enviar sale solo en "Pendientes de envío" y desaparece de ahí en cuanto
-  // se manda — nunca están en las dos pestañas a la vez.
-  const porEnviar = noPagados.filter(r => !r.fecha_envio_whatsapp);
-  const pendientesCobro = noPagados.filter(r => r.fecha_envio_whatsapp);
+  // se manda — nunca están en las dos pestañas a la vez. Y en cuanto tiene
+  // algún pago parcial anotado (con o sin enviar todavía), sale de las dos
+  // anteriores y pasa a su propia pestaña "Pagos parciales", donde se queda
+  // acumulando plazos hasta completarse — así no se mezcla con los que aún
+  // no tienen nada pagado.
+  const conParcial = noPagados.filter(r => r.importe_parcial);
+  const sinParcial = noPagados.filter(r => !r.importe_parcial);
+  const porEnviar = sinParcial.filter(r => !r.fecha_envio_whatsapp);
+  const pendientesPago = sinParcial.filter(r => r.fecha_envio_whatsapp);
   const pagadosPorEnviar = pagados.filter(r => !r.fecha_envio_whatsapp_pago && !r.cobro_rapido);
-  // La pestaña activa (si es una de las dos "por enviar") y su tipo de envío,
-  // para que el bloque de casillas/selección de abajo sirva para las dos.
-  const listaEnviable = sub === 'pagados-enviar' ? pagadosPorEnviar : porEnviar;
-  const tipoEnviable = sub === 'pagados-enviar' ? 'pago' : 'recibo';
+  // La pestaña activa (si es una que se puede enviar en bloque) y su tipo de
+  // envío, para que el bloque de casillas/selección de abajo sirva para las
+  // tres — "Pagos parciales" solo entra aquí para el admin (es el único que
+  // envía algo desde ahí; un profesor la ve sin casillas ni botón de envío).
+  const esEnviableEnBloque = sub === 'enviar' || sub === 'pagados-enviar' || (sub === 'parciales' && esAdmin);
+  const listaEnviable = sub === 'pagados-enviar' ? pagadosPorEnviar : sub === 'parciales' ? conParcial : porEnviar;
+  const tipoEnviable = sub === 'pagados-enviar' ? 'pago' : sub === 'parciales' ? 'parcial' : 'recibo';
+  // "Seleccionar todos": en Pagos parciales solo los que tienen algún pago
+  // sin justificante enviado (los ya avisados no se repiten).
+  const listaSeleccionable = sub === 'parciales'
+    ? listaEnviable.filter(r => nPagosSinAvisar(r))
+    : listaEnviable;
 
   let cuerpo = '';
-  if (sub === 'enviar' || sub === 'pagados-enviar') {
+  if (esEnviableEnBloque) {
     const total = listaEnviable.reduce((s, r) => s + Number(r.importe), 0);
+    const totalPagado = sub === 'parciales' ? listaEnviable.reduce((s, r) => s + Number(r.importe_parcial), 0) : 0;
     const nSeleccionados = listaEnviable.filter(r => S.recibosSeleccionados.has(r.id)).length;
-    const todosMarcados = listaEnviable.length > 0 && nSeleccionados === listaEnviable.length;
+    const todosMarcados = listaSeleccionable.length > 0 && listaSeleccionable.every(r => S.recibosSeleccionados.has(r.id));
     const mensajeVacio = sub === 'pagados-enviar'
       ? 'No hay justificantes de pago por enviar este mes. 🎉'
+      : sub === 'parciales'
+      ? 'No hay recibos con pagos parciales este mes. 🎉'
       : 'No hay recibos por enviar este mes. 🎉';
-    const etiquetaLista = sub === 'pagados-enviar' ? 'cobrado' : 'por enviar';
+    const etiquetaLista = sub === 'pagados-enviar' ? 'cobrado'
+      : sub === 'parciales' ? `con pago parcial · ${formatoImporte(totalPagado)}€ cobrados de ${formatoImporte(total)}€`
+      : 'por enviar';
+    const etiquetaBotonEnviar = sub === 'parciales' ? '📤 Enviar justificantes seleccionados' : '📤 Enviar seleccionados';
     cuerpo = listaEnviable.length === 0
       ? `<div class="vacio">${mensajeVacio}</div>`
       : `<h3 class="mes-seccion">${tituloMes(S.mesRecibos)}
-          <small>${listaEnviable.length} ${etiquetaLista} · ${formatoImporte(total)}€</small>
-          <button class="btn chico" id="rc-marcar-todos">${todosMarcados ? 'Quitar selección' : 'Seleccionar todos'}</button>
-          <button class="btn primario chico" id="rc-enviar-seleccionados" ${nSeleccionados ? '' : 'disabled'}>📤 Enviar seleccionados (${nSeleccionados})</button></h3>
+          <small>${listaEnviable.length} ${etiquetaLista}${sub === 'parciales' ? '' : ` · ${formatoImporte(total)}€`}</small>
+          <button class="btn chico" id="rc-marcar-todos" ${listaSeleccionable.length ? '' : 'disabled'}>${todosMarcados ? 'Quitar selección' : sub === 'parciales' ? 'Seleccionar los sin enviar' : 'Seleccionar todos'}</button>
+          <button class="btn primario chico" id="rc-enviar-seleccionados" ${nSeleccionados ? '' : 'disabled'}>${etiquetaBotonEnviar} (${nSeleccionados})</button></h3>
         ${filasRecibos(listaEnviable, esAdmin, sub === 'pagados-enviar', true, sub === 'enviar')}`;
+  } else if (sub === 'parciales') {
+    // Vista sin selección (para un profesor sin permiso de envío): la misma
+    // tabla, solo lectura de estado, sin casillas ni botón de enviar.
+    const total = conParcial.reduce((s, r) => s + Number(r.importe), 0);
+    const totalPagado = conParcial.reduce((s, r) => s + Number(r.importe_parcial), 0);
+    cuerpo = conParcial.length === 0
+      ? `<div class="vacio">No hay recibos con pagos parciales este mes. 🎉</div>`
+      : `<h3 class="mes-seccion">${tituloMes(S.mesRecibos)}
+          <small>${conParcial.length} con pago parcial${esAdmin ? ` · ${formatoImporte(totalPagado)}€ cobrados de ${formatoImporte(total)}€` : ''}</small></h3>
+        ${filasRecibos(conParcial, esAdmin, false, false, false)}`;
   } else if (sub === 'pagados') {
     const total = pagados.reduce((s, r) => s + Number(r.importe), 0);
     cuerpo = pagados.length === 0
@@ -3796,22 +4827,23 @@ function renderRecibos() {
           <button class="btn chico" id="rc-descargar-mes">⬇ Descargar todos los PDF</button></h3>
         ${filasRecibos(pagados, esAdmin, true)}`;
   } else {
-    const total = pendientesCobro.reduce((s, r) => s + Number(r.importe), 0);
-    cuerpo = pendientesCobro.length === 0
-      ? `<div class="vacio">No hay recibos pendientes de cobro este mes. 🎉</div>`
+    const total = pendientesPago.reduce((s, r) => s + Number(r.importe), 0);
+    cuerpo = pendientesPago.length === 0
+      ? `<div class="vacio">No hay recibos pendientes de pago este mes. 🎉</div>`
       : `<h3 class="mes-seccion">${tituloMes(S.mesRecibos)}
-          <small>${pendientesCobro.length} pendiente${pendientesCobro.length === 1 ? '' : 's'}${esAdmin ? ` · ${formatoImporte(total)}€` : ''}</small>
+          <small>${pendientesPago.length} pendiente${pendientesPago.length === 1 ? '' : 's'}${esAdmin ? ` · ${formatoImporte(total)}€` : ''}</small>
           <button class="btn chico" id="rc-descargar-mes">⬇ Descargar todos los PDF</button></h3>
-        ${filasRecibos(pendientesCobro, esAdmin, false)}`;
+        ${filasRecibos(pendientesPago, esAdmin, false)}`;
   }
 
   document.getElementById('contenido').innerHTML = `
   <div class="barra">
     <div class="segmentos">
       ${esAdmin ? `<button class="seg ${sub === 'enviar' ? 'activo' : ''}" data-sub="enviar">Pendientes de envío${porEnviar.length ? ` (${porEnviar.length})` : ''}</button>` : ''}
-      <button class="seg ${sub === 'pendientes' ? 'activo' : ''}" data-sub="pendientes">Pendientes de cobrar${pendientesCobro.length ? ` (${pendientesCobro.length})` : ''}</button>
-      <button class="seg ${sub === 'pagados' ? 'activo' : ''}" data-sub="pagados">Cobrados</button>
+      <button class="seg ${sub === 'pendientes' ? 'activo' : ''}" data-sub="pendientes">Pendientes de pago${pendientesPago.length ? ` (${pendientesPago.length})` : ''}</button>
+      <button class="seg ${sub === 'parciales' ? 'activo' : ''}" data-sub="parciales">Pagos parciales${conParcial.length ? ` (${conParcial.length})` : ''}</button>
       ${esAdmin ? `<button class="seg ${sub === 'pagados-enviar' ? 'activo' : ''}" data-sub="pagados-enviar">Justificantes por enviar${pagadosPorEnviar.length ? ` (${pagadosPorEnviar.length})` : ''}</button>` : ''}
+      <button class="seg ${sub === 'pagados' ? 'activo' : ''}" data-sub="pagados">Cobrados</button>
     </div>
     ${barraMes}
     <input id="fr-texto" type="search" placeholder="Buscar por alumno, concepto o referencia (R-00001)…" value="${e(S.filtros.textoRecibo)}">
@@ -3848,12 +4880,12 @@ function renderRecibos() {
   });
   const rcDescargarMes = document.getElementById('rc-descargar-mes');
   if (rcDescargarMes) rcDescargarMes.onclick = () => {
-    descargarPdfsMes(S.mesRecibos, sub === 'pagados' ? pagados : pendientesCobro, rcDescargarMes);
+    descargarPdfsMes(S.mesRecibos, sub === 'pagados' ? pagados : pendientesPago, rcDescargarMes);
   };
   const rcMarcarTodos = document.getElementById('rc-marcar-todos');
   if (rcMarcarTodos) rcMarcarTodos.onclick = () => {
-    const todosMarcados = listaEnviable.length > 0 && listaEnviable.every(r => S.recibosSeleccionados.has(r.id));
-    listaEnviable.forEach(r => todosMarcados ? S.recibosSeleccionados.delete(r.id) : S.recibosSeleccionados.add(r.id));
+    const todosMarcados = listaSeleccionable.length > 0 && listaSeleccionable.every(r => S.recibosSeleccionados.has(r.id));
+    listaSeleccionable.forEach(r => todosMarcados ? S.recibosSeleccionados.delete(r.id) : S.recibosSeleccionados.add(r.id));
     renderRecibos();
   };
   const rcEnviarSel = document.getElementById('rc-enviar-seleccionados');
@@ -3876,14 +4908,20 @@ function renderRecibos() {
     const nombres = [r, ...hermanos].map(x => x.alumnos?.nombre || 'este alumno').join(' y ');
     const ids = [r.id, ...hermanos.map(h => h.id)];
     modalElegirCuentaCobro('Marcar como cobrado',
-      `¿Cómo se ha cobrado el recibo de ${e(nombres)}${hermanos.length ? ' (recibo hermanos)' : ''} (${formatoImporte(r.importe)}€, ${e(r.concepto)})?`,
+      `¿Cómo se ha cobrado el recibo de ${e(nombres)}${hermanos.length ? ' (recibo hermanos)' : ''} (${formatoImporte(r.importe)}€, ${e(r.concepto)})?${notaPagosAnteriores([r, ...hermanos])}`,
       async (cuenta) => {
+        // Si ya había pagos parciales anotados antes, solo se registra el
+        // RESTANTE que falta por cobrar (registrarPagosRestantes se encarga
+        // de calcularlo por cada recibo del grupo) — así no se duplica en
+        // Ingresos y gastos lo que ya se había contabilizado de esos abonos.
+        const errorPagos = await registrarPagosRestantes([r, ...hermanos], cuenta);
+        if (errorPagos) { cerrarModal(); return avisar('Error al registrar el cobro: ' + errorPagos, true); }
         const { error } = await S.sb.from('recibos')
-          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta, cobro_rapido: false, importe_parcial: null })
+          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta, cobro_rapido: false, pdf_path: null })
           .in('id', ids);
         cerrarModal();
         if (error) return avisar('Error al marcar como cobrado: ' + error.message, true);
-        await cargarRecibos();
+        await Promise.all([cargarRecibos(), cargarFinanzas()]);
         renderRecibos();
         // El envío del justificante ya no es automático: solo el admin lo manda,
         // desde la pestaña "Pagados por enviar" (así cualquier profesor puede
@@ -3901,14 +4939,16 @@ function renderRecibos() {
     const nombres = [r, ...hermanos].map(x => x.alumnos?.nombre || 'este alumno').join(' y ');
     const ids = [r.id, ...hermanos.map(h => h.id)];
     modalCobroRapido(
-      `¿Cómo se ha cobrado en persona el recibo de ${e(nombres)}${hermanos.length ? ' (recibo hermanos)' : ''} (${formatoImporte(r.importe)}€, ${e(r.concepto)})?`,
+      `¿Cómo se ha cobrado en persona el recibo de ${e(nombres)}${hermanos.length ? ' (recibo hermanos)' : ''} (${formatoImporte(r.importe)}€, ${e(r.concepto)})?${notaPagosAnteriores([r, ...hermanos])}`,
       async (cuenta) => {
+        const errorPagos = await registrarPagosRestantes([r, ...hermanos], cuenta);
+        if (errorPagos) { cerrarModal(); return avisar('Error al registrar el cobro: ' + errorPagos, true); }
         const { error } = await S.sb.from('recibos')
-          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta, cobro_rapido: true, importe_parcial: null })
+          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta, cobro_rapido: true, pdf_path: null })
           .in('id', ids);
         cerrarModal();
         if (error) return avisar('Error al marcar como cobro rápido: ' + error.message, true);
-        await cargarRecibos();
+        await Promise.all([cargarRecibos(), cargarFinanzas()]);
         renderRecibos();
         avisar('Marcado como cobro rápido.');
       });
@@ -3918,9 +4958,17 @@ function renderRecibos() {
     if (!r) return;
     modalPagoIncompleto(r);
   });
+  document.querySelectorAll('[data-enviar-parcial]').forEach(b => b.onclick = () => {
+    const r = S.recibos.find(x => x.id === b.dataset.enviarParcial);
+    if (!r) return;
+    modalConfirmarEnvioParcial(r); // enseña lo que se va a mandar; no envía hasta confirmar
+  });
   document.querySelectorAll('[data-editar-cuenta]').forEach(b => b.onclick = () => {
     const r = S.recibos.find(x => x.id === b.dataset.editarCuenta);
     if (!r) return;
+    // Cobrado en varios pagos: cada uno tiene su cuenta (y su movimiento).
+    const pagosR = S.reciboPagos.filter(p => p.recibo_id === r.id);
+    if (pagosR.length) return modalCorregirCuentasPagos(r, pagosR);
     modalElegirCuentaCobro('Corregir cuenta de cobro',
       `¿En qué cuenta se cobró de verdad el recibo de ${e(r.alumnos?.nombre || '')} (${formatoImporte(r.importe)}€, ${e(r.concepto)})? Esto solo corrige en qué cuenta se contabiliza — no cambia el estado ni la fecha de cobro.`,
       async (cuenta) => {
@@ -3940,12 +4988,18 @@ function renderRecibos() {
     if (!r) return;
     const hermanos = recibosHermanosDe(r).filter(h => h.estado === 'pagado');
     const nombres = [r, ...hermanos].map(x => x.alumnos?.nombre || 'este alumno').join(' y ');
-    if (!(await confirmarAccion(`¿Estás segura de que quieres volver a dejar PENDIENTE el recibo de ${nombres} (${formatoImporte(r.importe)}€, ${r.concepto})?`))) return;
+    // "Volver a pendiente" deshace el cobro entero, no solo el último plazo:
+    // si hubo pagos parciales antes de completarlo, también se borran (y con
+    // ellos, lo que hubieran sumado ya en Ingresos y gastos) — el recibo
+    // queda como si no se hubiera cobrado nada de él, para no dejar un
+    // estado a medias confuso.
+    if (!(await confirmarAccion(`¿Estás segura de que quieres volver a dejar PENDIENTE el recibo de ${nombres} (${formatoImporte(r.importe)}€, ${r.concepto})? Si tenía pagos parciales anotados, también se borran (y lo que sumaran en Ingresos y gastos).`))) return;
     const ids = [r.id, ...hermanos.map(h => h.id)];
-    const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null, cuenta: null, cobro_rapido: false })
+    await S.sb.from('recibo_pagos').delete().in('recibo_id', ids);
+    const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null, envio_pago_por: null, cuenta: null, cobro_rapido: false, importe_parcial: null, pdf_path: null })
       .in('id', ids);
     if (error) return avisar('Error: ' + error.message, true);
-    await cargarRecibos();
+    await Promise.all([cargarRecibos(), cargarFinanzas()]);
     renderRecibos();
     avisar('Recibo devuelto a pendientes.');
   });
@@ -3960,10 +5014,6 @@ function renderRecibos() {
   });
   document.querySelectorAll('[data-editar-recibo]').forEach(b => b.onclick = () =>
     modalEditarRecibo(S.recibos.find(x => x.id === b.dataset.editarRecibo)));
-  document.querySelectorAll('[data-wa]').forEach(b => b.onclick = () => {
-    const r = S.recibos.find(x => x.id === b.dataset.wa);
-    enviarWhatsApp(r);
-  });
   document.querySelectorAll('[data-pdf]').forEach(b => b.onclick = async () => {
     const r = S.recibos.find(x => x.id === b.dataset.pdf);
     const abierto = await window.api.openPdf(r.pdf_path);
@@ -4061,6 +5111,9 @@ async function descargarPdfsMes(claveM, lista, boton) {
         letras = importeALetras(r.importe);
         await S.sb.from('recibos').update({ importe_letras: letras }).eq('id', r.id);
       }
+      const pagado = r.estado === 'pagado';
+      const pendienteParcial = !pagado && Number(r.importe_parcial) > 0;
+      const parcial = pendienteParcial ? await datosPagoParcialPdf(r) : null;
       const bytes = await generarReciboPdf({
         fechaEmision: (r.fecha_emision || '').split('-').reverse().join('/'),
         recibiDe: nombreParaReciboPdf(r),
@@ -4069,11 +5122,14 @@ async function descargarPdfsMes(claveM, lista, boton) {
         desglose: desgloseDeRecibo(r.concepto, r.importe, r.importe_matricula) || undefined,
         totalCifra: formatoImporte(r.importe),
         referencia: 'R-' + String(r.referencia).padStart(5, '0'),
-        logoPngBase64: S.logoBase64
+        logoPngBase64: S.logoBase64,
+        pagado,
+        fechaPago: pagado ? fmtFecha((r.fecha_pago || new Date().toISOString()).slice(0, 10)) : (parcial?.fechaPago ?? null),
+        pagoParcial: parcial?.pagoParcial
       });
       const ruta = await window.api.savePdfLote(
         Array.from(bytes),
-        nombreArchivoRecibo(r.alumnos?.nombre || 'alumno', r.concepto),
+        nombreArchivoRecibo(r.alumnos?.nombre || 'alumno', r.concepto, pagado || (pendienteParcial && 'parcial')),
         carpeta
       );
       // El recibo apunta a este PDF: el botón WhatsApp abrirá esta carpeta.
@@ -4091,6 +5147,55 @@ async function descargarPdfsMes(claveM, lista, boton) {
 }
 
 // Editar un recibo pendiente (ej. añadir horas extra antes de enviarlo).
+// Corregir la cuenta de un recibo cobrado en varios pagos (recibo_pagos): cada
+// pago tiene la suya, y con ella su movimiento en Ingresos y gastos
+// (finanzas_movimientos.recibo_pago_id). El "✎" de siempre solo corrige
+// recibos cobrados de un tirón (movimientos 'automatico'), no estos.
+function modalCorregirCuentasPagos(r, pagos) {
+  const elegidas = new Map(pagos.map(p => [p.id, p.cuenta]));
+  abrirModal(`
+  <h2>Corregir cuentas — ${e(r.alumnos?.nombre || '')}</h2>
+  <p class="ayuda">Este recibo (${formatoImporte(r.importe)}€, ${e(r.concepto)}) se cobró en varios pagos.
+  Elige en qué cuenta entró cada uno: se corrige también en Ingresos y gastos.</p>
+  <ul class="lista-pagos">
+    ${pagos.map(p => `<li class="fila-pago" data-pago="${p.id}">
+      <span><strong>${formatoImporte(p.importe)}€</strong> · ${fmtFecha(String(p.fecha).slice(0, 10))}</span>
+      <span class="cuenta-opciones compacta">
+        <button type="button" class="cuenta-opcion ${p.cuenta === 'efectivo' ? 'activa' : ''}" data-cuenta="efectivo">💶 Efectivo</button>
+        <button type="button" class="cuenta-opcion ${p.cuenta === 'banco' ? 'activa' : ''}" data-cuenta="banco">🏦 Banco</button>
+      </span>
+    </li>`).join('')}
+  </ul>
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+    <button class="btn primario" id="cc-guardar">Guardar</button>
+  </div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.querySelectorAll('[data-pago] .cuenta-opcion').forEach(b => b.onclick = () => {
+    const fila = b.closest('[data-pago]');
+    elegidas.set(fila.dataset.pago, b.dataset.cuenta);
+    fila.querySelectorAll('.cuenta-opcion').forEach(o => o.classList.toggle('activa', o === b));
+  });
+  document.getElementById('cc-guardar').onclick = async () => {
+    const cambiados = pagos.filter(p => elegidas.get(p.id) !== p.cuenta);
+    if (!cambiados.length) return cerrarModal();
+    for (const p of cambiados) {
+      const cuenta = elegidas.get(p.id);
+      const { error } = await S.sb.from('recibo_pagos').update({ cuenta }).eq('id', p.id);
+      if (error) { cerrarModal(); return avisar('Error: ' + error.message, true); }
+      const { error: errFin } = await S.sb.from('finanzas_movimientos').update({ cuenta }).eq('recibo_pago_id', p.id);
+      if (errFin) { cerrarModal(); return avisar('Se corrigió el pago, pero no Ingresos y gastos: ' + errFin.message, true); }
+    }
+    // recibos.cuenta guarda una sola (la del último pago); las listas
+    // enseñan las de todos los pagos (textoCuentas).
+    await S.sb.from('recibos').update({ cuenta: elegidas.get(pagos[pagos.length - 1].id) }).eq('id', r.id);
+    cerrarModal();
+    await Promise.all([cargarRecibos(), cargarFinanzas()]);
+    renderRecibos();
+    avisar('Cuentas corregidas.');
+  };
+}
+
 function modalEditarRecibo(r) {
   // Si el recibo ya traía matrícula de fábrica, se separa del resto del
   // importe/concepto para no duplicarla al recalcular (y se le quita el
@@ -4105,10 +5210,21 @@ function modalEditarRecibo(r) {
   const conceptoOriginal = r.incluye_matricula
     ? r.concepto.replace(/^\+ Matrícula$/, '').replace(/ \+ Matrícula$/, '')
     : r.concepto;
+  // Misma regla que al generar: si OTRO recibo de este alumno ya lleva la
+  // matrícula, no se puede añadir también aquí (se cobra una sola vez). El
+  // propio recibo que ya la lleva sí puede seguir tocándose (quitarla,
+  // corregir el importe...).
+  const matriculaEnOtro = S.recibos.some(x => x.alumno_id === r.alumno_id && x.id !== r.id && x.incluye_matricula);
+  // Con pagos ya anotados: lo pagado se repartió entre Matrícula y
+  // Mensualidad en Ingresos y gastos según la matrícula que tenía el recibo
+  // en ese momento, así que no se toca la matrícula; y el nuevo total no
+  // puede quedarse por debajo de lo ya pagado.
+  const yaPagado = Number(r.importe_parcial) || 0;
   abrirModal(`
   <h2>Editar recibo R-${String(r.referencia).padStart(5, '0')} — ${e(r.alumnos?.nombre || '')}</h2>
   <p class="ayuda">Añade el extra (se suma solo al importe y al concepto) o toca el concepto
   y el importe directamente. El PDF se rehace con los datos nuevos.</p>
+  ${yaPagado > 0 ? `<p class="aviso-justificante">Este recibo ya tiene ${formatoImporte(yaPagado)}€ pagados: el importe nuevo tiene que ser mayor que eso, y la matrícula no se puede cambiar (lo pagado ya se repartió en Ingresos y gastos). Si hay que corregir eso, quita antes los pagos en "Pago incompleto".</p>` : ''}
   <div class="grid2">
     <label>Extra (€) — horas de más, material…
       <input id="er-extra" type="number" min="0" step="0.01" placeholder="0"></label>
@@ -4118,10 +5234,11 @@ function modalEditarRecibo(r) {
     <label>Importe total (€)<input id="er-importe" type="number" min="0" step="0.01" value="${Number(r.importe)}"></label>
   </div>
   <label class="check-inline" style="margin-top:10px">
-    <input type="checkbox" id="er-matricula" ${r.incluye_matricula ? 'checked' : ''}> Añadir matrícula (aparte, va a Ingresos &gt; Matrícula)
+    <input type="checkbox" id="er-matricula" ${r.incluye_matricula ? 'checked' : ''} ${matriculaEnOtro || yaPagado > 0 ? 'disabled' : ''}> Añadir matrícula (aparte, va a Ingresos &gt; Matrícula)
+    ${matriculaEnOtro ? ' <small>(ya se le cobró en otro recibo suyo — no se puede volver a añadir aquí)</small>' : ''}
   </label>
   <input id="er-importe-matricula" type="number" min="0" step="0.01" placeholder="Importe de la matrícula (€)"
-    value="${matriculaOriginal || ''}" style="${r.incluye_matricula ? '' : 'display:none'}; margin-top:6px">
+    value="${matriculaOriginal || ''}" ${yaPagado > 0 ? 'disabled' : ''} style="${r.incluye_matricula ? '' : 'display:none'}; margin-top:6px">
   <p class="letras">La cantidad de: <strong id="er-letras"></strong>€</p>
   <div class="pie-modal">
     <button class="btn liso" id="m-cancelar">Cancelar</button>
@@ -4168,6 +5285,10 @@ function modalEditarRecibo(r) {
     const importe = Number($importe.value);
     if (!concepto || !importe) {
       document.getElementById('m-msg').textContent = 'Concepto e importe son obligatorios.';
+      return;
+    }
+    if (yaPagado > 0 && importe <= yaPagado) {
+      document.getElementById('m-msg').textContent = `Ya se han pagado ${formatoImporte(yaPagado)}€: el importe tiene que ser mayor. Si han pagado todo, usa "✓ Cobrado".`;
       return;
     }
     const importeMatricula = conMatricula ? (Number($matriculaImporte.value) || 0) : 0;
@@ -5335,8 +6456,8 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta = nul
       <td><strong>${formatoImporte(m.importe)}€</strong></td>
       <td>${m.cuenta ? `<span class="chip activo">${m.cuenta === 'banco' ? 'Banco' : 'Efectivo'}</span>` : '<small class="ayuda">sin clasificar</small>'}</td>
       <td><small>${e(m.descripcion || '')}</small></td>
-      <td class="acciones">${m.origen === 'automatico'
-        ? '<small class="ayuda" title="Viene de un recibo cobrado; para quitarlo, deshaz el cobro en Recibos">ligado a un recibo</small>'
+      <td class="acciones">${m.origen !== 'manual'
+        ? '<small class="ayuda" title="Viene de un recibo cobrado (o de un pago parcial); para quitarlo, deshaz el cobro o quita el pago en Recibos">ligado a un recibo</small>'
         : `<button class="btn chico liso peligro" data-borrar-fin="${m.id}">✕</button>`}</td>
     </tr>`).join('')}
     </tbody>
@@ -5401,9 +6522,13 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta = nul
     // Desmarcar: si no queda ninguna cuenta marcada, es un borrado completo
     // de la columna (todos sus movimientos, de cualquier cuenta); si queda
     // la otra, solo se borra lo de esta cuenta.
-    const todos = otraMarcada
+    // Solo los manuales: los movimientos ligados a un recibo cobrado (o a un
+    // pago parcial) no se borran desde aquí — se quitan deshaciendo el cobro
+    // o quitando el pago en Recibos, si no el recibo seguiría cobrado sin
+    // que ese dinero constara en Ingresos.
+    const todos = (otraMarcada
       ? S.finanzas.filter(m => m.tipo === tipo && m.categoria === categoria && m.cuenta === cuentaCambiada)
-      : S.finanzas.filter(m => m.tipo === tipo && m.categoria === categoria);
+      : S.finanzas.filter(m => m.tipo === tipo && m.categoria === categoria)).filter(m => m.origen === 'manual');
     const totalTodos = todos.reduce((s, m) => s + Number(m.importe), 0);
     const aviso = otraMarcada
       ? (todos.length
@@ -5417,7 +6542,7 @@ function modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta = nul
       return;
     }
     if (todos.length) {
-      let q = S.sb.from('finanzas_movimientos').delete().eq('tipo', tipo).eq('categoria', categoria);
+      let q = S.sb.from('finanzas_movimientos').delete().eq('tipo', tipo).eq('categoria', categoria).eq('origen', 'manual');
       if (otraMarcada) q = q.eq('cuenta', cuentaCambiada);
       const { error } = await q;
       if (error) return avisar('Error: ' + error.message, true);
@@ -5723,3 +6848,4 @@ function avisar(texto, esError = false) {
 }
 
 init();
+

@@ -37,6 +37,13 @@ function dibujarLapiz(page, x, y, escala = 1) {
  *    formada por quien llama (ej. "Ana — Inglés Septiembre — 60€") por cada
  *    hermano, sustituyendo la línea única de "Concepto:". `totalCifra` sigue
  *    siendo la suma de todos, calculada por quien llama.
+ *  - pagoParcial: { pagadoCifra, pendienteCifra, ultimoCifra } opcional — en
+ *    vez del sello verde "PAGADO" (que implica el recibo entero saldado),
+ *    dibuja un sello naranja "PAGO PARCIAL" con lo pagado hasta ahora y lo
+ *    que queda; la línea "La cantidad de:" dice lo pagado EN ESE MOMENTO
+ *    (ultimoCifra: la suma de los pagos que recoge este justificante, o el
+ *    único pago si solo hay uno). Incompatible con `pagado` (uno de los
+ *    dos, no ambos).
  * @returns {Uint8Array} bytes del PDF
  */
 export async function generarReciboPdf(datos) {
@@ -77,10 +84,20 @@ export async function generarReciboPdf(datos) {
   });
 
   // ---- Campos ----
+  // Con pago parcial, "La cantidad de" deja de ser el total en letras y dice
+  // lo que se ha pagado EN ESE MOMENTO (el último abono, en cifras); lo
+  // acumulado y lo que falta salen en el "Total:" y en el sello de más abajo.
+  // Sin el dato del último abono (no debería pasar) se cae al resumen
+  // acumulado de antes.
+  const cantidadTxt = datos.pagoParcial
+    ? (datos.pagoParcial.ultimoCifra
+      ? `${datos.pagoParcial.ultimoCifra}€`
+      : `${datos.pagoParcial.pagadoCifra}€ de ${datos.totalCifra}€, faltan ${datos.pagoParcial.pendienteCifra}€`)
+    : `${datos.cantidadLetras}€`;
   const campos = [
     ['Fecha de Emisión:', datos.fechaEmision],
     ['Recibí de:', datos.recibiDe],
-    ['La cantidad de:', `${datos.cantidadLetras}€`]
+    ['La cantidad de:', cantidadTxt]
   ];
   if (!desglose) campos.push(['Concepto:', datos.concepto]);
 
@@ -122,7 +139,12 @@ export async function generarReciboPdf(datos) {
     borderColor: NARANJA, borderWidth: 1.4
   });
   page.drawText('Total:', { x: cajaX + 14, y: cursorY, size: 14, font: helvBold, color: NEGRO });
-  const totalTxt = `${datos.totalCifra}€`;
+  // Con pago parcial, el número destacado pasa a ser "pagado/total" (ej.
+  // "50/110€") en vez del total a secas — así se ve de un vistazo en qué
+  // punto va, tal cual se pidió.
+  const totalTxt = datos.pagoParcial
+    ? `${datos.pagoParcial.pagadoCifra}/${datos.totalCifra}€`
+    : `${datos.totalCifra}€`;
   const totalW = helvBold.widthOfTextAtSize(totalTxt, 16);
   page.drawText(totalTxt, { x: cajaX + cajaW - 14 - totalW, y: cursorY - 1, size: 16, font: helvBold, color: NARANJA });
 
@@ -158,6 +180,48 @@ export async function generarReciboPdf(datos) {
         color: VERDE, rotate: degrees(ang), opacity: 0.85
       });
     }
+  } else if (datos.pagoParcial) {
+    // ---- Sello PAGO PARCIAL: mismo mecanismo que el de arriba, en naranja
+    // (no verde, para no dar a entender que el recibo ya está saldado del
+    // todo) y con el desglose de lo cobrado ahora y lo que queda.
+    const { pagadoCifra, pendienteCifra } = datos.pagoParcial;
+    const ang = 14;
+    const rad = (ang * Math.PI) / 180;
+    const tamTitulo = 15;
+    const titulo = 'PAGO PARCIAL';
+    const detalle = `Pagado ${pagadoCifra}€  ·  Pendiente ${pendienteCifra}€`;
+    const anchoTitulo = helvBold.widthOfTextAtSize(titulo, tamTitulo);
+    const anchoDetalle = helv.widthOfTextAtSize(detalle, 9);
+    const padX = 14, padY = 8;
+    const cajaAncho = Math.max(anchoTitulo, anchoDetalle) + padX * 2;
+    const cajaAlto = tamTitulo + 9 + padY * 2 + 6 + (datos.fechaPago ? 12 : 0);
+    const x0 = margen + 14, y0 = 50;
+    const enSello = (dx, dy) => ({
+      x: x0 + dx * Math.cos(rad) - dy * Math.sin(rad),
+      y: y0 + dx * Math.sin(rad) + dy * Math.cos(rad)
+    });
+
+    page.drawRectangle({
+      x: x0, y: y0, width: cajaAncho, height: cajaAlto,
+      rotate: degrees(ang), borderColor: NARANJA, borderWidth: 2, borderOpacity: 0.85
+    });
+    const pTitulo = enSello(padX, cajaAlto - padY - tamTitulo + 4);
+    page.drawText(titulo, {
+      x: pTitulo.x, y: pTitulo.y, size: tamTitulo, font: helvBold,
+      color: NARANJA, rotate: degrees(ang), opacity: 0.9
+    });
+    const pDetalle = enSello(padX, cajaAlto - padY - tamTitulo - 12);
+    page.drawText(detalle, {
+      x: pDetalle.x, y: pDetalle.y, size: 9, font: helv,
+      color: NARANJA, rotate: degrees(ang), opacity: 0.9
+    });
+    if (datos.fechaPago) {
+      const pFecha = enSello(padX, padY - 2);
+      page.drawText(datos.fechaPago, {
+        x: pFecha.x, y: pFecha.y, size: 8, font: helv,
+        color: NARANJA, rotate: degrees(ang), opacity: 0.85
+      });
+    }
   }
 
   // ---- Pie: referencia interna discreta ----
@@ -171,10 +235,12 @@ export async function generarReciboPdf(datos) {
 }
 
 // Nombre de archivo: Recibo_NombreAlumno_MesAño.pdf
-// (con sufijo _PAGADO cuando es el justificante de pago)
+// (con sufijo _PAGADO cuando es el justificante de pago, o _PAGO_PARCIAL si
+// se pasa 'parcial' — es el nombre que ven las familias al recibir el PDF)
 export function nombreArchivoRecibo(nombreAlumno, concepto, pagado = false) {
   const limpio = (s) => String(s).trim()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-zA-Z0-9+]+/g, '_').replace(/^_+|_+$/g, '');
-  return `Recibo_${limpio(nombreAlumno)}_${limpio(concepto)}${pagado ? '_PAGADO' : ''}.pdf`;
+  const sufijo = pagado === 'parcial' ? '_PAGO_PARCIAL' : pagado ? '_PAGADO' : '';
+  return `Recibo_${limpio(nombreAlumno)}_${limpio(concepto)}${sufijo}.pdf`;
 }

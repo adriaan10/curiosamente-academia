@@ -13,16 +13,20 @@
 //   WHATSAPP_PHONE_ID          ID del número emisor (Phone Number ID)
 //   WHATSAPP_TEMPLATE_RECIBO   nombre de la plantilla de envío de recibo
 //   WHATSAPP_TEMPLATE_PAGO     nombre de la plantilla de confirmación de pago
+//   WHATSAPP_TEMPLATE_PARCIAL  nombre de la plantilla de aviso de pago parcial
+//                              (por defecto 'pagado_parcial', ya aprobada en
+//                              Meta; Meta solo admite minúsculas en el nombre)
 //   WHATSAPP_IDIOMA            código de idioma de las plantillas (por defecto es)
 
 const API = 'https://graph.facebook.com/v21.0';
 
 type Peticion = {
-  tipo?: 'recibo' | 'pago';
+  tipo?: 'recibo' | 'pago' | 'parcial';
   telefono?: string;
   nombre?: string;
   concepto?: string;
   importe?: string;
+  pendiente?: string;
   pdfBase64?: string;
   nombreArchivo?: string;
   comprobar?: boolean;
@@ -143,7 +147,9 @@ Deno.serve(async (req) => {
   }
 
   const idioma = Deno.env.get('WHATSAPP_IDIOMA') || 'es';
-  const plantilla = p.tipo === 'pago'
+  const plantilla = p.tipo === 'parcial'
+    ? (Deno.env.get('WHATSAPP_TEMPLATE_PARCIAL') || 'pagado_parcial')
+    : p.tipo === 'pago'
     ? (Deno.env.get('WHATSAPP_TEMPLATE_PAGO') || 'pago_confirmado')
     : (Deno.env.get('WHATSAPP_TEMPLATE_RECIBO') || 'envio_recibo');
 
@@ -159,9 +165,14 @@ Deno.serve(async (req) => {
     }
 
     // El orden de los datos debe coincidir con el de la plantilla aprobada:
-    //   {{1}} nombre, {{2}} concepto (mes) — el importe ya no va como
-    //   parámetro de plantilla en ninguna de las dos (recibo y pago).
-    const textos = [p.nombre, p.concepto];
+    //   {{1}} nombre, {{2}} concepto (mes) — el importe no va como parámetro
+    //   de plantilla en 'recibo' ni en 'pago' (el importe solo sale en el
+    //   PDF adjunto). 'parcial' es la excepción: lleva un {{3}} más con el
+    //   importe pendiente, porque el mensaje en sí tiene que decir cuánto
+    //   falta (pedido explícitamente para este caso).
+    const textos = p.tipo === 'parcial'
+      ? [p.nombre, p.concepto, p.pendiente]
+      : [p.nombre, p.concepto];
     componentes.push({
       type: 'body',
       parameters: textos.map((t) => ({ type: 'text', text: String(t ?? '') }))

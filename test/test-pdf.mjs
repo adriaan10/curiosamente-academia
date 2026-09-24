@@ -40,6 +40,8 @@ esperar(formatoImporte(85.5), '85,50', 'importe con decimales');
 
 // ---- nombre de archivo ----
 esperar(nombreArchivoRecibo('María Pérez', 'Abril+mayo'), 'Recibo_Maria_Perez_Abril+mayo.pdf', 'nombre archivo');
+esperar(nombreArchivoRecibo('María Pérez', 'Abril', true), 'Recibo_Maria_Perez_Abril_PAGADO.pdf', 'nombre archivo pagado');
+esperar(nombreArchivoRecibo('María Pérez', 'Abril', 'parcial'), 'Recibo_Maria_Perez_Abril_PAGO_PARCIAL.pdf', 'nombre archivo pago parcial');
 
 // ---- PDF de muestra ----
 const bytes = await generarReciboPdf({
@@ -55,6 +57,24 @@ fs.mkdirSync(new URL('./salida/', import.meta.url), { recursive: true });
 const ruta = new URL('./salida/recibo_muestra.pdf', import.meta.url);
 fs.writeFileSync(ruta, bytes);
 console.log(`OK  PDF de muestra generado (${bytes.length} bytes): ${ruta.pathname}`);
+
+// ---- PDF de pago parcial: "La cantidad de:" = lo pagado en ese momento (el
+// último abono, 30€); el "Total:" y el sello llevan lo acumulado (60/100€) y
+// lo que falta (40€) ----
+const bytesParcial = await generarReciboPdf({
+  fechaEmision: '24/09/2026',
+  recibiDe: 'María Pérez García',
+  cantidadLetras: importeALetras(100),
+  concepto: 'Septiembre + Matrícula',
+  totalCifra: '100',
+  referencia: 'R-00150',
+  logoPngBase64: null,
+  pagoParcial: { pagadoCifra: '60', pendienteCifra: '40', ultimoCifra: '30' },
+  fechaPago: '24/09/2026'
+});
+const rutaParcial = new URL('./salida/recibo_pago_parcial_muestra.pdf', import.meta.url);
+fs.writeFileSync(rutaParcial, bytesParcial);
+console.log(`OK  PDF de pago parcial generado (${bytesParcial.length} bytes): ${rutaParcial.pathname}`);
 
 // ---- PDF de recibo conjunto de hermanos (desglose) ----
 const bytesHermanos = await generarReciboPdf({

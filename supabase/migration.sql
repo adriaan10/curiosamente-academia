@@ -2534,3 +2534,679 @@ alter table public.alumnos add column matricula_importe numeric;
 --
 -- De paso, "Pago incompleto" gana también las flechas de 5 en 5 (era el
 -- único campo de precio que se había quedado en step="0.01").
+
+-- ============================================================
+-- Aviso ampliado: recibos del mes sin generar, no solo altas tardías (22/09/2026)
+-- ============================================================
+-- Solo app.js, sin cambios en Supabase. Pedido: que los admins sepan cada
+-- mes cuántos alumnos tienen ya su recibo generado, para no dejarse a nadie
+-- sin facturar.
+--
+-- En vez de montar un aviso nuevo aparte (que se solaparía con el que ya
+-- había y liaría con dos tarjetas para el mismo alumno), se amplía el que
+-- ya existía ("Altas fuera de fecha" — alumnos dados de alta después del
+-- día 1, que se quedaban fuera del envío automático) para que cubra a
+-- CUALQUIER alumno activo con tarifa mensual que no tenga recibo de este
+-- mes, sea cual sea el motivo — alta tardía, un fallo puntual del
+-- automático, o septiembre entero (donde la generación es manual). Se
+-- reutiliza tal cual toda la infraestructura ya construida: seguimiento de
+-- quién lo ha resuelto por admin (avisos_descartados, tipo
+-- 'alta_fuera_fecha' sin cambiar — sigue siendo el mismo concepto, solo que
+-- más amplio), refresco en vivo del modal abierto, y el comportamiento de
+-- "modo desarrollador" (ve todo hasta que los admins de verdad lo
+-- descarten). Nada de esto se ha tocado.
+--
+-- candidataAltaFueraDeFecha(a): antes exigía alta_fecha > día 1 del mes en
+-- curso; ahora solo mira que esté activo, con una asignatura de tarifa
+-- mensual puesta, y sin "empieza el próximo mes" — igual que
+-- generar_recibos_mensuales() en el servidor a la hora de decidir a quién
+-- generarle uno. El corte de meses sin aviso pasa de julio+agosto+
+-- septiembre a solo julio+agosto: septiembre ya factura con normalidad
+-- (aunque a mano), así que sí debe avisar.
+--
+-- Texto actualizado en la tarjeta de Inicio ("recibos de este mes sin
+-- generar", antes "para generar a mano") y en el modal, y se quita el
+-- "· alta [fecha]" de cada fila (ya no es necesariamente el motivo).
+--
+-- Probado en vivo contra los datos reales: 14 alumnos sin recibo de
+-- septiembre + 7 con recibo generado por otro admin sin marcar aún = 21 en
+-- la tarjeta, coincide exactamente con lo esperado (confirmado por SQL
+-- aparte). Modal, filas pendientes y filas "Hecho por X" comprobadas una a
+-- una — nada de datos de prueba, todo lectura sobre producción.
+
+-- ============================================================
+-- Pago incompleto: aviso por WhatsApp + solo el pendiente en pantalla (23/09/2026)
+-- ============================================================
+-- Solo app.js y src/lib/pdf.js, sin cambios en Supabase. Pedido: al anotar
+-- un pago parcial, poder avisar por WhatsApp de cuánto se ha recibido y
+-- cuánto queda del mes; y que la app muestre solo lo pendiente, no "X de Y".
+--
+-- De momento se manda con la MISMA plantilla y el MISMO mensaje que ya
+-- existía para "pago confirmado" (WHATSAPP_TEMPLATE_PAGO) — la jefa está
+-- creando a mano en Meta una plantilla nueva específica para esto (con el
+-- importe pendiente como variable del propio texto, cosa que las plantillas
+-- actuales no hacen — ahí el importe solo sale en el PDF adjunto), y hasta
+-- que Meta la apruebe se sigue usando la de siempre. Lo único que cambia ya
+-- mismo es el PDF adjunto.
+--
+-- src/lib/pdf.js — generarReciboPdf(): nuevo parámetro `pagoParcial`
+-- ({ pagadoCifra, pendienteCifra }), incompatible con `pagado`. En vez del
+-- sello verde "PAGADO" (que da a entender que el recibo está saldado del
+-- todo) dibuja un sello naranja "PAGO PARCIAL" con el desglose de lo
+-- cobrado ahora y lo que queda — mismo mecanismo de sello girado que ya
+-- existía, reutilizado tal cual.
+--
+-- app.js — enviarPagoParcialWhatsApp(recibo, pagadoAhora, pendiente):
+-- nueva, junto a enviarPorWhatsAppApi() (que no se toca). Genera el PDF con
+-- el sello nuevo y llama al mismo edge function enviar-whatsapp con
+-- tipo:'pago' (la plantilla de siempre) — en cuanto la plantilla nueva esté
+-- aprobada, esta función pasará a mandar tipo:'parcial' con el pendiente
+-- como tercer parámetro (hará falta entonces un cambio pequeño en el propio
+-- edge function para leer WHATSAPP_TEMPLATE_PARCIAL y añadir ese tercer
+-- parámetro al body de la plantilla). No toca fecha_envio_whatsapp_pago (es
+-- del justificante de pago COMPLETO, y este recibo sigue pendiente de
+-- verdad) ni agrupa hermanos (cada uno puede deber un resto distinto).
+--
+-- modalPagoIncompleto(): gana un botón "Guardar y avisar por WhatsApp"
+-- (solo admin, deshabilitado si el alumno no tiene teléfono válido) al lado
+-- del "Guardar" de siempre, que sigue funcionando igual sin enviar nada.
+-- También muestra en vivo "Quedan X€ por pagar" mientras se escribe el
+-- importe. El chip de la lista de Recibos pasa de "40€ de 90€ cobrados" a
+-- "Quedan 50€" (con el detalle completo en el title, al pasar el ratón).
+--
+-- Propuesta de texto para la plantilla nueva (pendiente de que la jefa la
+-- cree y la mande a aprobar en Meta):
+--   Hola {{1}}, hemos recibido tu pago de {{2}}. Te quedan {{3}}€
+--   pendientes de este mes — en el PDF adjunto tienes el detalle
+--   actualizado. Para cualquier duda, llámanos al [número de atención].
+--   ¡Gracias! — Academia Curiosamente
+--   {{1}}=nombre del tutor, {{2}}=concepto/mes, {{3}}=importe pendiente.
+--
+-- Probado en vivo: PDF con el sello "PAGO PARCIAL" generado y revisado
+-- visualmente (se ve bien, no se confunde con "PAGADO"); botón de WhatsApp
+-- deshabilitado sin teléfono; "Guardar" normal y el chip "Quedan X€"
+-- comprobados con un recibo de prueba. El envío real por WhatsApp NO se ha
+-- probado de extremo a extremo — las credenciales de Meta están activas en
+-- producción (comprobado en Ajustes: "🟢 Activo"), así que forzar un envío
+-- de prueba habría gastado un mensaje real; la función reutiliza línea por
+-- línea las mismas piezas que ya usa el envío en lote, que sí está en uso.
+-- Dato de prueba borrado después.
+
+-- ============================================================
+-- Pago incompleto: arreglado el importe cuando va en varios plazos (23/09/2026)
+-- ============================================================
+-- Solo app.js. Caso real planteado antes de dar por bueno lo de arriba: un
+-- recibo de 110€ (mes + matrícula) que se paga en 3 veces — 50€, otros 50€
+-- y los 10€ que lo completan. Con el diseño de ayer esto tenía un fallo: el
+-- campo de "Pago incompleto" guarda el TOTAL acumulado pagado (para que la
+-- lista siga mostrando bien "Quedan X€" en todo momento), pero
+-- enviarPagoParcialWhatsApp() estaba usando ese mismo número tal cual como
+-- "lo que se acaba de pagar" — en el 2º plazo (50+50=100 acumulado), el
+-- WhatsApp habría dicho "hemos recibido tu pago de 100€" en vez de los 50€
+-- reales de esa entrega.
+--
+-- modalPagoIncompleto(): guarda `anteriorParcial` (el acumulado que ya
+-- había ANTES de abrir el modal esta vez) y calcula `pagadoAhora =
+-- nuevoTotal - anteriorParcial` antes de llamar a
+-- enviarPagoParcialWhatsApp() — así cada aviso por WhatsApp lleva el
+-- importe real de esa entrega, no el acumulado. El aviso en pantalla
+-- ("Quedan X€ por pagar") ahora también enseña, mientras se escribe, en qué
+-- se descompone ("De este pago: 50€ ahora (ya había 50€ de antes)..."),
+-- para verlo antes de enviar. Si se guarda un número que no es mayor que el
+-- acumulado anterior (p.ej. una corrección hacia abajo), el botón de
+-- WhatsApp se niega a enviar nada ("no hay nada nuevo que avisar") — el de
+-- "Guardar" a secas sigue permitiéndolo, para poder corregir sin avisar.
+--
+-- El tercer plazo (10€, que completa los 110€) sigue el camino que ya
+-- existía sin tocar: "Pago incompleto" bloquea cualquier importe ≥ al
+-- total del recibo con el aviso de usar "✓ Cobrado" — que es el que manda
+-- el justificante COMPLETO (plantilla de siempre), no el parcial. No hacía
+-- falta ningún cambio ahí, ya enrutaba bien.
+--
+-- Probado en vivo el caso de los 3 plazos completo con un recibo de prueba
+-- de 110€: 1er pago 50€ → "Quedan 60€"; 2º pago (escribiendo 100
+-- acumulado) → "De este pago: 50€ ahora (ya había 50€ de antes). Quedan
+-- 10€" — el cálculo del importe de ESE plazo salió correcto (50€, no
+-- 100€); 3er intento con 110 → bloqueado, con el aviso de usar "✓
+-- Cobrado" como corresponde. Dato de prueba borrado después.
+
+-- ============================================================
+-- Plantilla nueva de WhatsApp preparada: "Pagado_parcial" (23/09/2026)
+-- ============================================================
+-- Solo supabase/functions/enviar-whatsapp/index.ts. La jefa ha creado a
+-- mano en Meta Business una plantilla nueva, específica para el aviso de
+-- pago parcial (nombre real: "Pagado_parcial"), con el importe pendiente
+-- YA dentro del propio texto del mensaje (a diferencia de "recibo"/"pago",
+-- que nunca llevan el importe como variable — solo sale en el PDF
+-- adjunto). Mandada a revisar a Meta, pendiente de aprobación a fecha de
+-- este cambio.
+--
+-- enviar-whatsapp/index.ts: nuevo tipo 'parcial' (antes solo 'recibo' |
+-- 'pago'), con su propia variable de entorno WHATSAPP_TEMPLATE_PARCIAL
+-- (por defecto 'Pagado_parcial' si no se configura aparte, igual que las
+-- otras dos). Lleva un tercer parámetro de texto en el body de la
+-- plantilla ({{3}} = importe pendiente) — 'recibo' y 'pago' se quedan
+-- exactamente igual, con sus dos de siempre (nombre, concepto).
+--
+-- Desplegado ya en Supabase (función activa), pero la app SIGUE mandando
+-- tipo:'pago' desde enviarPagoParcialWhatsApp() — no tipo:'parcial' —
+-- hasta que la jefa confirme que Meta ha aprobado la plantilla. Cuando lo
+-- confirme, el único cambio que falta es ese: cambiar 'pago' por 'parcial'
+-- (y mandar también `pendiente`) en esa única llamada de app.js. Mensaje
+-- final acordado con la jefa, calcado al formato y el tono de la plantilla
+-- de envío de recibo que ya tenía aprobada (con su mismo bloque fijo de
+-- "este número es exclusivo para envíos..." y su teléfono de atención a
+-- las familias):
+--   ¡Hola {{1}}! Hemos recibido tu pago de {{2}} en Curiosamente 💛 Te
+--   quedan {{3}}€ pendientes de este mes — aquí tienes el justificante
+--   actualizado. Gracias por tu confianza.
+--
+--   Este número es exclusivo para envíos de recibos y justificantes. No
+--   se reciben ni se responden mensajes por esta vía. Para cualquier
+--   consulta o gestión, por favor comuníquese con nosotros a nuestro
+--   teléfono de atención a las familias. Pulsa aquí +34 659 828 031.
+
+-- ============================================================
+-- Ingresos y gastos: los pagos parciales se suman progresivamente (23/09/2026)
+-- ============================================================
+-- Pedido explícito: "los pagos parciales también se eligen en banco o en
+-- efectivo y se va sumando a la vez que van pagando" — hasta ahora
+-- "Pago incompleto" era puramente informativo (no tocaba Ingresos y
+-- gastos en absoluto; todo se contabilizaba de golpe al marcar "✓
+-- Cobrado" con el resto). Esto lo convierte en dinero de verdad, así que
+-- pasa a ser solo de administradores (antes lo podía anotar cualquier
+-- profesor, precisamente porque no tocaba nada real).
+--
+-- Tabla nueva `recibo_pagos` (recibo_id, importe, cuenta, fecha,
+-- creado_por): cada abono real (parcial o el que completa el recibo)
+-- queda como su propia fila. RLS abierta a cualquier autenticado, mismo
+-- criterio que recibos/matriculas — el "solo admin" es de la app, no hay
+-- ningún trigger de restricción en recibos tampoco desde el 03/09/2026.
+--
+-- Trigger recibo_pagos_sync_finanzas (after insert): por cada pago,
+-- genera su propio ingreso en finanzas_movimientos (categoría
+-- "Mensualidad", origen 'automatico_parcial' — valor nuevo en el check de
+-- `origen`, junto a 'manual'/'automatico' de siempre) CON LA FECHA Y LA
+-- CUENTA DE ESE PAGO CONCRETO, no la de hoy ni la del recibo — y
+-- recalcula recibos.importe_parcial como la suma de todos los pagos que
+-- haya hasta ahora (a salvo de carreras entre dos admins: siempre se
+-- recalcula desde cero, nunca se suma "a mano" en el cliente).
+--
+-- app.js: registrarPagosRestantes(recibos, cuenta) — nueva, usada por
+-- "✓ Cobrado" y "⚡ Cobro rápido" — registra en recibo_pagos SOLO el
+-- restante (importe - importe_parcial) de los recibos del grupo que YA
+-- tuvieran algún pago parcial anotado antes. Los recibos que se cobran de
+-- un tirón, sin haber pasado nunca por "Pago incompleto" (el caso de
+-- siempre, la inmensa mayoría), NO se tocan aquí a propósito: se deja
+-- que el trigger de toda la vida (sincronizar_finanzas_recibo) siga
+-- haciendo su trabajo tal cual, con su separación Mensualidad/Matrícula —
+-- meterlos también por recibo_pagos la habría perdido, porque ahí solo se
+-- categoriza "Mensualidad" sin repartir matrícula.
+--
+-- modalPagoIncompleto() gana un selector Efectivo/Banco (Efectivo por
+-- defecto) — tanto "Guardar" como "Guardar y avisar por WhatsApp" pasan a
+-- registrar el pago en recibo_pagos en vez de tocar importe_parcial a
+-- mano. La cuenta importa POR PLAZO: en el ejemplo de 50+50+10, cada uno
+-- puede ir a una cuenta distinta.
+--
+-- "↩ Pendiente" pasa a deshacer el cobro ENTERO, no solo el último plazo:
+-- si el recibo tenía pagos parciales, se borran todos (recibo_pagos, en
+-- cascada sus movimientos) antes de volver el estado a pendiente — no
+-- solo el pago que lo completó. Decisión deliberada, no a medias: es lo
+-- mismo que ya hacía este botón siempre ("vuelve a dejar PENDIENTE" el
+-- recibo entero), y evita la ambigüedad de "¿deshago solo el último paso
+-- o toda la historia de abonos?". El aviso de confirmación ahora lo dice
+-- explícitamente. "✎ Corregir cuenta" no se ha tocado — sigue corrigiendo
+-- solo los movimientos con origen='automatico' (el cobro de un tirón),
+-- nunca los 'automatico_parcial' de abonos ya registrados con su propia
+-- cuenta — limitación conocida y aceptada: no tiene sentido "corregir a
+-- una sola cuenta" varios plazos que de verdad fueron a cuentas distintas.
+--
+-- DOS BUGS encontrados probando en vivo, corregidos antes de dar esto por
+-- bueno (quedan las tres migraciones de más abajo con el detalle):
+--  1. recibos ya tenía una restricción vieja (recibos_check: importe_parcial
+--     IS NULL OR importe_parcial < importe) para que "parcial" nunca
+--     llegue a ser el 100% — el trigger de recibo_pagos, al recalcular la
+--     suma en el pago que completa el recibo (suma = importe exacto),
+--     violaba esa restricción y el cobro entero fallaba. Arreglado: si la
+--     suma ya cubre el total, se deja en null (mismo criterio que "✓
+--     Cobrado" ya aplicaba siempre a mano al completar sin parciales).
+--  2. sincronizar_finanzas_recibo() (el trigger de "✓ Cobrado" de toda la
+--     vida) usaba `old.importe_parcial = 0` como señal de "no hubo pagos
+--     parciales antes, acredita el importe entero" — pero tras arreglar
+--     el bug 1, importe_parcial pasa a ser NULL tanto si nunca hubo
+--     parciales COMO si los hubo y se acaban de completar, así que esa
+--     señal dejó de servir: en un recibo con parciales previos, al
+--     completarlo este trigger volvía a acreditar el importe ENTERO otra
+--     vez, duplicando en Ingresos y gastos (visto en vivo: 50+50+10 en
+--     recibo_pagos, pero 50+50+10+110 en finanzas_movimientos). Arreglado
+--     comprobando directamente si existe algún recibo_pago para ese
+--     recibo, en vez de fiarse de importe_parcial.
+--
+-- Probado en vivo, de cero tras los dos arreglos: recibo de 110€, pagado
+-- en 50€ efectivo + 50€ banco + 10€ efectivo (completando) — 3 filas en
+-- recibo_pagos, 3 movimientos en Ingresos y gastos con sus cuentas y
+-- fechas correctas, suma exacta 110€, sin duplicar. Recibo aparte con
+-- matrícula (90€ = 65€ mensualidad + 25€ matrícula) cobrado DE UN TIRÓN
+-- sin pagos parciales: 0 filas en recibo_pagos, 2 movimientos por el
+-- trigger de siempre (Mensualidad 65€ + Matrícula 25€, separados como
+-- toda la vida) — confirma que el caso normal no cambia nada. "↩
+-- Pendiente" probado en los dos casos: deja el recibo en pendiente,
+-- importe_parcial en null, y 0 movimientos/0 recibo_pagos en ambos. Datos
+-- de prueba borrados después, barrido completo sin residuos.
+
+-- ============================================================
+-- Pagos parciales: la matrícula se cubre primero (23/09/2026)
+-- ============================================================
+-- Solo Supabase (sincronizar_finanzas_recibo_pago()), sin tocar app.js —
+-- el reparto entero pasa en el disparador, el cliente solo registra el
+-- pago (importe + cuenta), sin saber nada de categorías.
+--
+-- Pedido explícito: en un recibo de 110€ (90 mensualidad + 20 matrícula),
+-- si se paga en plazos, el PRIMER dinero que entra se va a cubrir la
+-- Matrícula del todo, y solo cuando esa parte ya está cubierta el resto
+-- empieza a contar para Mensualidad — mismo criterio fijo siempre, para
+-- que la app nunca tenga que adivinar cómo repartir un pago que cae a
+-- caballo entre las dos categorías.
+--
+-- sincronizar_finanzas_recibo_pago(): antes generaba un único movimiento
+-- "Mensualidad" por el importe entero del pago. Ahora mira cuánto de la
+-- Matrícula del recibo ya está cubierto (suma de movimientos categoria=
+-- 'Matrícula' de pagos ANTERIORES de este mismo recibo) y reparte el pago
+-- nuevo: primero lo que falte de Matrícula (hasta su tope), el resto a
+-- Mensualidad — puede generar 1 o 2 movimientos por pago (los dos con la
+-- misma cuenta y fecha, es el mismo dinero real solo repartido por
+-- categoría). Si el recibo no lleva matrícula (incluye_matricula=false),
+-- se comporta exactamente igual que antes: todo a Mensualidad.
+--
+-- Probado en vivo (insertando directo en recibo_pagos) con el ejemplo
+-- exacto pedido — recibo de 110€ (90 mensualidad + 20 matrícula): 1er pago
+-- 40€ → 20€ Matrícula + 20€ Mensualidad (dos movimientos); 2º pago 40€ →
+-- Matrícula ya cubierta, los 40€ enteros a Mensualidad; 3er pago 30€
+-- (completa el recibo) → también entero a Mensualidad. Total final:
+-- Matrícula 20€ (1 fila) + Mensualidad 90€ (3 filas) = 110€ exactos, ni
+-- de más ni de menos. Dato de prueba borrado después.
+
+-- ============================================================
+-- Recibos: reorganización de pestañas, panel Admin Revisor, matrícula
+-- bloqueada a una sola vez, y flujo de pago incompleto abierto a
+-- profesores (23/09/2026)
+-- ============================================================
+-- Todo solo en app.js/main.js/preload.js — sin cambios de esquema.
+--
+-- 1. Pestañas de Recibos reordenadas y con una nueva "Pagos parciales":
+--    Pendientes de envío, Pendientes de pago, Pagos parciales,
+--    Justificantes por enviar, Cobrados. En cuanto un recibo tiene algún
+--    pago parcial anotado (esté enviado o no) sale de las dos primeras y
+--    pasa a su propia pestaña, donde se ve cuánto lleva pagado y se
+--    acumulan más plazos hasta completarse — entonces pasa a Justificantes
+--    por enviar/Cobrados como cualquier otro.
+--
+-- 2. Panel "ADMIN REVISOR" (tarjeta junto al logo en Inicio, solo admin):
+--    vista de solo lectura de toda la academia, con 3 sub-pestañas:
+--    - Resumen: las mismas categorías de Recibos, agrupadas, con navegación
+--      por mes y filtro por profesor — incluye "Sin recibo generado" (mismo
+--      criterio que candidataAltaFueraDeFecha pero para cualquier mes).
+--    - Pagos: tabla alumno×mes (columnas: mes actual + 2 siguientes, sin
+--      quitar nunca una ya mostrada, hasta julio); ✓ verde=cobrado, ✓
+--      naranja=pago parcial, ✕ roja=sin pagar, guion gris=mes que aún no ha
+--      empezado (para no confundir "no ha llegado" con "no ha pagado").
+--    - Recibos: misma rejilla sobre generación/envío (verde=enviado,
+--      naranja=generado sin enviar, roja=no generado).
+--    Alumnos ordenados por apellido (compararAlumnosPorApellido). Todo
+--    derivado en vivo de alumnos/recibos — un alta nueva o una baja se
+--    reflejan solas, probado con un alumno ZZ TEST de verdad.
+--
+-- 3. Matrícula: "Generar recibo" y "Editar recibo" ya avisaban de que la
+--    matrícula "ya se le cobró antes", pero se podía marcar la casilla
+--    igualmente. Ahora la casilla se DESACTIVA si ese alumno ya tiene
+--    matrícula en otro recibo suyo — no se puede volver a añadir por
+--    error. En "Editar recibo" el propio recibo que ya la lleva sigue
+--    editable (quitarla, corregir importe), solo se bloquea añadirla en
+--    uno donde no estaba.
+--
+-- 4. "Pago incompleto" deja de ser solo-admin: cualquier profesor puede
+--    registrar un abono (cuenta + importe acumulado), igual que ya podía
+--    marcar "✓ Cobrado" sin ser admin. Ya no manda nada por WhatsApp desde
+--    ese modal. En su lugar, botón nuevo "📤 Enviar justificante pago
+--    parcial" (solo admin, sale cuando el recibo ya tiene algo pagado) que
+--    manda el aviso con lo ACUMULADO hasta ese momento — puede haber varios
+--    profesores anotando plazos antes de que el admin mande ningún aviso.
+--    La pestaña "Pagos parciales" ahora tiene casillas + "Enviar
+--    seleccionados" para el admin (varios a la vez, igual que Pendientes
+--    de envío/Justificantes por enviar). Aviso nuevo en Inicio ("pagos
+--    parciales", solo admin) con la lista de quién y cuánto le falta, y
+--    botón "Enviar todos los pagos parciales".
+--
+-- 5. Bug de PDF corregido: ninguna de las funciones de envío guardaba el
+--    PDF que mandaban (ni el completo "PAGADO" ni el "PAGO PARCIAL") —
+--    solo se mandaba por WhatsApp, pdf_path se quedaba apuntando al PDF
+--    viejo (normalmente sin sello). El botón "PDF" en Cobrados podía
+--    enseñar así una versión desactualizada. Arreglado en dos frentes:
+--    (a) enviarPorWhatsAppApi/enviarJustificanteParcial ahora SÍ guardan
+--    en disco el mismo PDF que mandan y actualizan pdf_path; (b)
+--    regenerarPdf() (el que se usa si el archivo local no existe) ahora
+--    mira el estado real del recibo y pone el sello que toque (PAGADO,
+--    PAGO PARCIAL o ninguno) en vez de generar siempre la versión sin
+--    sello. pdf_path se limpia a null en cada cambio de estado relevante
+--    (cobrado, pago incompleto guardado, vuelta a pendiente) para forzar
+--    la regeneración correcta la próxima vez que se pida o se mande.
+--
+-- Probado en vivo con un alumno ZZ TEST completo: recibo de 110€, pago
+-- parcial de 40€ (registrado sin ser admin, en teoría — probado como
+-- admin pero sin el guardia de código), justificante de pago parcial
+-- enviado de verdad (WhatsApp SÍ está configurado en producción — usar
+-- siempre teléfonos de prueba claramente falsos al probar esto, nunca uno
+-- real), pdf_path pasó a apuntar al PDF con sello PAGO PARCIAL guardado en
+-- disco; completado con "✓ Cobrado" (70€ restantes, Efectivo) → 2
+-- movimientos en Ingresos y gastos (40+70=110€ exactos), pdf_path
+-- limpiado a null; botón "PDF" regeneró uno nuevo con sello PAGADO
+-- (nombre de archivo con sufijo _PAGADO confirmado). Aviso de Inicio y su
+-- modal probados con los pagos parciales reales de la academia (sin
+-- pulsar "Enviar todos" para no avisar a familias de verdad sin que lo
+-- pidiera nadie). Alumno, matrícula, recibo y movimientos de prueba
+-- borrados al terminar (el alumno necesitó pasar primero por
+-- dar_baja_alumno: borrar_alumno exige que esté de baja).
+
+-- ============================================================
+-- Hermanastros + fuera el descuento automático de hermanos (24/09/2026)
+-- ============================================================
+-- Aplicado en vivo en Supabase (apply_migration). Parte de la actualización
+-- pendiente de publicar (junto con los pagos parciales, Admin Revisor, etc.).
+--
+-- 1. Hermanastros: alumnos.grupo_hermanastros uuid (nullable, con índice
+--    parcial). Alumnos sin apellidos en común no se pueden detectar solos,
+--    así que el admin los junta a mano desde Alumnos → "👪 Función
+--    hermanastros" (debajo de "Modificación horas alumnos"). Mismo uuid =
+--    mismo grupo (sin tabla aparte): unir A+B y luego B+C deja un grupo de 3.
+--    En la app mezclan con la lógica de hermanos: recibosHermanosDe() devuelve
+--    hermanos por apellido + hermanastros, así que el envío conjunto (un PDF)
+--    y el cobro conjunto funcionan igual; en pantalla siguen separados, uno al
+--    lado del otro (juntarHermanastros) y con la etiqueta "Hermanastros".
+--    La ventana tiene buscador, máximo 2 marcados, aviso de confirmación con
+--    lo que va a pasar, y lista de grupos ya hechos con ✕ para deshacer.
+--
+-- 2. Descuento automático de hermanos ELIMINADO. calcular_descuentos_alumno()
+--    ya no detecta hermanos ni resta nada: descuento_hermano sale siempre a 0
+--    (se conserva la columna para no romper a los clientes que ya la leen) y
+--    el total solo resta descuento_extra. Lo mismo en el cliente
+--    (modalRecibo, modalReciboBulk, resumen de la ficha) y en la generación
+--    automática del día 1 (usa esa función), así que el 1 de octubre ya no se
+--    aplica a nadie. Si a una familia le toca rebaja, va a mano en el
+--    "Descuento especial" de la ficha.
+--    Ojo: la versión ya publicada de la app sigue restando 5€ en "Recibos del
+--    mes en lote" (cálculo local) hasta que salga la actualización nueva.
+--
+-- 3. Recibos de septiembre que SÍ llevaban el descuento de hermanos (los
+--    únicos, comprobado alumno a alumno): R-00127 (125€, serían 130€,
+--    pendiente pero ya enviado en el conjunto con sus hermanas) y R-00120
+--    (105€, serían 110€, ya cobrado). No se han tocado: ya se mandaron/cobraron
+--    con ese importe.
+--
+-- Probado en vivo con 3 alumnos ZZ TEST de apellidos distintos: juntar 2,
+-- separar (el grupo de 2 se disuelve), unir de nuevo y absorber a un tercero
+-- (grupo de 3), orden y etiquetas en Alumnos/Recibos/Admin Revisor, y "Cobro
+-- rápido" de uno cobra los tres a la vez cada uno con su importe en Ingresos.
+-- El envío por WhatsApp no se probó (está activo en producción): usa el mismo
+-- camino que los hermanos reales ya enviados. Todo borrado sin residuo.
+
+-- Admin Revisor: teléfono por alumno (24/09/2026). Solo app.js/styles.css.
+-- Columna "Teléfono" en la rejilla Pagos y en las tablas de Resumen: el
+-- teléfono de siempre, o los dos (Madre/Padre, cada uno en su línea) si el
+-- alumno tiene los padres separados. La rejilla Recibos no lo lleva.
+-- Probado con un alumno ZZ TEST con padres separados (no hay ninguno real
+-- ahora mismo); borrado sin residuo.
+
+-- Admin Revisor → Pagos: los 11 meses del curso siempre (24/09/2026).
+-- Solo app.js/styles.css. La rejilla Pagos enseña septiembre→julio completo
+-- (mesesCursoRevisor); la de Recibos mantiene la ventana "mes actual + 2".
+-- Para que cupiera: la tabla va dentro de un contenedor con scroll horizontal
+-- (.rejilla-scroll), columnas de meses más compactas, y el nombre del alumno
+-- puede saltar de línea y se queda fijo a la izquierda al desplazar.
+-- Probado midiendo la geometría real (910 celdas, con filas de estrés: nombre
+-- larguísimo, dos teléfonos y etiqueta Hermanastros) a 1600/1400/1200/1100/
+-- 1000/900 px — el mínimo de la ventana es 900 — y por debajo (800/700/600):
+-- 0 celdas solapadas, 0 recortadas, cabe entera hasta 900 y por debajo
+-- aparece el scroll interno. Antes del arreglo, con un nombre largo la tabla
+-- medía 1519px y se salía de la pantalla en ventanas de 1200px o menos.
+-- Aparte, ya existente y sin relación con la rejilla: la cabecera superior
+-- (pestañas + usuario/Salir) se corta en ventanas por debajo de ~1200px.
+
+-- Cabecera y ventanas estrechas (24/09/2026). Solo styles.css.
+-- La cabecera (marca + 10 pestañas + usuario/Salir) necesita ~1430px en una
+-- sola fila, y la ventana por defecto mide 1200 (mínimo 900): se comprimía,
+-- partía "Ingresos y gastos" en dos líneas y se cortaba por la derecha.
+-- Ahora por debajo de 1450px las pestañas pasan a una segunda fila (bajo la
+-- marca y el usuario), sin partir el texto, y por debajo de 1030px se
+-- compactan. Además, por debajo de 1100px la fila de botones de cada recibo/
+-- alumno (.acciones) salta de línea en vez de ensanchar la tabla.
+-- Medido con emulación de ventana a 1800/1500/1450/1400/1300/1200/1100/1030/
+-- 1000/900px: sin desborde de página ni bloques pisados en la cabecera, y en
+-- 9 pantallas (Inicio, Alumnos, Recibos, Pagos parciales, Ingresos y gastos,
+-- Profesores, Admin Revisor Resumen/Pagos/Recibos) a 1200 y 900px: 0
+-- desbordes. Antes, a 900px, Recibos y Pagos parciales desbordaban.
+
+-- Admin Revisor → Pagos: vuelve a la ventana "mes actual + 2" (24/09/2026).
+-- Se revierte lo de enseñar los 11 meses: Pagos y Recibos usan las dos
+-- mesesVisiblesRevisor() (mes actual + los dos siguientes, y cada mes que
+-- pasa se añade el siguiente, hasta julio). Se mantiene lo demás de esa
+-- tanda: columna Teléfono en Pagos, contenedor con scroll horizontal y
+-- columna del alumno fija por si algún día se llenan los 11 meses.
+
+-- ============================================================
+-- Plantilla "pagado_parcial" aprobada por Meta: en uso (24/09/2026)
+-- ============================================================
+-- La jefa confirma que Meta ya activó la plantilla. Cambios:
+-- - enviar-whatsapp (v12, desplegada): el nombre por defecto pasa a
+--   'pagado_parcial' en minúsculas (Meta solo admite minúsculas; antes
+--   'Pagado_parcial'). Se puede forzar otro con WHATSAPP_TEMPLATE_PARCIAL.
+-- - app.js enviarJustificanteParcial(): manda tipo:'parcial' (antes 'pago',
+--   la plantilla de pago completo) con `pendiente` = lo que queda por pagar
+--   (sin el símbolo €, la plantilla ya lo lleva: "Te quedan {{3}}€").
+--   Parámetros del body: {{1}} nombre, {{2}} concepto, {{3}} pendiente, más
+--   el PDF como cabecera de documento.
+-- - El PDF de un pago parcial ya no se llama "..._PAGADO.pdf" (es el nombre
+--   que ven las familias al recibirlo): nombreArchivoRecibo() acepta
+--   'parcial' y lo nombra "..._PAGO_PARCIAL.pdf". Igual en regenerarPdf y en
+--   "Descargar todos los PDF". Test añadido en test/test-pdf.mjs.
+-- Si Meta rechazara el envío por no coincidir el nº de variables o el nombre,
+-- la app lo muestra como error del envío y no manda nada (no hay envío a
+-- medias). Aún sin publicar la app: la versión instalada nunca manda 'parcial'.
+
+-- Pago incompleto: Efectivo/Banco como recuadros grandes (24/09/2026).
+-- Solo app.js/styles.css. Los dos círculos pequeños (radio) pasan a dos
+-- recuadros grandes (66px de alto, letra de 19px) y el elegido se pone en
+-- naranja; Efectivo sigue preseleccionado como antes. Botones Cancelar/Guardar
+-- del modal más grandes (letra de 17px). Sin cambios de lógica: se guarda la
+-- misma cuenta ('efectivo'/'banco') en recibo_pagos.
+
+-- Pago incompleto rediseñado: importe de ESTE pago + historial (24/09/2026).
+-- Solo app.js/styles.css. Pedido tras probarlo con el móvil: el campo ya no
+-- pide (ni trae rellenado) el total acumulado — queda en BLANCO cada vez y
+-- se escribe el importe de ese pago (p. ej. recibo de 100€: 30, luego otros
+-- 30, luego "✓ Cobrado" con el resto). Arriba se ve el resumen (total /
+-- pagado hasta ahora / quedan) y la lista de pagos ya registrados con fecha,
+-- cuenta y quién los anotó (lee recibo_pagos, una fila por abono). Con el
+-- pago nuevo, aviso en vivo "llevarán X de Y, quedarán Z"; si llegara al
+-- total, avisa de usar "✓ Cobrado". El admin puede quitar un pago anotado
+-- por error (✕): se borra la fila y, por el ON DELETE CASCADE del movimiento,
+-- también sale de Ingresos y gastos; lo pendiente se recalcula solo.
+-- "Enviar justificante pago parcial" pasa a ser un recuadro (borde granate)
+-- que abre primero una ventana con lo que se va a mandar (destinatario y
+-- teléfono, pagos registrados, pagado/pendiente, y qué lleva el WhatsApp y el
+-- PDF) y solo envía al pulsar "Enviar ahora". El envío en bloque también
+-- lista cada alumno con pagado/quedan antes de confirmar.
+-- El justificante sigue diciendo lo ACUMULADO (p. ej. "60€ de 100€, faltan
+-- 40€"), no solo el último abono, para que las cuentas cuadren siempre.
+-- Probado con un recibo ZZ TEST: historial, 2º pago de 30€ en Banco (2 filas,
+-- acumulado 60€, 2 movimientos), validación al pasarse del total, quitar un
+-- pago (vuelve a 1 fila/30€/1 movimiento) y ventana de confirmación del envío
+-- (cancelada, sin enviar). Datos de prueba borrados sin residuo.
+
+-- PDF de pago parcial: "La cantidad de:" = lo pagado en ese momento (24/09/2026).
+-- Solo pdf.js/app.js. Pedido: el PDF debe decir siempre lo que se pagó EN ESE
+-- MOMENTO (el último abono), no lo acumulado. Ahora "La cantidad de:" lleva el
+-- importe del último pago (p. ej. "25€"); el recuadro "Total:" (abajo a la
+-- derecha) y el sello PAGO PARCIAL siguen igual: lo acumulado sobre el total
+-- ("55/100€") y "Pagado 55€ · Pendiente 45€". La fecha del sello pasa a ser la
+-- del último pago (antes la del día del envío). datosPagoParcialPdf() lee el
+-- último recibo_pagos; se usa al enviar el justificante (si no se pueden leer
+-- los pagos no se manda nada), al regenerar el PDF y en "Descargar todos los
+-- PDF". La ventana de confirmación del envío describe exactamente esto.
+-- Probado regenerando el PDF de un recibo ZZ TEST (2 pagos: 30€ y luego 25€):
+-- "La cantidad de: 25€", Total 55/100€, sello Pendiente 45€. Borrado sin
+-- residuo (BD y PDF local). Muestra de PDF añadida a test/test-pdf.mjs.
+
+-- Pagos parciales: se ve si el justificante de cada pago ya se envió (24/09/2026).
+-- Aplicado en Supabase (apply_migration "recibo_pagos_justificante_enviado"):
+--   alter table recibo_pagos add column justificante_enviado_en timestamptz;
+--   create policy recibo_pagos_update ... for update to authenticated
+--     using (is_admin()) with check (is_admin());   -- antes la tabla no tenía
+--     -- política de UPDATE (solo select/insert/delete); solo el admin (que es
+--     -- quien envía) puede marcarlo.
+-- (recibo_pagos ya estaba en la publicación de tiempo real.)
+-- Motivo: con varios profesores anotando pagos parciales es fácil olvidarse de
+-- mandar el justificante y que se acumulen dos pagos sin avisar. Cada pago
+-- lleva ahora su marca (null = sin enviar). App:
+-- - enviarJustificanteParcial() marca como enviados los pagos que recoge el PDF
+--   (los que leyó al generarlo, así un pago anotado justo en medio no se da por
+--   avisado sin estarlo); con un envío simulado no marca nada.
+-- - "Pago incompleto": aviso rojo arriba ("Hay 2 pagos (50€) sin justificante
+--   enviado") y en cada pago la etiqueta "✓ Justificante enviado dd/mm" o "⚠
+--   Justificante sin enviar". La ventana de confirmación del envío lo lleva
+--   también y avisa de que al enviar todos quedan marcados.
+-- - Listas de Recibos/Pagos parciales: etiqueta por recibo ("⚠ 2 pagos sin
+--   justificante" o "✓ Justificante enviado").
+-- - Aviso de Inicio "pagos parciales" (y su "Enviar todos"): ahora solo los
+--   recibos con algún pago SIN justificante — los ya avisados dejan de salir
+--   y no se les repite el mensaje.
+-- - cargarRecibos() carga también recibo_pagos (S.reciboPagos) y la tabla entra
+--   en TABLAS_TIEMPO_REAL, así que todo se actualiza en vivo.
+-- Probado con un recibo ZZ TEST (un pago avisado y otro sin avisar): etiquetas,
+-- aviso rojo, ventana de confirmación, marcado desde el cliente con el permiso
+-- de admin y refresco en vivo de la lista y del aviso de Inicio (2 → 1).
+-- Borrado sin residuo.
+
+-- Envío en bloque de pagos parciales: nunca repite lo ya avisado (24/09/2026).
+-- Solo app.js. Regla pedida: al "enviar todos", solo se mandan los recibos con
+-- algún pago sin justificante enviado. Ya lo cumplía el aviso de Inicio; ahora
+-- también: (1) en Recibos → Pagos parciales, "Seleccionar los sin enviar"
+-- (antes "Seleccionar todos") marca solo esos; (2) modalEnvioMasivo('parcial')
+-- omite los recibos ya avisados aunque se hayan marcado a mano, y lo dice
+-- ("1 recibo ya tenía todos sus pagos avisados y no se vuelve a mandar: X") —
+-- para repetir uno a propósito queda el botón de cada recibo. De paso, el
+-- texto "Se enviarán 1 justificantes" ahora respeta el singular.
+-- Probado con 2 recibos ZZ TEST (uno avisado, otro no) sin enviar nada
+-- (ventana cancelada). Borrados sin residuo.
+
+-- Pagos parciales anotados con la versión anterior (24/09/2026).
+-- Solo app.js. Bug encontrado al ver "✓ Justificante enviado" en recibos a los
+-- que nadie había mandado nada: hay 5 recibos REALES (R-00108 45€, R-00109
+-- 45€, R-00110 65€, R-00111 65€, R-00116 95€) con recibos.importe_parcial puesto por la
+-- versión publicada de la app (que solo guardaba ese importe suelto: sin fila
+-- en recibo_pagos, sin cuenta, sin fecha, sin pasar por Ingresos y gastos).
+-- Como no tenían filas de pago, las etiquetas nuevas los daban por "todo
+-- avisado" y el aviso de Inicio los dejaba fuera. Ahora parcialSinDetalle()
+-- detecta lo pagado que no consta en recibo_pagos y cuenta como "1 pago sin
+-- justificante" (etiqueta, aviso de Inicio, envío en bloque).
+-- RIESGO detectado (importante antes de publicar): con esos recibos, añadir un
+-- pago nuevo recalcularía importe_parcial solo con las filas nuevas (perdiendo
+-- lo anotado), y "✓ Cobrado" registraría solo el resto, con lo que lo ya
+-- cobrado NUNCA llegaría a Ingresos y gastos. Protección puesta: en esos
+-- recibos "Pago incompleto" muestra un aviso ("Pagos anotados con la versión
+-- anterior") y "✓ Cobrado"/"Cobro rápido" se niegan con un mensaje, sin tocar
+-- nada. Pendiente: registrar esos importes como pagos reales (hace falta saber
+-- la cuenta — efectivo o banco — de cada uno) para desbloquearlos. Probado con
+-- un recibo ZZ TEST de importe_parcial suelto: bloqueado, BD sin cambios.
+-- Borrado sin residuo.
+
+-- Pagos parciales anotados con la versión anterior: registro automático (24/09/2026).
+-- Solo app.js. SUSTITUYE la protección de la entrada anterior (los avisos que
+-- bloqueaban "✓ Cobrado"/"Cobro rápido" ya no existen). Aclaración de Adrián: en
+-- la versión publicada el "Pago incompleto" era solo informativo y NUNCA pasaba
+-- por Ingresos y gastos; todo se contabilizaba al pulsar "✓ Cobrado", en la
+-- cuenta elegida. Se mantiene exactamente esa semántica, sin necesidad de
+-- preguntar la cuenta de los 5 recibos reales (R-00108/109/110/111/116):
+--  * "✓ Cobrado" / "Cobro rápido" en un recibo con importe_parcial sin filas:
+--    registrarPagosRestantes() inserta una fila con lo anotado antes (con la
+--    cuenta elegida en el cobro) + otra con el resto, y el trigger de
+--    finanzas los reparte matrícula primero. El modal avisa: "Incluye N€
+--    anotados con la versión anterior, que se contabilizan ahora en Ingresos y
+--    gastos junto con el resto, en la cuenta que elijas."
+--  * "Pago incompleto" en ese mismo caso: aparece una caja obligatoria para la
+--    cuenta (efectivo/banco) de lo anotado antes; se guarda [fila anterior, fila
+--    nueva] en un único insert. Sin elegirla no deja guardar.
+--  * Mientras no se toquen, siguen contando como "1 pago sin justificante"
+--    (parcialSinDetalle/nPagosSinAvisar), para el aviso de Inicio y el envío en bloque.
+-- Probado en vivo con dos recibos ZZ TEST (importe 100, matrícula 20,
+-- importe_parcial 40, sin filas): Cobrado → Matrícula 20 + Mensualidad 20 + Mensualidad
+-- 60 = 100 en banco; Pago incompleto (anterior efectivo + 30 banco) → Matrícula
+-- 20 + Mensualidad 20 efectivo y Mensualidad 30 banco, importe_parcial 70, estado
+-- pendiente. Borrado sin residuo (recibos, pagos, movimientos, alumnos).
+
+-- Justificante de pago parcial con varios pagos sin avisar: suma (24/09/2026).
+-- Solo app.js y un comentario en pdf.js. Antes, con dos o más pagos sin
+-- justificante se mandaba UN envío pero "La cantidad de:" del PDF llevaba solo
+-- el último pago (el otro solo aparecía dentro del acumulado). Ahora
+-- resumenJustificanteParcial() calcula qué recoge el envío: la SUMA de los
+-- pagos aún sin avisar (+ lo anotado con la versión anterior, si lo hay) va en
+-- "La cantidad de:"; el sello y el "Total:" siguen con lo acumulado. Solo esos
+-- pagos se marcan como enviados (antes se re-marcaban todos, lo que pisaba la
+-- fecha de envío de los ya avisados). Si no queda nada sin avisar (regenerar el
+-- PDF), se muestra lo del último envío (los pagos con la fecha de envío más
+-- reciente). El modal de confirmación muestra la misma cifra. Probado con R-00161
+-- (40€ + 50€ sin avisar): "la suma de los 2 pagos que aún no se habían avisado
+-- (90€)"; no se envió nada.
+
+-- "Leído" de WhatsApp al mandar un justificante de pago parcial (24/09/2026).
+-- Solo app.js. El chip "Por leer"/"Leído" de Recibos sale de
+-- recibos.estado_whatsapp, y el webhook (whatsapp-webhook) solo actualiza el
+-- recibo cuya whatsapp_message_id coincide con el mensaje del aviso. Los envíos
+-- de recibo/pago ya guardaban el id del mensaje nuevo y ponían 'enviado', pero
+-- enviarJustificanteParcial() solo guardaba pdf_path: un "Leído" del mensaje
+-- anterior se quedaba en el recibo aunque el justificante nuevo no lo hubiera
+-- leído nadie. Ahora, con un envío real, se guarda el id del mensaje nuevo y
+-- estado_whatsapp='enviado' (sin chip hasta que llegue el "entregado"/"leído"
+-- del nuevo); si Meta no devolviera id, ambos campos quedan a null; con un
+-- envío simulado no se toca nada. Un "leído" tardío del mensaje viejo ya no
+-- casa con ningún recibo y el webhook lo ignora. Sin cambios de esquema.
+-- Probado con un recibo ZZ TEST (leido + id viejo): envío real → id nuevo +
+-- 'enviado'; respuesta sin id → null/null; simulado → sin cambios. Borrado sin residuo.
+
+-- Revisión previa a publicar: avisos con "Hecho por X", Ingresos y edición (24/09/2026).
+-- Aplicado en Supabase (apply_migration "avisos_quien_envio_justificantes"):
+--   alter table recibo_pagos add column justificante_enviado_por uuid references profesores(id) on delete set null;
+--   alter table recibos add column envio_pago_por uuid;   -- SIN foreign key a propósito: una segunda FK
+--     -- recibos→profesores haría ambiguo el embed profesores(nombre) de cargarRecibos() (y de la app ya publicada).
+--   avisos_descartados_tipo_check ampliado con 'pago_parcial' y 'pago_por_enviar'.
+--   recibo_pagos: DELETE solo admin (antes cualquiera autenticado); INSERT solo con creado_por = auth.uid()
+--     (el trigger que crea el ingreso es SECURITY DEFINER, no debía poder anotarse a nombre de otro).
+-- app.js:
+--  * Avisos de Inicio "pagos parciales" y "cobrados por enviar" con el mismo patrón que los otros cinco: un
+--    modal con la información (alumno, recibo, lo pagado/quedan, cada pago sin justificante con cuenta, fecha y
+--    quién lo anotó; en cobrados, importe, cuenta y fecha de cobro) y un botón para IR a la pestaña (Pagos
+--    parciales / Justificantes por enviar) — ya no se envía nada desde el aviso. Al mandar el justificante
+--    un admin, al otro le sale "✓ Justificante enviado por X" + "Marcar visto" (avisos_descartados; la
+--    referencia lleva la fecha del envío, así un pago nuevo vuelve a avisar) y botón "Marcar todo lo hecho
+--    como visto" (un envío en bloque deja decenas). Se refrescan en vivo con el modal abierto. En modo
+--    desarrollador: igual que los demás (sin botón; desaparece cuando lo han visto los admins reales).
+--    Se guarda quién envía: recibo_pagos.justificante_enviado_por (parcial) y recibos.envio_pago_por (pago,
+--    también en conjunto de hermanos; se limpia al "↩ Pendiente"). Los envíos anteriores no tienen "por" y no avisan.
+--  * Todos los avisos de Inicio, al cerrarse, repintan la portada (los contadores se quedaban con la foto vieja).
+--  * Ingresos y gastos: los movimientos 'automatico_parcial' salen como "ligado a un recibo" (antes tenían ✕ y se
+--    podía perder un ingreso dejando el pago), y al quitar una columna solo se borran los movimientos manuales.
+--  * "✎ Corregir cuenta" en un recibo cobrado en varios pagos: ahora corrige cada pago y su movimiento
+--    (antes solo tocaba los 'automatico' y decía "Cuenta corregida" sin cambiar Ingresos). Las listas enseñan
+--    "Efectivo + Banco" cuando hay mezcla (textoCuentas).
+--  * "✏️ Editar recibo" con pagos anotados: el importe nuevo debe ser mayor que lo pagado y la matrícula queda bloqueada
+--    (lo pagado ya se repartió Matrícula/Mensualidad en Ingresos).
+--  * Admin Revisor: "cobrados de" suma también lo pagado en parciales; la tabla de parciales muestra el chip de justificante.
+--  * Vista de profesor: el chip de justificante de pagos parciales es solo del admin.
+--  * styles.css: [hidden] siempre oculta; .cuenta-opciones.compacta.
+-- Probado en vivo con 3 alumnos ZZ TEST (recibo con 2 pagos de un profesor sin avisar, un cobrado por enviar y un cobrado
+-- en 2 pagos con cuentas distintas): aviso con la info y "Ir a Pagos parciales"; Judith envía por SQL → el modal abierto
+-- pasa a "Justificante enviado por Judith"; sin modo desarrollador sale "Marcar visto" y "Marcar todo…" y guardan el
+-- descarte; los envíos reales del código (con WhatsApp interceptado) guardan justificante_enviado_por/envio_pago_por;
+-- un pago de un profesor por SQL aparece solo en el aviso; corregir cuentas cambia pago+movimiento; Ingresos sin ✕ en parciales;
+-- editar recibo bloquea; vista de profesor sin controles de admin; recorrido sin errores JS. Borrado sin residuo
+-- (incluidos el recibo R-00161 de prueba de Adrián y sus pagos/movimientos/PDFs; se mantiene su ficha y matrícula).

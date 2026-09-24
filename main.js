@@ -227,20 +227,6 @@ ipcMain.handle('recibos:choose-dir', async () => {
   return cfg.recibosDir;
 });
 
-// Abre el chat de WhatsApp del alumno/tutor: directamente en la app de
-// escritorio si está instalada (protocolo whatsapp://), o en wa.me si no.
-ipcMain.handle('wa:open', (_e, { tel, texto }) => {
-  const numero = String(tel || '').replace(/\D/g, '');
-  if (!numero) return false;
-  const mensaje = encodeURIComponent(String(texto || ''));
-  const tieneApp = Boolean(app.getApplicationNameForProtocol('whatsapp://send'));
-  const url = tieneApp
-    ? `whatsapp://send?phone=${numero}&text=${mensaje}`
-    : `https://wa.me/${numero}?text=${mensaje}`;
-  shell.openExternal(url);
-  return tieneApp;
-});
-
 ipcMain.handle('csv:save', async (_e, { content, suggestedName }) => {
   const res = await dialog.showSaveDialog(win, {
     defaultPath: suggestedName,
