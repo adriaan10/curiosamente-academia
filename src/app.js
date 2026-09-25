@@ -3052,10 +3052,18 @@ function modalClase(clase) {
       document.getElementById('m-msg').textContent = 'El nombre del grupo es obligatorio.';
       return;
     }
+    const pidClase = profesorActual();
+    const fueraDeHorario = hs.find(h => !horarioDentroDeTrabajo(pidClase, h.dia_semana, h.hora, h.duracion_min));
+    if (fueraDeHorario) {
+      document.getElementById('m-msg').textContent =
+        `⚠ ${DIAS[fueraDeHorario.dia_semana - 1]} a las ${fueraDeHorario.hora} está fuera del horario de trabajo del profesor. `
+        + 'Ajusta el horario en Ajustes → Mi horario de trabajo, o elige otra hora.';
+      return;
+    }
     const fila = {
       nombre,
       asignatura_id: Number(document.getElementById('c-asig').value),
-      profesor_id: profesorActual(),
+      profesor_id: pidClase,
       color: colorSel,
       capacidad: Number(document.getElementById('c-aforo').value),
       notas: document.getElementById('c-notas').value.trim() || null
@@ -3177,6 +3185,19 @@ function renderHorario() {
 }
 
 // ---- Huecos libres: tramos sin clase en el horario fijo de cada día ----
+
+// ¿Cae [horaInicio, horaInicio+duracionMin) dentro de algún tramo del horario
+// de trabajo del profesor ese día? Si el profesor no tiene horario configurado
+// (ningún tramo en ningún día), no se restringe: se comporta como hasta ahora.
+function horarioDentroDeTrabajo(profesorId, diaSemana, horaInicio, duracionMin) {
+  const tramosProfesor = S.profesorHorario.filter(h => h.profesor_id === profesorId);
+  if (!tramosProfesor.length) return true;
+  const iniMin = minutosDeHora(horaInicio);
+  const finMin = iniMin + (duracionMin || 0);
+  return tramosProfesor
+    .filter(t => t.dia_semana === diaSemana)
+    .some(t => iniMin >= minutosDeHora(horaCorta(t.hora_inicio)) && finMin <= minutosDeHora(horaCorta(t.hora_fin)));
+}
 
 function minutosDeHora(hhmm) {
   const [h, m] = String(hhmm).split(':').map(Number);
@@ -6661,7 +6682,9 @@ async function renderAjustes() {
     <h3>${S.profesor?.es_admin ? 'Horario de trabajo' : 'Mi horario de trabajo'}</h3>
     <p class="ayuda">Indica qué días y horas ${S.profesor?.es_admin ? 'trabaja cada profesor' : 'trabajas'}.
     Con esto, "Huecos libres" en la pestaña Horario calculará los huecos dentro del horario real,
-    en vez de un horario genérico. Si no se configura nada, se usará un horario por defecto (16:00–21:00).</p>
+    en vez de un horario genérico. Si no se configura nada, se usará un horario por defecto (16:00–21:00).
+    Si hay horario partido (ej. 10:00–14:00 y 17:00–21:00), añade un tramo por cada franja y elige
+    el mismo día en ambos.</p>
     ${S.profesor?.es_admin ? `<label>Profesor
       <select id="aj-horario-profesor">
         ${S.profesores.filter(p => p.estado !== 'baja').map(p =>
