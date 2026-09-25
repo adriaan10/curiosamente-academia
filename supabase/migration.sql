@@ -3210,3 +3210,26 @@ alter table public.alumnos add column matricula_importe numeric;
 -- un pago de un profesor por SQL aparece solo en el aviso; corregir cuentas cambia pago+movimiento; Ingresos sin ✕ en parciales;
 -- editar recibo bloquea; vista de profesor sin controles de admin; recorrido sin errores JS. Borrado sin residuo
 -- (incluidos el recibo R-00161 de prueba de Adrián y sus pagos/movimientos/PDFs; se mantiene su ficha y matrícula).
+
+-- Horario de trabajo por día, clases dentro de horario y Huecos libres ordenados (25/09/2026).
+-- Sin cambios de base de datos (profesor_horario sigue siendo una fila por franja). Solo app.js y styles.css.
+-- Parte de la PR #1 (validar el horario de la clase contra el horario de trabajo), revisada y ampliada:
+--  * Ajustes → Horario de trabajo: una línea por día (lunes a domingo) con las franjas juntas (mañana y
+--    tarde: "10:00 a 13:00 y 16:00 a 21:00"), en vez de una fila por tramo; "+" para una 3ª franja,
+--    "Copiar el lunes a martes–viernes". Valida franja a medias, fin anterior al inicio y solapes. Al guardar,
+--    si falla el insert se restaura el horario anterior (antes se quedaba el profesor sin horario) y se
+--    avisa de las clases del profesor que con el nuevo horario quedan fuera.
+--  * Crear/editar clase: aviso en vivo bajo cada día/hora que caiga fuera del horario del profesor elegido
+--    (con su horario de ese día) y no deja guardar. Se recalcula al cambiar día, hora, duración o profesor.
+--    Lo que la clase ya tenía guardado no se vuelve a exigir (si no, no se podría ni apuntar un alumno a una
+--    clase antigua que quedó fuera); solo lo nuevo o cambiado, o todo si se cambia de profesor.
+--    Una clase que cruza un hueco entre franjas (ej. 12:30–13:30 con 10–13 y 16–21) cuenta como fuera.
+--  * Clase con horario alternativo (sesión suelta / recuperación): SIN comprobación, a propósito (puede ir fuera del
+--    horario de trabajo por otros motivos); solo las clases normales tienen que caer dentro.
+--  * Huecos libres: por cada día y franja, en orden de hora: hueco libre antes, cada clase (azul con sus
+--    plazas, gris si está completa) y hueco libre después, con la duración del hueco. Antes las clases con
+--    plazas no bloqueaban su hora y salían aparte al final; ahora mientras da clase no consta como libre.
+-- Probado en vivo (sesión de un profesor y modo admin simulado en memoria, sin guardar nada real): editor con el
+-- horario real de Francis (5 días × 2 franjas), errores de validación, guardado válido sin cambios (contenido
+-- idéntico, comprobado por huella), formulario de clase en todos los casos, y Huecos
+-- libres con clases de prueba ZZ TEST (18:00–19:30 con plazas, 10:00 completa). Borrado sin residuo.

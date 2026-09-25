@@ -421,6 +421,9 @@ td.celda-fin.vacia { color: var(--gris); }
   font-weight: 600; font-size: 13px; color: #2a5d94; cursor: pointer;
 }
 .hueco-grupo-card:hover { filter: brightness(.97); }
+.hueco-card small { display: block; font-weight: 400; color: #4c8a68; margin-top: 2px; }
+.hueco-grupo-card.completa { border-left-color: #9a9a9a; background: #efefef; color: #555; }
+.hueco-grupo-card.completa small { color: #777; }
 .hueco-grupo-card small { display: block; font-weight: 400; color: #5478a0; margin-top: 2px; }
 
 /* ---- anulaciones y alternativas ---- */
@@ -497,3 +500,9 @@ td.celda-fin.vacia { color: var(--gris); }
 
 /* El atributo hidden debe ganar siempre a los display de .btn y compañía */
 [hidden] { display: none !important; }
+
+/* Horario de trabajo por día (Ajustes) y aviso de "fuera de horario" en el formulario de clase */
+.fila-dia { flex-wrap: wrap; }
+.fila-dia .dia-nombre { min-width: 92px; }
+.aviso-fuera { display: block; color: var(--rojo); font-size: 12.5px; margin: -4px 0 8px; }
+.aviso-fuera:empty { display: none; }
