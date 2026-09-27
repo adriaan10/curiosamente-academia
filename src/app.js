@@ -117,6 +117,24 @@ async function cargarTodo() {
     }, 0);
     throw new Error('acceso desactivado');
   }
+  // Solo aplica a la versión web (window.api.esWeb lo pone web/api-shim.js;
+  // en el escritorio no existe esa propiedad, así que esto nunca afecta a
+  // Electron). Acceso a la web solo para quien Adrián marque a mano
+  // (profesores.acceso_web) — al resto se le manda a la app oficial.
+  if (window.api.esWeb && !S.profesor?.acceso_web) {
+    detenerTiempoReal();
+    detenerControlInactividad();
+    await S.sb.auth.signOut();
+    S.session = null;
+    S.profesor = null;
+    renderLogin();
+    setTimeout(() => {
+      const m = document.getElementById('msg');
+      if (m) m.textContent = 'Esta cuenta no tiene acceso a la versión web de Curiosamente. '
+        + 'Usa la app oficial de escritorio: https://github.com/adriaan10/curiosamente-academia/releases/latest';
+    }, 0);
+    throw new Error('sin acceso web');
+  }
   if (profs.error) avisar('Error cargando profesores: ' + profs.error.message, true);
   else S.profesores = profs.data || [];
   if (asigs.error) avisar('Error cargando asignaturas: ' + asigs.error.message, true);

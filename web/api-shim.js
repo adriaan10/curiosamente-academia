@@ -53,6 +53,11 @@
   }
 
   window.api = {
+    // Marca "esto es la web, no Electron" — src/app.js lo usa SOLO para
+    // decidir quién puede entrar a la web (profesores.acceso_web); no existe
+    // en el escritorio (preload.js no lo define), así que nunca le afecta.
+    esWeb: true,
+
     getConfig: async () => ({ ...CONFIG }),
     setConfig: async (partial) => ({ ...CONFIG, ...partial }), // no persiste: no hace falta en la web
 

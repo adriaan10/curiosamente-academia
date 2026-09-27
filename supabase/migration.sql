@@ -3288,3 +3288,17 @@ alter table public.alumnos add column matricula_importe numeric;
 -- incompleto": recuadro y texto naranja), para que destaque antes de
 -- marcarla. Al pulsarlo, sigue igual que antes: chip rojo "❌ Faltó" +
 -- "Deshacer". Probado en vivo con un alumno de ejemplo (ya borrado).
+
+-- Acceso a la versión web solo para quien Adrián marque (27/09/2026).
+-- Aplicado en Supabase (apply_migration "profesores_acceso_web"):
+--   alter table profesores add column acceso_web boolean not null default false;
+-- web/api-shim.js pone window.api.esWeb = true (no existe en el escritorio:
+-- preload.js nunca lo define). cargarTodo() en app.js, justo después de la
+-- expulsión por "dado de baja", comprueba: si window.api.esWeb es true y el
+-- profesor no tiene acceso_web, se cierra la sesión y se le manda de vuelta
+-- al login con un aviso para que use la app oficial (enlace a la última
+-- versión en GitHub). En el escritorio esto nunca se dispara, porque
+-- window.api.esWeb ahí siempre es undefined. Por defecto nadie tiene acceso
+-- (hay que activarlo profesor a profesor, a mano, con un UPDATE en Supabase).
+-- Probado con la lógica exacta en aislado (4 casos: escritorio con/sin la
+-- columna, web con/sin ella) — los 4 salen como se esperaba.
