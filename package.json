@@ -5,6 +5,7 @@
   "main": "main.js",
   "scripts": {
     "build": "esbuild src/app.js --bundle --outfile=app/bundle.js --format=iife --platform=browser",
+    "build:web": "npm run build && node scripts/buildWeb.cjs",
     "start": "npm run build && electron .",
     "test": "node test/test-pdf.mjs",
     "dist": "npm run build && electron-builder --win",

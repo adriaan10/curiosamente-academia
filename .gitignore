@@ -3,3 +3,11 @@ dist/
 app/bundle.js
 test/salida/
 *.log
+
+# web/: generados por "npm run build:web" (ver scripts/buildWeb.cjs) —
+# copias de app/bundle.js, app/styles.css y assets/*.png. web/index.html y
+# web/api-shim.js sí son código fuente y se versionan.
+web/bundle.js
+web/styles.css
+web/logo.png
+web/icon.png
