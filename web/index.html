@@ -7,6 +7,15 @@
         content="default-src 'self'; connect-src 'self' https://*.supabase.co wss://*.supabase.co; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
   <title>Curiosamente — Gestión</title>
   <link rel="icon" href="icon.png">
+  <link rel="apple-touch-icon" href="logo.png">
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#5C1722">
+  <!-- Para que al añadirla a la pantalla de inicio en iPhone/iPad se abra
+       sin la barra del navegador (como una app) y con este nombre debajo
+       del icono. En Android/Chrome, esto ya lo hace el manifest.json solo. -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Curiosamente">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>

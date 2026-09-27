@@ -1,0 +1,12 @@
+{
+  "name": "Curiosamente — Gestión",
+  "short_name": "Curiosamente",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#FDF1E3",
+  "theme_color": "#5C1722",
+  "icons": [
+    { "src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "logo.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
