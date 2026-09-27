@@ -3302,3 +3302,20 @@ alter table public.alumnos add column matricula_importe numeric;
 -- (hay que activarlo profesor a profesor, a mano, con un UPDATE en Supabase).
 -- Probado con la lógica exacta en aislado (4 casos: escritorio con/sin la
 -- columna, web con/sin ella) — los 4 salen como se esperaba.
+
+-- Cierre de sesión no limpiaba nada salvo session/profesor (27/09/2026).
+-- Solo app.js. Bug real (lo encontró Adrián probándolo): al cerrar sesión
+-- ("Salir", inactividad, dado de baja, o sin acceso a la web) solo se
+-- vaciaban S.session y S.profesor — todo lo demás (clases, alumnos, recibos,
+-- en qué pestaña estabas, filtros…) se quedaba tal cual. Si alguien iniciaba
+-- sesión con OTRA cuenta sin cerrar y reabrir la app entera (ej. Adrián cierra
+-- con la suya y entra rápido con la de Francis), el siguiente heredaba los
+-- datos y hasta la PESTAÑA del anterior — si ese admin estaba en Ingresos o
+-- Admin Revisor, el profesor que entraba después se quedaba en una pantalla
+-- que no le corresponde, con pinta de "bugueada". Ahora reiniciarEstadoSesion()
+-- (nueva) deja todo como recién arrancado en los 4 sitios donde se cierra
+-- sesión — todas las listas cargadas, la pestaña activa, los filtros — salvo
+-- lo que no es de la sesión (conexión, logo, estado del actualizador).
+-- Probado extrayendo la función tal cual del archivo (no una reescritura) y
+-- comprobando 19 casos con una sesión de admin "sucia" simulada: todo vuelve
+-- a su valor de arranque, y lo que no debe tocarse no se toca.

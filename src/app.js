@@ -46,6 +46,48 @@ const S = {
   actualizacionNecesitaReinicio: false
 };
 
+// Vuelve a dejar S como recién arrancado, salvo lo que NO es de una sesión
+// concreta (cfg/sb: conexión; logoBase64 y actualizacion*: del proceso, no
+// del usuario). Se usa en los 4 sitios donde se cierra sesión (botón
+// "Salir", inactividad, dado de baja, sin acceso a la web) — antes solo se
+// vaciaban session/profesor, así que si alguien iniciaba sesión con OTRA
+// cuenta sin reiniciar la app entera (ej. "cierro con la mía y entro rápido
+// con la de Francis"), se quedaban colgados los datos y hasta la pestaña
+// (Ingresos, Admin Revisor…) del usuario anterior — el nuevo veía cosas que
+// no le tocaban, o pantallas rotas por estar en una pestaña que no es suya.
+function reiniciarEstadoSesion() {
+  S.session = null;
+  S.profesor = null;
+  S.profesores = [];
+  S.asignaturas = [];
+  S.profAsig = [];
+  S.alumnos = [];
+  S.recibos = [];
+  S.reciboPagos = [];
+  S.clases = [];
+  S.excepciones = [];
+  S.notas = [];
+  S.profesorHorario = [];
+  S.cambiosHorario = [];
+  S.reactivaciones = [];
+  S.bajasAsignatura = [];
+  S.faltas = [];
+  S.avisosDescartados = [];
+  S.finanzas = [];
+  S.finanzasCategorias = [];
+  S.cuentasSaldoInicial = [];
+  S.vista = 'inicio';
+  S.vistaRecibos = 'pendientes';
+  S.mesRecibos = '';
+  S.mesRevisor = '';
+  S.filtroRevisorProfesor = '';
+  S.vistaAdminRevisor = 'resumen';
+  S.mesFaltas = '';
+  S.recibosSeleccionados = new Set();
+  S.vistaRosterRecibos = false;
+  S.filtros = { texto: '', asignatura: '', estado: 'activo', profesor: '', textoRecibo: '' };
+}
+
 const $app = () => document.getElementById('app');
 const e = escapeHtml;
 
@@ -108,8 +150,7 @@ async function cargarTodo() {
     detenerTiempoReal();
     detenerControlInactividad();
     await S.sb.auth.signOut();
-    S.session = null;
-    S.profesor = null;
+    reiniciarEstadoSesion();
     renderLogin();
     setTimeout(() => {
       const m = document.getElementById('msg');
@@ -125,8 +166,7 @@ async function cargarTodo() {
     detenerTiempoReal();
     detenerControlInactividad();
     await S.sb.auth.signOut();
-    S.session = null;
-    S.profesor = null;
+    reiniciarEstadoSesion();
     renderLogin();
     setTimeout(() => {
       const m = document.getElementById('msg');
@@ -267,8 +307,7 @@ async function recargarTrasCambioRemoto() {
       detenerTiempoReal();
       detenerControlInactividad();
       await S.sb.auth.signOut();
-      S.session = null;
-      S.profesor = null;
+      reiniciarEstadoSesion();
       renderLogin();
       setTimeout(() => {
         const m = document.getElementById('msg');
@@ -746,7 +785,7 @@ async function cerrarSesion(mensaje) {
   detenerTiempoReal();
   detenerControlInactividad();
   await S.sb.auth.signOut();
-  S.session = null; S.profesor = null;
+  reiniciarEstadoSesion();
   renderLogin();
   if (mensaje) setTimeout(() => {
     const m = document.getElementById('msg');
