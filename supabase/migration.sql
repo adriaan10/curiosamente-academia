@@ -3233,3 +3233,58 @@ alter table public.alumnos add column matricula_importe numeric;
 -- horario real de Francis (5 días × 2 franjas), errores de validación, guardado válido sin cambios (contenido
 -- idéntico, comprobado por huella), formulario de clase en todos los casos, y Huecos
 -- libres con clases de prueba ZZ TEST (18:00–19:30 con plazas, 10:00 completa). Borrado sin residuo.
+
+-- Faltas de alumnos, y alumnos "de verdad" por profesor (27/09/2026).
+-- Aplicado en Supabase (apply_migration "faltas_alumnos"):
+--   create table faltas_alumnos (alumno_id, clase_id, profesor_id, fecha, hora,
+--     creado_por, created_at, unique(alumno_id, clase_id, fecha, hora));
+--   RLS: una sola política ALL (mismo patrón que clase_alumnos_all/
+--     clase_horarios_all) — solo quien da esa clase, o el admin.
+--   alter publication supabase_realtime add table faltas_alumnos.
+--
+-- 1. FIX importante (pedido por los profesores): matriculasDeProfesor()
+--    decidía "es mío" mirando si la ASIGNATURA la da ese profesor
+--    (asignaturasDeProfesor/profesor_asignaturas) — con asignaturas
+--    compartidas (Mate entre Carol y Dani, Inglés entre Francis/Mireia/
+--    Judith/Leti, GABINETE entre tres) esto hacía que TODOS los que dan esa
+--    asignatura vieran como suyos a TODOS los alumnos de ella, sin importar
+--    de quién fueran de verdad. Comprobado con datos reales antes de tocar
+--    nada: en "Inglés — clases particulares" los 4 profesores veían el mismo
+--    27; con el arreglo ven 6/17/3/1 (sus matrículas de verdad). Ahora mira
+--    matriculas.profesor_id (el mismo campo que ya usa
+--    profesoresTitularesDeAlumno), con el mismo fallback para matrículas
+--    antiguas sin ese campo (ninguna activa lo tenía nulo, comprobado). Esto
+--    corrige de una vez: el recuento de "alumnos activos" de Inicio, el
+--    listado de Alumnos (cada profesor ve los suyos de verdad), la ficha
+--    (qué matrículas son editables o "(otro profesor)"), Admin Revisor
+--    filtrado por profesor, y los candidatos de hermanastros/tarifas.
+--    Probado en vivo con la sesión real de Francis: 6 alumnos propios en
+--    Inglés (no 27); la ficha de un alumno ajeno (de Mireia/Alejandro) sale
+--    con sus dos matrículas en solo lectura, ninguna editable.
+--
+-- 2. "Faltas alumnos": dentro de cada clase (Horario o Clases → abrir la
+--    clase) hay ahora "Pasar lista" — se elige el día, la hora se propone
+--    sola según el horario de ESE día de la semana (si ese día no tiene
+--    ninguno programado, o tiene más de uno, se puede elegir entre los de la
+--    clase) y se marca "Ha faltado" por alumno; "Deshacer" lo quita. Se
+--    guarda con profesor_id (de la clase, para el recap) y creado_por. En
+--    Inicio, tarjeta "Faltas alumnos" (junto a "alumnos activos", visible a
+--    quien dé clases) con el número de este mes; al abrirla, recap por mes
+--    (mismo estilo de navegación que Admin Revisor) con alumno, clase, día y
+--    hora de cada falta, y opción de quitarla si se marcó por error.
+--    Probado en vivo (sesión real de Francis, RLS incluida, no service
+--    role): clase de prueba con 2 franjas el mismo día (Domingo 16:00 y
+--    18:00) — el selector de hora aparece con las 2; marcar/deshacer en
+--    cada hora no se mezcla con la otra; cambiar a un día sin horario
+--    programado ofrece igualmente las horas de la clase; la tarjeta y el
+--    recap se actualizan al momento; quitar desde el recap también
+--    funciona. Sin errores de JavaScript en todo el recorrido. Borrado sin
+--    residuo (alumnos, clase, horarios y faltas de prueba).
+
+-- Botón de "Falta de asistencia" en naranja (27/09/2026).
+-- Solo app.js/styles.css. El botón para marcar una falta (dentro de "Pasar
+-- lista", en modalDetalleClase) decía "Ha faltado" en gris liso; ahora dice
+-- "Falta de asistencia" y sale en naranja (misma pinta que el botón "Pago
+-- incompleto": recuadro y texto naranja), para que destaque antes de
+-- marcarla. Al pulsarlo, sigue igual que antes: chip rojo "❌ Faltó" +
+-- "Deshacer". Probado en vivo con un alumno de ejemplo (ya borrado).

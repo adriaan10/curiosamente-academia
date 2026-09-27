@@ -506,3 +506,10 @@ td.celda-fin.vacia { color: var(--gris); }
 .fila-dia .dia-nombre { min-width: 92px; }
 .aviso-fuera { display: block; color: var(--rojo); font-size: 12.5px; margin: -4px 0 8px; }
 .aviso-fuera:empty { display: none; }
+
+/* ---- Faltas de alumnos (pasar lista en modalDetalleClase + recap de Inicio) ---- */
+.asistencia-barra { display: flex; gap: 20px; align-items: center; margin: 6px 0 10px; }
+.asistencia-barra label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--gris); width: auto; }
+.asistencia-barra input, .asistencia-barra select { width: auto; margin: 0; }
+.chip.falta-si { background: #fdecea; color: var(--rojo); font-weight: 600; }
+.btn.falta-marcar { border-color: var(--naranja-fuerte); color: var(--naranja-fuerte); font-weight: 600; white-space: nowrap; }

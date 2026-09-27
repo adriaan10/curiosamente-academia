@@ -26,6 +26,7 @@ const S = {
   cambiosHorario: [],
   reactivaciones: [],
   bajasAsignatura: [],
+  faltas: [],
   avisosDescartados: [],
   finanzas: [],
   finanzasCategorias: [],
@@ -36,6 +37,7 @@ const S = {
   mesRevisor: '',
   filtroRevisorProfesor: '',
   vistaAdminRevisor: 'resumen',
+  mesFaltas: '',
   recibosSeleccionados: new Set(),
   vistaRosterRecibos: false,
   filtros: { texto: '', asignatura: '', estado: 'activo', profesor: '', textoRecibo: '' },
@@ -122,7 +124,7 @@ async function cargarTodo() {
   if (profAsig.error) avisar('Error cargando asignaturas de profesor: ' + profAsig.error.message, true);
   else S.profAsig = profAsig.data || [];
   await Promise.all([
-    cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
+    cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(), cargarFaltas(),
     cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
     cargarFinanzas(), cargarFinanzasCategorias(), cargarCuentasSaldoInicial(), cargarAvisosDescartados()
   ]);
@@ -146,7 +148,7 @@ async function cargarTodo() {
 // instantáneo, así que no compensa la complejidad de ir más fino.
 const TABLAS_TIEMPO_REAL = [
   'alumnos', 'matriculas', 'clases', 'clase_horarios', 'clase_alumnos', 'clase_excepciones',
-  'recibos', 'notas', 'profesor_horario', 'cambios_horario', 'reactivaciones_alumno', 'bajas_asignatura',
+  'recibos', 'notas', 'profesor_horario', 'cambios_horario', 'reactivaciones_alumno', 'bajas_asignatura', 'faltas_alumnos',
   'finanzas_movimientos', 'finanzas_categorias', 'profesores', 'asignaturas', 'profesor_asignaturas',
   'cuentas_saldo_inicial', 'avisos_descartados', 'recibo_pagos'
 ];
@@ -220,7 +222,7 @@ async function recargarTrasCambioRemoto() {
     S.sb.from('profesores').select('*').order('nombre'),
     S.sb.from('asignaturas').select('*').order('id'),
     S.sb.from('profesor_asignaturas').select('*'),
-    cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(),
+    cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(), cargarFaltas(),
     cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
     cargarFinanzas(), cargarFinanzasCategorias(), cargarCuentasSaldoInicial(), cargarAvisosDescartados()
   ]);
@@ -321,6 +323,15 @@ async function cargarBajasAsignatura() {
     .order('fecha', { ascending: false });
   if (error) return avisar('Error cargando bajas de asignatura: ' + error.message, true);
   S.bajasAsignatura = data || [];
+}
+
+// Faltas de alumnos a clase, marcadas por el profesor de cada grupo ("Faltas
+// alumnos" en Inicio). La RLS ya limita esto a las clases propias del
+// profesor (o todas, si es admin), así que no hace falta filtrar aquí.
+async function cargarFaltas() {
+  const { data, error } = await S.sb.from('faltas_alumnos').select('*').order('fecha', { ascending: false });
+  if (error) return avisar('Error cargando faltas: ' + error.message, true);
+  S.faltas = data || [];
 }
 
 // Avisos que este admin ya ha descartado a mano ("Marcar visto" sobre algo
@@ -748,10 +759,17 @@ function renderInicio() {
   const diaHoy = ((hoy.getDay() + 6) % 7) + 1; // 1=lunes … 7=domingo
   const fecha = `${DIAS[diaHoy - 1]}, ${hoy.getDate()} de ${MESES[hoy.getMonth()].toLowerCase()} de ${hoy.getFullYear()}`;
 
-  // Cada profesor cuenta solo los alumnos de sus asignaturas (el admin, todos);
-  // la base de datos completa se ve en Alumnos marcando "Toda la academia".
+  // Cada profesor cuenta solo sus propios alumnos, los de sus matrículas de
+  // verdad (el admin, todos) — no basta con dar la asignatura: puede ser
+  // compartida con otro profesor. La base de datos completa se ve en Alumnos
+  // marcando "Toda la academia".
   const activos = S.alumnos.filter(a =>
     a.estado === 'activo' && (S.profesor?.es_admin || misMatriculas(a).length > 0)).length;
+  // Faltas de las clases propias (faltas_alumnos.profesor_id, copiado al
+  // marcarlas — no depende de a quién esté asignada la clase AHORA MISMO).
+  const misFaltas = S.faltas.filter(f => f.profesor_id === S.profesor?.id);
+  const mesActualClave = claveMes(new Date().toISOString());
+  const faltasEsteMes = misFaltas.filter(f => claveMes(f.fecha) === mesActualClave);
   const pendientes = S.recibos.filter(r => r.estado !== 'pagado');
   const totalPendiente = pendientes.reduce((s, r) => s + Number(r.importe), 0);
   // Siempre las clases de quien ha entrado, nunca las del filtro compartido
@@ -812,6 +830,12 @@ function renderInicio() {
         <div class="pc-titulo">alumno${activos === 1 ? '' : 's'} activo${activos === 1 ? '' : 's'}</div>
         <div class="pc-detalle">Ver la base de datos</div>
       </div>
+      ${daClases ? `
+      <div class="portada-card" id="pc-faltas">
+        <div class="pc-num">${faltasEsteMes.length}</div>
+        <div class="pc-titulo">falta${faltasEsteMes.length === 1 ? '' : 's'} este mes</div>
+        <div class="pc-detalle">${faltasEsteMes.length ? 'Ver quién y cuándo' : 'Nadie ha faltado 🎉'}</div>
+      </div>` : ''}
       <div class="portada-card ${pendientes.length ? 'alerta' : ''}" data-ir="recibos">
         <div class="pc-num">${pendientes.length}</div>
         <div class="pc-titulo">recibo${pendientes.length === 1 ? '' : 's'} pendiente${pendientes.length === 1 ? '' : 's'}</div>
@@ -889,6 +913,8 @@ function renderInicio() {
   if (pcBajasAsig) pcBajasAsig.onclick = () => modalBajasAsignaturaSinVer(bajasAsignaturaSinVer);
   const pcPagados = document.getElementById('pc-pagados-enviar');
   if (pcPagados) pcPagados.onclick = () => modalPagadosPorEnviar(pagadosPorEnviar);
+  const pcFaltas = document.getElementById('pc-faltas');
+  if (pcFaltas) pcFaltas.onclick = () => modalFaltasAlumnos(misFaltas);
   const pcPagosParciales = document.getElementById('pc-pagos-parciales');
   if (pcPagosParciales) pcPagosParciales.onclick = () => modalPagosParcialesSinEnviar(pagosParciales);
 }
@@ -1614,9 +1640,16 @@ function chipAsignatura(m, extraHtml = '') {
 }
 
 // Matrículas de un alumno que corresponden a las asignaturas de un profesor.
+// Antes miraba si la asignatura de la matrícula era una de las que da ese
+// profesor (asignaturasDeProfesor) — con asignaturas compartidas (ej. Mate
+// entre Carol y Dani) eso hacía que los DOS vieran como "suyos" a todos los
+// alumnos de esa asignatura, fueran de quien fueran de verdad. Ahora se mira
+// el dueño real de la matrícula (matriculas.profesor_id, el mismo campo que
+// ya usa profesoresTitularesDeAlumno); solo las matrículas antiguas de antes
+// de que existiera ese campo recurren a adivinar por si la asignatura la
+// daba un único profesor en ese momento.
 function matriculasDeProfesor(alumno, profesorId) {
-  const ids = new Set(asignaturasDeProfesor(profesorId).map(a => a.id));
-  return (alumno.matriculas || []).filter(m => ids.has(m.asignatura_id));
+  return (alumno.matriculas || []).filter(m => (m.profesor_id || profesorParaAsignatura(m.asignatura_id)) === profesorId);
 }
 
 // Matrículas que el usuario actual puede gestionar (admin: todas).
@@ -2614,6 +2647,13 @@ function fechaISO(d) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+// Día de la semana (1=lunes … 7=domingo) de una fecha "YYYY-MM-DD". El
+// mediodía fijo evita que un cambio de huso horario la haga caer en el día
+// de al lado.
+function diaSemanaDeFecha(fechaIso) {
+  return ((new Date(fechaIso + 'T12:00:00').getDay() + 6) % 7) + 1;
+}
+
 function fmtFecha(iso) {
   return String(iso || '').split('-').reverse().join('/');
 }
@@ -2741,9 +2781,12 @@ function modalDetalleClase(clase, fechaCtx) {
   </div>` : ''}
   <h3 class="seccion">Alumnos (${alumnos.length}/${clase.capacidad || 6})${alumnos.length >= (clase.capacidad || 6) ? ' — grupo lleno' : ''}</h3>
   ${alumnos.length === 0 ? '<p class="ayuda">Todavía no hay alumnos apuntados.</p>' : `
-  <ul class="detalle-alumnos">
-    ${alumnos.map(a => `<li>${e(a.nombre)}${a.telefono ? ` <small>· ${e(a.telefono)}</small>` : ''}</li>`).join('')}
-  </ul>`}
+  <p class="ayuda">Elige el día de esa clase y marca a quien haya faltado — se guarda al momento en "Faltas alumnos" de Inicio.</p>
+  <div class="asistencia-barra">
+    <label>Día<input type="date" id="dc-fecha" value="${e(fechaCtx || hoyIso)}"></label>
+    <label>Hora<span id="dc-hora-cont"></span></label>
+  </div>
+  <ul class="lista-pagos" id="dc-lista-alumnos"></ul>`}
   <div class="pie-modal">
     <button class="btn liso peligro" id="d-anular">Anular clase…</button>
     <span class="flex1"></span>
@@ -2763,6 +2806,70 @@ function modalDetalleClase(clase, fechaCtx) {
     modalDetalleClase(S.clases.find(c => c.id === clase.id), fechaCtx);
     avisar('Excepción eliminada.');
   });
+
+  if (alumnos.length) pintarPaseDeLista(clase, alumnos, hs);
+}
+
+// "Pasar lista" dentro de modalDetalleClase: por cada día elegido, la hora se
+// ofrece entre los tramos de horario de ESE día de la semana (normalmente
+// solo hay uno); si ese día no tiene ninguno (horario cambiado después, o
+// solo por hacer una recuperación puntual), se ofrecen todos los tramos de
+// la clase igualmente, para no dejar sin poder marcar nada.
+function pintarPaseDeLista(clase, alumnos, hs) {
+  const $fecha = document.getElementById('dc-fecha');
+  const $horaCont = document.getElementById('dc-hora-cont');
+  const $lista = document.getElementById('dc-lista-alumnos');
+  let horaSel = null;
+
+  const pintarHora = () => {
+    const candidatos = hs.filter(h => h.dia_semana === diaSemanaDeFecha($fecha.value));
+    const opciones = candidatos.length ? candidatos : hs;
+    if (!opciones.some(h => horaCorta(h.hora) === horaSel)) horaSel = horaCorta(opciones[0].hora);
+    $horaCont.innerHTML = opciones.length === 1
+      ? `<strong>${horaCorta(opciones[0].hora)}</strong>`
+      : `<select id="dc-hora">${opciones.map(h => `<option value="${horaCorta(h.hora)}" ${horaCorta(h.hora) === horaSel ? 'selected' : ''}>${horaCorta(h.hora)}</option>`).join('')}</select>`;
+    const $sel = document.getElementById('dc-hora');
+    if ($sel) $sel.onchange = () => { horaSel = $sel.value; pintarLista(); };
+  };
+
+  const pintarLista = () => {
+    const fecha = $fecha.value;
+    $lista.innerHTML = alumnos.map(a => {
+      const falta = S.faltas.find(f => f.alumno_id === a.id && f.clase_id === clase.id
+        && f.fecha === fecha && horaCorta(f.hora) === horaSel);
+      return `<li class="fila-pago" data-alumno="${a.id}">
+        <span class="flex1">${e(a.nombre)}${a.telefono ? ` · <small>${e(a.telefono)}</small>` : ''}</span>
+        ${falta
+          ? `<span class="chip falta-si">❌ Faltó</span><button class="btn chico liso" data-quitar-falta="${falta.id}">Deshacer</button>`
+          : `<button class="btn chico liso falta-marcar" data-marcar-falta="${a.id}">Falta de asistencia</button>`}
+      </li>`;
+    }).join('');
+    document.querySelectorAll('[data-marcar-falta]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      const { error } = await S.sb.from('faltas_alumnos').insert({
+        alumno_id: b.dataset.marcarFalta, clase_id: clase.id, profesor_id: clase.profesor_id,
+        fecha, hora: horaSel, creado_por: S.profesor.id
+      });
+      if (error) { b.disabled = false; return avisar('Error: ' + error.message, true); }
+      await cargarFaltas();
+      pintarLista();
+      if (S.vista === 'inicio') renderInicio();
+      avisar('Falta registrada.');
+    });
+    document.querySelectorAll('[data-quitar-falta]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      const { error } = await S.sb.from('faltas_alumnos').delete().eq('id', b.dataset.quitarFalta);
+      if (error) { b.disabled = false; return avisar('Error: ' + error.message, true); }
+      await cargarFaltas();
+      pintarLista();
+      if (S.vista === 'inicio') renderInicio();
+      avisar('Falta quitada.');
+    });
+  };
+
+  $fecha.onchange = () => { pintarHora(); pintarLista(); };
+  pintarHora();
+  pintarLista();
 }
 
 // Ventana de confirmación para anular la clase de un día concreto.
@@ -4447,6 +4554,87 @@ function recibosFiltrados() {
 
 function claveMes(fechaIso) {
   return String(fechaIso || '').slice(0, 7); // "2026-07"
+}
+
+// Meses a mostrar en el recap de "Faltas alumnos": desde el primero que
+// tenga alguna falta hasta el actual (o el más reciente con datos, si hay
+// alguno en el futuro) — mismo criterio que mesesConRecibos(), para que el
+// mes de hoy siempre esté aunque todavía no haya ninguna falta marcada.
+function mesesConFaltas(lista) {
+  const mesActual = claveMes(new Date().toISOString());
+  const meses = lista.map(f => claveMes(f.fecha)).sort();
+  const primerMes = meses.length ? meses[0] : mesActual;
+  const ultimoMes = meses.length && meses[meses.length - 1] > mesActual ? meses[meses.length - 1] : mesActual;
+  return mesesEntre(primerMes, ultimoMes).reverse();
+}
+
+// "Faltas alumnos" de Inicio: recap mensual de lo marcado con "Ha faltado" al
+// pasar lista en cada clase (ver pintarPaseDeLista) — mismo estilo de
+// navegación por mes que Admin Revisor, acotado a las clases propias.
+function modalFaltasAlumnos(listaInicial) {
+  let lista = listaInicial;
+  const meses = mesesConFaltas(lista);
+  const mesActual = claveMes(new Date().toISOString());
+  if (!S.mesFaltas || !meses.includes(S.mesFaltas)) S.mesFaltas = meses.includes(mesActual) ? mesActual : meses[0];
+
+  const pintar = () => {
+    const mes = S.mesFaltas;
+    const delMes = lista.filter(f => claveMes(f.fecha) === mes)
+      .sort((a, b) => b.fecha.localeCompare(a.fecha) || String(b.hora).localeCompare(String(a.hora)));
+    const alumnosDistintos = new Set(delMes.map(f => f.alumno_id)).size;
+
+    document.getElementById('fa-cuerpo').innerHTML = `
+    <div class="barra">
+      <div class="mes-nav">
+        <button class="btn chico liso" id="fa-mes-ant" ${mes === meses[meses.length - 1] ? 'disabled' : ''}>‹</button>
+        <select id="fa-mes">${meses.map(m => `<option value="${m}" ${m === mes ? 'selected' : ''}>${tituloMes(m)}</option>`).join('')}</select>
+        <button class="btn chico liso" id="fa-mes-sig" ${mes === meses[0] ? 'disabled' : ''}>›</button>
+      </div>
+      <span class="flex1"></span>
+      <small class="ayuda">${delMes.length} falta${delMes.length === 1 ? '' : 's'} · ${alumnosDistintos} alumno${alumnosDistintos === 1 ? '' : 's'}</small>
+    </div>
+    ${delMes.length === 0 ? '<div class="vacio">Nadie ha faltado este mes.</div>' : `
+    <div class="tabla-wrap"><table>
+      <thead><tr><th>Alumno</th><th>Clase</th><th>Día</th><th>Hora</th><th></th></tr></thead>
+      <tbody>
+      ${delMes.map(f => {
+        const alumno = S.alumnos.find(a => a.id === f.alumno_id);
+        const clase = S.clases.find(c => c.id === f.clase_id);
+        return `<tr>
+          <td><strong>${e(alumno?.nombre || 'Alumno eliminado')}</strong></td>
+          <td>${e(clase?.nombre || '—')}</td>
+          <td>${e(DIAS[diaSemanaDeFecha(f.fecha) - 1])} ${fmtFecha(f.fecha)}</td>
+          <td>${horaCorta(f.hora)}</td>
+          <td class="acciones"><button class="btn chico liso peligro" data-quitar-falta-recap="${f.id}" title="Quitar esta falta">✕</button></td>
+        </tr>`;
+      }).join('')}
+      </tbody>
+    </table></div>`}`;
+
+    const faMesAnt = document.getElementById('fa-mes-ant');
+    const faMesSig = document.getElementById('fa-mes-sig');
+    if (faMesAnt) faMesAnt.onclick = () => { S.mesFaltas = meses[meses.indexOf(mes) + 1]; pintar(); };
+    if (faMesSig) faMesSig.onclick = () => { S.mesFaltas = meses[meses.indexOf(mes) - 1]; pintar(); };
+    document.getElementById('fa-mes').onchange = (ev) => { S.mesFaltas = ev.target.value; pintar(); };
+    document.querySelectorAll('[data-quitar-falta-recap]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      const { error } = await S.sb.from('faltas_alumnos').delete().eq('id', b.dataset.quitarFaltaRecap);
+      if (error) { b.disabled = false; return avisar('Error: ' + error.message, true); }
+      await cargarFaltas();
+      lista = S.faltas.filter(f => f.profesor_id === S.profesor?.id);
+      pintar();
+      if (S.vista === 'inicio') renderInicio();
+      avisar('Falta quitada.');
+    });
+  };
+
+  abrirModal(`
+  <h2>Faltas de alumnos</h2>
+  <p class="ayuda">Lo que se ha marcado como "Ha faltado" al pasar lista en cada clase (ver "Alumnos" dentro de cada clase, en Horario o Clases).</p>
+  <div id="fa-cuerpo"></div>
+  <div class="pie-modal"><button class="btn liso" id="m-cancelar">Cerrar</button></div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  pintar();
 }
 
 function tituloMes(clave) {
@@ -6977,5 +7165,6 @@ function avisar(texto, esError = false) {
 }
 
 init();
+
 
 
