@@ -513,3 +513,10 @@ td.celda-fin.vacia { color: var(--gris); }
 .asistencia-barra input, .asistencia-barra select { width: auto; margin: 0; }
 .chip.falta-si { background: #fdecea; color: var(--rojo); font-weight: 600; }
 .btn.falta-marcar { border-color: var(--naranja-fuerte); color: var(--naranja-fuerte); font-weight: 600; white-space: nowrap; }
+
+/* ---- Información alumnado ---- */
+.chip-toggle {
+  border: none; cursor: pointer; font: inherit; font-weight: 600;
+  transition: filter .1s ease;
+}
+.chip-toggle:hover { filter: brightness(.95); }

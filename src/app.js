@@ -519,8 +519,13 @@ function textoCuentas(r) {
 
 async function cargarRecibos() {
   const [{ data, error }, resPagos] = await Promise.all([
+    // profesores!recibos_profesor_id_fkey: ahora que recibos tiene una SEGUNDA
+    // FK a profesores (cobrado_por), hay que decir cuál de las dos es
+    // "profesores(nombre)" o PostgREST la da por ambigua (PGRST201) y esta
+    // consulta entera falla — se queda sin cargar NINGÚN recibo, para nadie.
+    // Sigue siendo el profesor titular del recibo, no quien lo cobró.
     S.sb.from('recibos')
-      .select('*, alumnos(nombre, telefono, tutor_telefono, tutor_nombre, facturacion_nombre, madre_nombre, madre_telefono, padre_nombre, padre_telefono), profesores(nombre)')
+      .select('*, alumnos(nombre, telefono, tutor_telefono, tutor_nombre, facturacion_nombre, madre_nombre, madre_telefono, padre_nombre, padre_telefono), profesores!recibos_profesor_id_fkey(nombre)')
       .order('created_at', { ascending: false }),
     S.sb.from('recibo_pagos').select('id, recibo_id, importe, cuenta, fecha, creado_por, created_at, justificante_enviado_en, justificante_enviado_por')
       .order('created_at')
@@ -806,6 +811,7 @@ function renderVistaActual() {
   else if (S.vista === 'finanzas') renderFinanzas();
   else if (S.vista === 'reestructuracion') renderReestructuracion();
   else if (S.vista === 'admin-revisor') renderAdminRevisor();
+  else if (S.vista === 'informacion-alumnado') renderInformacionAlumnado();
   else renderAjustes();
 }
 
@@ -820,8 +826,13 @@ function renderInicio() {
   // verdad (el admin, todos) — no basta con dar la asignatura: puede ser
   // compartida con otro profesor. La base de datos completa se ve en Alumnos
   // marcando "Toda la academia".
-  const activos = S.alumnos.filter(a =>
-    a.estado === 'activo' && (S.profesor?.es_admin || misMatriculas(a).length > 0)).length;
+  const misAlumnosActivos = S.alumnos.filter(a =>
+    a.estado === 'activo' && (S.profesor?.es_admin || misMatriculas(a).length > 0));
+  const activos = misAlumnosActivos.length;
+  // Para la tarjeta "Información alumnado": a cuántos de mis alumnos les
+  // falta entregar o firmar algo (redes sociales e intolerancias son solo
+  // informativos, no cuentan como "pendiente").
+  const faltaEntregarOFirmar = misAlumnosActivos.filter(a => !a.entregado || !a.firmado).length;
   // Faltas de las clases propias (faltas_alumnos.profesor_id, copiado al
   // marcarlas — no depende de a quién esté asignada la clase AHORA MISMO).
   const misFaltas = S.faltas.filter(f => f.profesor_id === S.profesor?.id);
@@ -856,6 +867,10 @@ function renderInicio() {
   // admin (con "Justificante enviado por X" hasta que se marquen como vistos).
   const pagadosPorEnviar = esAdmin ? pagadosPorEnviarParaAdmin() : [];
   const pagosParciales = esAdmin ? pagosParcialesParaAdmin() : [];
+  // A petición de Judith: que los cobros de OTRO admin (Dani) se vean igual
+  // que los de un profesor normal — aquí no hay nada que hacer, es solo para
+  // que se enteren.
+  const cobrosAdmin = esAdmin ? cobrosAdminParaAdmin() : [];
 
   document.getElementById('contenido').innerHTML = `
   <div class="portada">
@@ -887,6 +902,11 @@ function renderInicio() {
         <div class="pc-titulo">alumno${activos === 1 ? '' : 's'} activo${activos === 1 ? '' : 's'}</div>
         <div class="pc-detalle">Ver la base de datos</div>
       </div>
+      <div class="portada-card ${faltaEntregarOFirmar ? 'alerta' : ''}" data-ir="informacion-alumnado">
+        <div class="pc-num">${faltaEntregarOFirmar}</div>
+        <div class="pc-titulo">por entregar/firmar</div>
+        <div class="pc-detalle">Información alumnado</div>
+      </div>
       ${daClases ? `
       <div class="portada-card" id="pc-faltas">
         <div class="pc-num">${faltasEsteMes.length}</div>
@@ -904,9 +924,15 @@ function renderInicio() {
         <div class="pc-detalle">Tus pósits</div>
       </div>
     </div>
-    ${esAdmin && (fichasIncompletas.length || modificacionesSinVer.length || altasFueraDeFecha.length || reactivacionesSinVer.length || bajasAsignaturaSinVer.length || pagadosPorEnviar.length || pagosParciales.length) ? `
+    ${esAdmin && (fichasIncompletas.length || modificacionesSinVer.length || altasFueraDeFecha.length || reactivacionesSinVer.length || bajasAsignaturaSinVer.length || pagadosPorEnviar.length || pagosParciales.length || cobrosAdmin.length) ? `
     <h3 class="seccion" style="margin-top:28px">Pendiente de revisar</h3>
     <div class="portada-cards">
+      ${cobrosAdmin.length ? `
+      <div class="portada-card alerta" id="pc-cobros-admin">
+        <div class="pc-num">${cobrosAdmin.length}</div>
+        <div class="pc-titulo">cobro${cobrosAdmin.length === 1 ? '' : 's'} de otro admin</div>
+        <div class="pc-detalle">Solo para que los veas</div>
+      </div>` : ''}
       ${pagadosPorEnviar.length ? `
       <div class="portada-card alerta" id="pc-pagados-enviar">
         <div class="pc-num">${pagadosPorEnviar.length}</div>
@@ -974,6 +1000,8 @@ function renderInicio() {
   if (pcFaltas) pcFaltas.onclick = () => modalFaltasAlumnos(misFaltas);
   const pcPagosParciales = document.getElementById('pc-pagos-parciales');
   if (pcPagosParciales) pcPagosParciales.onclick = () => modalPagosParcialesSinEnviar(pagosParciales);
+  const pcCobrosAdmin = document.getElementById('pc-cobros-admin');
+  if (pcCobrosAdmin) pcCobrosAdmin.onclick = () => modalCobrosAdmin(cobrosAdmin);
 }
 
 // ------------------------------------------------------- admin revisor ----
@@ -1582,6 +1610,63 @@ function modalPagadosPorEnviar(lista) {
   activarMarcarTodoVisto();
 }
 
+// ---- "Cobros de administración": a petición de Judith, que las acciones de
+// Dani (u otro admin) se vean igual que las de un profesor normal — pero
+// aquí no hay nada que HACER (a diferencia de los avisos de arriba), es solo
+// para enterarse; por eso todas las filas salen ya "resueltas" desde el
+// principio. Cubre los 3 tipos de cobro: normal, rápido y pago parcial
+// (recibo_pagos.creado_por, que ya existía). Los cobros de un profesor NO
+// admin no salen aquí — esos ya se ven en "Recibos cobrados por enviar"/
+// "Pagos parciales" de siempre; esto es solo la parte que antes no dejaba
+// ningún rastro por ser un admin quien la hacía.
+function esAdminId(id) {
+  return S.profesores.find(p => p.id === id)?.es_admin === true;
+}
+function cobrosAdminParaAdmin() {
+  const esDev = S.profesor?.es_desarrollador;
+  const items = [];
+  for (const r of S.recibos) {
+    if (r.estado !== 'pagado' || !r.cobrado_por || !esAdminId(r.cobrado_por)) continue;
+    const ref = `${r.id}|${r.fecha_pago}`;
+    const pendiente = esDev
+      ? !resueltoParaTodosLosAdmins('cobro', ref, r.cobrado_por)
+      : r.cobrado_por !== S.profesor.id && !descartado('cobro', ref);
+    if (pendiente) items.push({ tipo: r.cobro_rapido ? 'Cobro rápido' : 'Cobrado', recibo: r, ref, quien: r.cobrado_por, cuando: r.fecha_pago });
+  }
+  for (const p of S.reciboPagos) {
+    if (!p.creado_por || !esAdminId(p.creado_por)) continue;
+    const r = S.recibos.find(x => x.id === p.recibo_id);
+    if (!r) continue;
+    const ref = p.id;
+    const pendiente = esDev
+      ? !resueltoParaTodosLosAdmins('cobro', ref, p.creado_por)
+      : p.creado_por !== S.profesor.id && !descartado('cobro', ref);
+    if (pendiente) items.push({ tipo: 'Pago parcial', recibo: r, pago: p, ref, quien: p.creado_por, cuando: p.created_at });
+  }
+  return items.sort((a, b) => String(b.cuando || '').localeCompare(String(a.cuando || '')));
+}
+function filaCobroAdminAviso({ tipo, recibo: r, pago, ref, quien }) {
+  const importe = pago ? pago.importe : r.importe;
+  const cuenta = pago ? pago.cuenta : r.cuenta;
+  const fecha = pago ? pago.fecha : r.fecha_pago;
+  const cabecera = `${cabeceraReciboAviso(r)}<br><small>${e(tipo)} · <strong>${formatoImporte(importe)}€</strong>${cuenta ? ' · ' + etiquetaCuenta(cuenta) : ''}${fecha ? ' · ' + fmtFecha(String(fecha).slice(0, 10)) : ''}</small>`;
+  return filaAvisoResuelto('cobro', ref, cabecera, nombreProfesor(quien), 'Hecho por');
+}
+function modalCobrosAdmin(lista) {
+  abrirModal(`
+  <h2>Cobros de administración</h2>
+  <p class="ayuda">Cobros (normales, rápidos o pagos parciales) que ha hecho otro admin — solo para que los veas, no hace falta que hagas nada con ellos.</p>
+  <ul class="detalle-alumnos" id="av-cobros-admin">${lista.map(filaCobroAdminAviso).join('') || '<li class="ayuda">Nada nuevo.</li>'}</ul>
+  <div class="pie-modal">
+    ${botonMarcarTodoVisto()}
+    <button class="btn liso" id="m-cancelar">Cerrar</button>
+  </div>`);
+  avisoAbierto = { tipo: 'cobrosAdmin', ids: null };
+  document.getElementById('m-cancelar').onclick = cerrarAviso;
+  activarMarcarVistoAviso();
+  activarMarcarTodoVisto();
+}
+
 // Refresca en su sitio el aviso que se tenga abierto (si hay uno) cuando
 // llega un cambio en tiempo real, en vez de dejarlo con la foto fija de
 // cuando se abrió. La llama recargarTrasCambioRemoto().
@@ -1599,17 +1684,18 @@ function refrescarAvisoAbierto() {
     // Estos dos enseñan siempre la lista actual entera (no solo lo que había
     // al abrir): un profesor puede anotar otro pago mientras se mira.
     parciales: () => pagosParcialesParaAdmin(),
-    cobrados: () => pagadosPorEnviarParaAdmin()
+    cobrados: () => pagadosPorEnviarParaAdmin(),
+    cobrosAdmin: () => cobrosAdminParaAdmin()
   };
   const FILAS = {
     fichas: filaFichaIncompleta, altas: filaAltaFueraDeFecha,
     cambios: filaCambioHorario, reactivaciones: filaReactivacion, bajas: filaBajaAsignatura,
-    parciales: filaPagoParcialAviso, cobrados: filaPagadoPorEnviarAviso
+    parciales: filaPagoParcialAviso, cobrados: filaPagadoPorEnviarAviso, cobrosAdmin: filaCobroAdminAviso
   };
   const ACTIVAR = {
     fichas: activarBotonesFichasIncompletas, altas: activarBotonesAltasFueraDeFecha,
     cambios: activarBotonesCambiosHorario, reactivaciones: activarBotonesReactivaciones, bajas: activarBotonesBajasAsignatura,
-    parciales: () => {}, cobrados: () => {}
+    parciales: () => {}, cobrados: () => {}, cobrosAdmin: () => {}
   };
   const fuente = FUENTES[avisoAbierto.tipo];
   if (!fuente) return;
@@ -1817,6 +1903,102 @@ function renderAlumnos() {
 // de antes del cambio), se adivinan solos con la primera palabra como nombre
 // y el resto como apellidos — así el admin no tiene que recortar nada a mano,
 // que fue justo lo que provocó apellidos duplicados la primera vez.
+// ---- Información alumnado: intolerancias, redes sociales, entregado y
+// firmado, hiladas con la ficha (mismas columnas de `alumnos`, así que
+// cambiar algo aquí o en la ficha es lo mismo, sin nada que sincronizar
+// aparte). Mismo filtro que Alumnos (S.filtros/alumnosFiltrados): cada
+// profesor ve los suyos, con "Toda la academia" para ver el resto.
+function renderInformacionAlumnado() {
+  const esAdmin = S.profesor?.es_admin;
+  const lista = alumnosFiltrados();
+  document.getElementById('contenido').innerHTML = `
+  <div class="barra">
+    <button class="btn liso" id="ia-volver">← Inicio</button>
+    <input id="f-texto" type="search" placeholder="Buscar alumno…" value="${e(S.filtros.texto)}">
+    <select id="f-estado">
+      <option value="" ${!S.filtros.estado ? 'selected' : ''}>Todos</option>
+      <option value="activo" ${S.filtros.estado === 'activo' ? 'selected' : ''}>Activos</option>
+      <option value="baja" ${S.filtros.estado === 'baja' ? 'selected' : ''}>Bajas</option>
+    </select>
+    ${esAdmin ? `<select id="f-prof">
+      <option value="">Todos los profesores</option>
+      ${profesoresActivos().map(p => `<option value="${p.id}" ${p.id === S.filtros.profesor ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
+    </select>` : `<label class="check-inline"><input type="checkbox" id="f-todos" ${S.filtros.verTodos ? 'checked' : ''}> Toda la academia</label>`}
+    <span class="flex1"></span>
+  </div>
+  <p class="ayuda">Toca "Ninguna"/el texto para las intolerancias, y SI/NO para redes sociales, entregado y firmado — se guarda al momento y es lo mismo que ves en la ficha del alumno.</p>
+  ${lista.length === 0 ? `<div class="vacio">No hay alumnos que coincidan.</div>` : `
+  <table>
+    <thead><tr>
+      <th>Alumno</th>${esAdmin ? '<th>Profesor</th>' : ''}<th>Intolerancias</th><th>Redes sociales</th><th>Entregado</th><th>Firmado</th>
+    </tr></thead>
+    <tbody>
+    ${lista.map(a => `<tr class="${a.estado === 'baja' ? 'apagado' : ''}">
+      <td><strong>${e(a.nombre)}</strong>${a.tutor_nombre ? `<br><small>Tutor: ${e(a.tutor_nombre)}</small>` : ''}</td>
+      ${esAdmin ? `<td><small>${e(profesoresDeAlumno(a))}</small></td>` : ''}
+      <td><button type="button" class="chip-toggle chip ${a.intolerancias ? 'pendiente' : 'baja'}" data-editar-intol="${a.id}" title="Toca para editar">${a.intolerancias ? e(a.intolerancias) : 'Ninguna'}</button></td>
+      <td><button type="button" class="chip-toggle chip ${a.redes_sociales ? 'activo' : 'pendiente'}" data-toggle-campo="${a.id}|redes_sociales">${a.redes_sociales ? 'SI' : 'NO'}</button></td>
+      <td><button type="button" class="chip-toggle chip ${a.entregado ? 'activo' : 'pendiente'}" data-toggle-campo="${a.id}|entregado">${a.entregado ? 'SI' : 'NO'}</button></td>
+      <td><button type="button" class="chip-toggle chip ${a.firmado ? 'activo' : 'pendiente'}" data-toggle-campo="${a.id}|firmado">${a.firmado ? 'SI' : 'NO'}</button></td>
+    </tr>`).join('')}
+    </tbody>
+  </table>`}`;
+
+  document.getElementById('ia-volver').onclick = () => { S.vista = 'inicio'; renderMain(); };
+  const rerender = () => renderInformacionAlumnado();
+  document.getElementById('f-texto').oninput = (ev) => { S.filtros.texto = ev.target.value; conFocoPreservado(rerender); };
+  document.getElementById('f-estado').onchange = (ev) => { S.filtros.estado = ev.target.value; rerender(); };
+  const fp = document.getElementById('f-prof');
+  if (fp) fp.onchange = (ev) => { S.filtros.profesor = ev.target.value; rerender(); };
+  const ft = document.getElementById('f-todos');
+  if (ft) ft.onchange = (ev) => { S.filtros.verTodos = ev.target.checked; rerender(); };
+  document.querySelectorAll('[data-editar-intol]').forEach(b => b.onclick = () =>
+    modalEditarIntolerancias(S.alumnos.find(a => a.id === b.dataset.editarIntol)));
+  document.querySelectorAll('[data-toggle-campo]').forEach(b => b.onclick = async () => {
+    const [id, campo] = b.dataset.toggleCampo.split('|');
+    const a = S.alumnos.find(x => x.id === id);
+    if (!a) return;
+    b.disabled = true;
+    const { error } = await S.sb.from('alumnos').update({ [campo]: !a[campo] }).eq('id', id);
+    if (error) { b.disabled = false; return avisar('Error: ' + error.message, true); }
+    await cargarAlumnos();
+    renderInformacionAlumnado();
+  });
+}
+
+// Editar intolerancias desde "Información alumnado" (mismo campo que la
+// ficha: alumnos.intolerancias — null/vacío significa "Ninguna").
+function modalEditarIntolerancias(alumno) {
+  abrirModal(`
+  <h2>Intolerancias — ${e(alumno.nombre)}</h2>
+  <div class="cuenta-opciones compacta" id="ei-modo">
+    <button type="button" class="cuenta-opcion ${alumno.intolerancias ? '' : 'activa'}" data-modo="ninguna">Ninguna</button>
+    <button type="button" class="cuenta-opcion ${alumno.intolerancias ? 'activa' : ''}" data-modo="otras">Escribir</button>
+  </div>
+  <input id="ei-texto" placeholder="ej. Frutos secos, lactosa…" value="${e(alumno.intolerancias || '')}"
+    style="${alumno.intolerancias ? '' : 'display:none'}; margin-top:10px">
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+    <button class="btn primario" id="ei-guardar">Guardar</button>
+  </div>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.querySelectorAll('#ei-modo .cuenta-opcion').forEach(b => b.onclick = () => {
+    document.querySelectorAll('#ei-modo .cuenta-opcion').forEach(o => o.classList.toggle('activa', o === b));
+    const $t = document.getElementById('ei-texto');
+    $t.style.display = b.dataset.modo === 'otras' ? '' : 'none';
+    if (b.dataset.modo === 'ninguna') $t.value = '';
+  });
+  document.getElementById('ei-guardar').onclick = async () => {
+    const valor = document.getElementById('ei-texto').value.trim() || null;
+    const { error } = await S.sb.from('alumnos').update({ intolerancias: valor }).eq('id', alumno.id);
+    cerrarModal();
+    if (error) return avisar('Error: ' + error.message, true);
+    await cargarAlumnos();
+    if (S.vista === 'informacion-alumnado') renderInformacionAlumnado();
+    avisar('Intolerancias actualizadas.');
+  };
+}
+
 function separarNombreApellidos(a) {
   if (a.apellidos) {
     let base = a.nombre || '';
@@ -1942,6 +2124,20 @@ function modalAlumno(alumno) {
     </tr>`).join('')}
     </tbody>
   </table></div>`}` : ''}
+  <h3 class="seccion">Información adicional</h3>
+  <label>Intolerancias
+    <div class="cuenta-opciones compacta" id="a-intol-modo">
+      <button type="button" class="cuenta-opcion ${a.intolerancias ? '' : 'activa'}" data-modo="ninguna">Ninguna</button>
+      <button type="button" class="cuenta-opcion ${a.intolerancias ? 'activa' : ''}" data-modo="otras">Escribir</button>
+    </div>
+  </label>
+  <input id="a-intolerancias" placeholder="ej. Frutos secos, lactosa…" value="${e(a.intolerancias || '')}"
+    style="${a.intolerancias ? '' : 'display:none'}; margin-top:6px">
+  <div class="grid2" style="margin-top:12px">
+    <label class="check-inline"><input type="checkbox" id="a-redes" ${a.redes_sociales ? 'checked' : ''}> Puede salir en redes sociales</label>
+    <label class="check-inline"><input type="checkbox" id="a-entregado" ${a.entregado ? 'checked' : ''}> Entregado</label>
+    <label class="check-inline"><input type="checkbox" id="a-firmado" ${a.firmado ? 'checked' : ''}> Firmado</label>
+  </div>
   <label>Notas / observaciones<textarea id="a-notas" rows="3">${e(a.notas || '')}</textarea></label>
   <div class="pie-modal">
     ${alumno ? (a.estado === 'baja'
@@ -2013,6 +2209,12 @@ function modalAlumno(alumno) {
   document.getElementById('a-padres-sep').onchange = (ev) => {
     document.getElementById('a-padres-sep-bloque').style.display = ev.target.checked ? '' : 'none';
   };
+  document.querySelectorAll('#a-intol-modo .cuenta-opcion').forEach(b => b.onclick = () => {
+    document.querySelectorAll('#a-intol-modo .cuenta-opcion').forEach(o => o.classList.toggle('activa', o === b));
+    const $intol = document.getElementById('a-intolerancias');
+    $intol.style.display = b.dataset.modo === 'otras' ? '' : 'none';
+    if (b.dataset.modo === 'ninguna') $intol.value = '';
+  });
   const $repartoCustomBloque = document.getElementById('a-reparto-custom-bloque');
   document.getElementById('a-reparto-igual').onchange = () => { $repartoCustomBloque.style.display = 'none'; };
   document.getElementById('a-reparto-custom').onchange = () => { $repartoCustomBloque.style.display = ''; };
@@ -2074,6 +2276,10 @@ function modalAlumno(alumno) {
       fecha_alta: v('a-alta') || null,
       facturacion_nombre: v('a-fact-nombre') || null,
       facturacion_direccion: v('a-fact-dir') || null,
+      intolerancias: v('a-intolerancias') || null,
+      redes_sociales: document.getElementById('a-redes').checked,
+      entregado: document.getElementById('a-entregado').checked,
+      firmado: document.getElementById('a-firmado').checked,
       notas: v('a-notas') || null,
       descuento_extra: esAdmin ? (Number(v('a-descuento')) || 0) : undefined,
       matricula_importe: esAdmin ? (v('a-matricula') ? Number(v('a-matricula')) : null) : undefined,
@@ -5251,7 +5457,7 @@ function renderRecibos() {
         const errorPagos = await registrarPagosRestantes([r, ...hermanos], cuenta);
         if (errorPagos) { cerrarModal(); return avisar('Error al registrar el cobro: ' + errorPagos, true); }
         const { error } = await S.sb.from('recibos')
-          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta, cobro_rapido: false, pdf_path: null })
+          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta, cobro_rapido: false, cobrado_por: S.profesor.id, pdf_path: null })
           .in('id', ids);
         cerrarModal();
         if (error) return avisar('Error al marcar como cobrado: ' + error.message, true);
@@ -5278,7 +5484,7 @@ function renderRecibos() {
         const errorPagos = await registrarPagosRestantes([r, ...hermanos], cuenta);
         if (errorPagos) { cerrarModal(); return avisar('Error al registrar el cobro: ' + errorPagos, true); }
         const { error } = await S.sb.from('recibos')
-          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta, cobro_rapido: true, pdf_path: null })
+          .update({ estado: 'pagado', fecha_pago: new Date().toISOString(), cuenta, cobro_rapido: true, cobrado_por: S.profesor.id, pdf_path: null })
           .in('id', ids);
         cerrarModal();
         if (error) return avisar('Error al marcar como cobro rápido: ' + error.message, true);
@@ -5330,7 +5536,7 @@ function renderRecibos() {
     if (!(await confirmarAccion(`¿Estás segura de que quieres volver a dejar PENDIENTE el recibo de ${nombres} (${formatoImporte(r.importe)}€, ${r.concepto})? Si tenía pagos parciales anotados, también se borran (y lo que sumaran en Ingresos y gastos).`))) return;
     const ids = [r.id, ...hermanos.map(h => h.id)];
     await S.sb.from('recibo_pagos').delete().in('recibo_id', ids);
-    const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null, envio_pago_por: null, cuenta: null, cobro_rapido: false, importe_parcial: null, pdf_path: null })
+    const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null, envio_pago_por: null, cuenta: null, cobro_rapido: false, cobrado_por: null, importe_parcial: null, pdf_path: null })
       .in('id', ids);
     if (error) return avisar('Error: ' + error.message, true);
     await Promise.all([cargarRecibos(), cargarFinanzas()]);
@@ -7222,6 +7428,7 @@ function avisar(texto, esError = false) {
 }
 
 init();
+
 
 
 

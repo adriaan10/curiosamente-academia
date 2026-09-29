@@ -3319,3 +3319,66 @@ alter table public.alumnos add column matricula_importe numeric;
 -- Probado extrayendo la función tal cual del archivo (no una reescritura) y
 -- comprobando 19 casos con una sesión de admin "sucia" simulada: todo vuelve
 -- a su valor de arranque, y lo que no debe tocarse no se toca.
+
+-- FALLO GRAVE EN VIVO: recibos sin cargar para nadie, arreglado (29/09/2026).
+-- Solo app.js. Al añadir recibos.cobrado_por (ver bloque de abajo, "Cobros de
+-- administración"), la tabla recibos pasó a tener DOS claves foráneas a
+-- profesores (profesor_id y cobrado_por). La consulta de cargarRecibos()
+-- pedía el embed "profesores(nombre)" sin decir cuál de las dos — PostgREST
+-- lo dio por ambiguo (PGRST201) y la consulta entera fallaba con error, así
+-- que S.recibos se quedaba vacío para TODO EL MUNDO (escritorio ya publicado
+-- y web) desde el momento en que se aplicó esa columna, hasta este arreglo.
+-- Se cambia a "profesores!recibos_profesor_id_fkey(nombre)" (mismo patrón ya
+-- usado en cambios_horario/reactivaciones_alumno/bajas_asignatura cuando les
+-- pasó lo mismo). Detectado y arreglado en la misma sesión en que se aplicó
+-- la columna, antes de publicar nada — pero como la columna ya estaba en
+-- Supabase en vivo, cualquiera que abriera Recibos mientras tanto se
+-- encontraba la pestaña vacía. Probado en vivo (sesión real de Francis):
+-- confirmado el error exacto con una consulta directa, y confirmado que
+-- carga bien (18 recibos, 8 pagos) tras el cambio.
+
+-- Cobros de administración: que Judith vea también lo que hace Dani (29/09/2026).
+-- Aplicado en Supabase (apply_migration "cobrado_por_y_ficha_alumno"):
+--   alter table recibos add column cobrado_por uuid references profesores(id);
+--   avisos_descartados_tipo_check ampliado con 'cobro'.
+-- Adrián: Judith es admin pero Dani (que la ayuda) también, y quiere verse
+-- las acciones de Dani "como si fuera un profesor más". Fichas sin precio YA
+-- funcionaba así (matriculas.actualizado_por no distingue admin/no-admin) —
+-- lo que faltaba era el COBRO en sí (✓ Cobrado y ⚡ Cobro rápido no guardaban
+-- quién lo hizo). Ahora sí, en recibos.cobrado_por (se limpia al volver a
+-- "↩ Pendiente"). Nuevo aviso de Inicio "Cobros de otro admin", visible SOLO
+-- para admins, con el mismo patrón "Hecho por X"/"Marcar visto" que los
+-- demás — pero aquí no hay ninguna acción pendiente que hacer, es solo para
+-- enterarse. Cubre cobro normal, cobro rápido y pago parcial (recibo_pagos.
+-- creado_por, que ya existía) — SOLO cuando el que cobra es admin; los
+-- cobros de un profesor normal siguen viéndose donde ya se veían ("Recibos
+-- cobrados por enviar"/"Pagos parciales"), no se duplican aquí.
+-- Probado en vivo (sesión real de Francis, con modo admin simulado en
+-- memoria SOLO para ver la tarjeta — la escritura de "Marcar visto" la
+-- bloqueó la RLS de verdad, como debía, al no ser Francis admin de verdad):
+-- cobro normal/rápido/parcial de un admin de prueba aparecen con su tipo,
+-- importe, cuenta y fecha; el cobro de un profesor NO admin queda fuera;
+-- "Marcar visto" quita la fila. Datos de prueba borrados sin residuo.
+
+-- Ficha del alumno: intolerancias, redes sociales, entregado, firmado (29/09/2026).
+-- Aplicado en Supabase (mismo apply_migration de arriba):
+--   alumnos.intolerancias text (null/vacío = "Ninguna");
+--   alumnos.redes_sociales/entregado/firmado boolean not null default false.
+-- En la ficha: "Ninguna"/"Escribir" para intolerancias, y 3 checkboxes.
+-- Probado en vivo (Francis): guardado y recarga de la ficha, valores
+-- correctos en los dos sentidos.
+
+-- Información alumnado: nueva pantalla desde Inicio (29/09/2026).
+-- Solo app.js/styles.css, sin cambios de esquema (usa las 4 columnas de
+-- arriba). Tarjeta en Inicio (visible a CUALQUIER profesor, no solo admin;
+-- cuenta cuántos de tus alumnos activos les falta entregar o firmar).
+-- Dentro: misma lista que la pestaña Alumnos (alumnosFiltrados/S.filtros:
+-- cada profesor los suyos, con "Toda la academia" para ver el resto), con
+-- intolerancias/redes sociales/entregado/firmado en vez de asignaturas.
+-- Los 3 booleanos son chips SI/NO que cambian al tocarlos (guardado directo,
+-- sin botón de guardar aparte); intolerancias abre un modal pequeño. Como
+-- son las mismas columnas de `alumnos` que usa la ficha, cambiar algo aquí o
+-- en la ficha es lo mismo — no hay nada que sincronizar aparte.
+-- Probado en vivo (Francis): la ficha guarda y esta pantalla lo refleja al
+-- momento, y al revés (tocar aquí un chip cambia lo que luego se ve en la
+-- ficha), comprobado con updates directos a la base de datos entre medias.
