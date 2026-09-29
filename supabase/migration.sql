@@ -3382,3 +3382,11 @@ alter table public.alumnos add column matricula_importe numeric;
 -- Probado en vivo (Francis): la ficha guarda y esta pantalla lo refleja al
 -- momento, y al revés (tocar aquí un chip cambia lo que luego se ve en la
 -- ficha), comprobado con updates directos a la base de datos entre medias.
+
+-- Tarjeta "Información alumnado" en Inicio: entregar y firmar por separado (29/09/2026).
+-- Solo app.js/styles.css, sin cambios de esquema. Adrián pidió ver los dos
+-- números a la vez en el mismo recuadro en vez de un único contador
+-- combinado ("por entregar/firmar"): ahora son dos cifras independientes
+-- (sinEntregar/sinFirmar) una junto a otra, cada una con su etiqueta; un
+-- mismo alumno puede contar en las dos si le falta lo uno y lo otro. Nuevo
+-- CSS .pc-num-doble/.pc-num-etq en app/styles.css.

@@ -830,9 +830,11 @@ function renderInicio() {
     a.estado === 'activo' && (S.profesor?.es_admin || misMatriculas(a).length > 0));
   const activos = misAlumnosActivos.length;
   // Para la tarjeta "Información alumnado": a cuántos de mis alumnos les
-  // falta entregar o firmar algo (redes sociales e intolerancias son solo
-  // informativos, no cuentan como "pendiente").
-  const faltaEntregarOFirmar = misAlumnosActivos.filter(a => !a.entregado || !a.firmado).length;
+  // falta entregar y a cuántos les falta firmar, por separado (redes
+  // sociales e intolerancias son solo informativos, no cuentan como
+  // "pendiente"). Un mismo alumno puede contar en los dos a la vez.
+  const sinEntregar = misAlumnosActivos.filter(a => !a.entregado).length;
+  const sinFirmar = misAlumnosActivos.filter(a => !a.firmado).length;
   // Faltas de las clases propias (faltas_alumnos.profesor_id, copiado al
   // marcarlas — no depende de a quién esté asignada la clase AHORA MISMO).
   const misFaltas = S.faltas.filter(f => f.profesor_id === S.profesor?.id);
@@ -902,10 +904,12 @@ function renderInicio() {
         <div class="pc-titulo">alumno${activos === 1 ? '' : 's'} activo${activos === 1 ? '' : 's'}</div>
         <div class="pc-detalle">Ver la base de datos</div>
       </div>
-      <div class="portada-card ${faltaEntregarOFirmar ? 'alerta' : ''}" data-ir="informacion-alumnado">
-        <div class="pc-num">${faltaEntregarOFirmar}</div>
-        <div class="pc-titulo">por entregar/firmar</div>
-        <div class="pc-detalle">Información alumnado</div>
+      <div class="portada-card ${(sinEntregar || sinFirmar) ? 'alerta' : ''}" data-ir="informacion-alumnado">
+        <div class="pc-num-doble">
+          <div><span class="pc-num">${sinEntregar}</span><span class="pc-num-etq">por entregar</span></div>
+          <div><span class="pc-num">${sinFirmar}</span><span class="pc-num-etq">por firmar</span></div>
+        </div>
+        <div class="pc-titulo">Información alumnado</div>
       </div>
       ${daClases ? `
       <div class="portada-card" id="pc-faltas">
