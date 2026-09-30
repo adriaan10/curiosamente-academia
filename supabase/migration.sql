@@ -3503,3 +3503,12 @@ alter table public.alumnos add column matricula_importe numeric;
 -- Movimientos profesores ahora son profesoresActivos() + quien tenga
 -- puede_corregir_cobros, para que cada uno vea también lo que ha corregido
 -- él mismo — el resto de bloques les saldrá casi siempre a 0, es normal.
+
+-- Movimientos profesores: quitar al desarrollador de las pestañas (30/09/2026).
+-- Adrián pidió que en "Movimientos profesores" solo salgan Judith y los
+-- profesores — él (es_desarrollador=true) no debe aparecer como una pestaña
+-- más a vigilar, ni para Judith ni para sí mismo. Cambiado el filtro en
+-- renderMovimientosProfesores(): profesoresActivos() + quien tenga
+-- puede_corregir_cobros Y NO sea es_desarrollador. Sigue viendo la pantalla
+-- entera igual (ve_movimientos_profesores no se toca) — solo deja de tener
+-- su propia pestaña dentro.

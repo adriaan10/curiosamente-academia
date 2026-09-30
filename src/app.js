@@ -2115,9 +2115,11 @@ function renderMovimientosProfesores() {
   if (!S.profesor?.ve_movimientos_profesores) { S.vista = 'inicio'; renderInicio(); return; }
   if (!S.mesMovimientos) S.mesMovimientos = claveMes(new Date().toISOString());
   // Normalmente los que dan clases; además, quien pueda corregir cobros (hoy
-  // Judith y Adrián) también sale con su propia pestaña aunque no dé
-  // clases — para poder repasar lo que ha corregido, no solo lo que enseña.
-  const extra = S.profesores.filter(p => p.estado !== 'baja' && p.puede_corregir_cobros);
+  // Judith) también sale con su propia pestaña aunque no dé clases — para
+  // poder repasar lo que ha corregido, no solo lo que enseña. El desarrollador
+  // (Adrián) se queda fuera a propósito: esto es para que Judith vea a los
+  // profesores (y a sí misma), no para que le salga también el desarrollador.
+  const extra = S.profesores.filter(p => p.estado !== 'baja' && p.puede_corregir_cobros && !p.es_desarrollador);
   const profesores = [...profesoresActivos(), ...extra.filter(p => !profesoresActivos().some(x => x.id === p.id))]
     .sort((a, b) => a.nombre.localeCompare(b.nombre));
   if (!S.profMovimientos || !profesores.some(p => p.id === S.profMovimientos)) {
