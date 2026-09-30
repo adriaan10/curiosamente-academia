@@ -3390,3 +3390,116 @@ alter table public.alumnos add column matricula_importe numeric;
 -- (sinEntregar/sinFirmar) una junto a otra, cada una con su etiqueta; un
 -- mismo alumno puede contar en las dos si le falta lo uno y lo otro. Nuevo
 -- CSS .pc-num-doble/.pc-num-etq en app/styles.css.
+
+-- Recibo de Miguel García Hernández corregido a mano (30/09/2026, sin publicar nada).
+-- La profesora dio de alta a un alumno con "Empieza el próximo mes" (fecha_alta
+-- octubre) y generó su recibo a mano desde "Generar recibo": el concepto salió
+-- bien ("octubre + Matrícula") porque se escribió a mano, pero el selector de
+-- MES (que por defecto marca el mes de HOY, sin mirar empieza_proximo_mes) se
+-- quedó en septiembre, así que recibos.periodos guardó ['2026-09'] en vez de
+-- ['2026-10']. Riesgo real: el trigger recibo_no_duplicado compara por
+-- periodos, así que la facturación real de octubre NO lo habría detectado
+-- como ya cobrado y podría haber duplicado el cobro de octubre. Corregido a
+-- mano: `update recibos set periodos = array['2026-10'] where id =
+-- '6b0f8ce8-22a1-49c3-aa02-f17ce9a6bfec'`. No se tocó ningún otro recibo — se
+-- comprobó que era el único alumno con empieza_proximo_mes activo.
+
+-- Entregado/firmado por documento + clases con varias asignaturas +
+-- Movimientos profesores (30/09/2026, implementado y PROBADO EN VIVO con la
+-- sesión real de Adrián — sin publicar nada, esperando "publica"):
+--
+-- 1) Ficha del alumno: los antiguos alumnos.entregado/firmado (un único
+--    SI/NO cada uno) se sustituyen por 3 documentos independientes, cada uno
+--    con su propio entregado/firmado: Circular academia, Redes sociales e
+--    Intolerancias — 6 columnas booleanas nuevas (entregado_circular,
+--    firmado_circular, entregado_redes, firmado_redes,
+--    entregado_intolerancias, firmado_intolerancias). El único dato real que
+--    había (Mireia Candela Hidalgo, entregado=true) se migró a
+--    entregado_circular=true como mejor estimación — revisable a mano si no
+--    era ese documento. "Información alumnado" y la tarjeta de Inicio
+--    (sinEntregar/sinFirmar, ahora "falta alguno de los 3") actualizadas.
+--
+-- 2) Clases: ahora pueden llevar varias asignaturas (ej. un alumno suelto
+--    que da Inglés B1 mientras el resto de el grupo da B2 — "+ Añadir
+--    asignatura" en el editor de la clase). Nueva tabla clase_asignaturas
+--    (clase_id, asignatura_id), clases.asignatura_id (única, not null) se
+--    elimina tras migrar los datos existentes uno a uno a la tabla nueva.
+--    RLS calcada de clase_horarios/clase_alumnos.
+--
+-- 3) "Movimientos profesores": pantalla nueva desde Inicio, SOLO visible con
+--    profesores.ve_movimientos_profesores=true (hoy: Judith y Adrián — a
+--    propósito NO Dani, aunque también sea admin: es precisamente para que
+--    Judith vea lo que hace Dani). Una pestaña por profesor (los que dan
+--    clases de verdad, mismo criterio que profesoresActivos — los admins
+--    puros como Judith/Adrián no salen porque no hay nada que monitorizar
+--    de ellos), navegación mes a mes, 6 bloques: cambios de su horario de
+--    trabajo, clases añadidas, faltas de alumnos marcadas, alumnos dados de
+--    alta, cobros (normal/rápido/parcial, ordenados por apellido del
+--    alumno) y horas de alumno modificadas. Es un histórico de consulta —
+--    a diferencia de los avisos de Inicio, no se "marca visto" ni desaparece.
+--    Nuevo: alumnos.creado_por (quién dio de alta, solo se rellena desde
+--    ahora en adelante — los alumnos antiguos quedan en null) y la tabla
+--    profesor_horario_cambios (profesor_id, cambiado_por, fecha,
+--    resumen_antes, resumen_despues en texto legible tipo "Lunes 16:00–21:00"),
+--    con una fila nueva cada vez que se guarda el horario de trabajo y de
+--    verdad cambia algo. RLS de profesor_horario_cambios: solo lectura para
+--    is_admin() (Dani también es admin y podría leerla directo con SQL si
+--    quisiera, pero la pantalla de la app no se la enseña — ve_movimientos_
+--    profesores es solo un filtro de UI, no de seguridad a nivel de fila).
+
+-- Motivo real de los WhatsApp "Fallido", guardado pero SIN enseñar en la app (30/09/2026).
+-- Adrián preguntó por qué 4 recibos salieron "Fallido" — se vio que la
+-- función whatsapp-webhook recibe de Meta el motivo exacto (código/título/
+-- mensaje del error) pero lo tiraba sin guardarlo, así que no había forma de
+-- saber el porqué. Nueva columna recibos.whatsapp_error (jsonb) donde ahora
+-- se guarda ese detalle tal cual lo manda Meta cuando el estado es "failed".
+-- A petición expresa de Adrián: NO se muestra en ningún sitio de la app (ni
+-- chip, ni tooltip, nada) — es solo para poder consultarlo por SQL cuando
+-- Adrián pregunte. Los 4 recibos ya fallidos antes de este cambio se quedan
+-- sin ese detalle (Meta no lo vuelve a mandar a toro pasado, no se puede
+-- recuperar con retroactividad).
+-- Desplegada la función `whatsapp-webhook` (v6) con este cambio. Aviso: al
+-- desplegar la v5 se me olvidó pasar verify_jwt=false explícito (el valor
+-- por defecto de la herramienta es true) y quedó con verify_jwt=true un par
+-- de segundos — en ese estado Meta no habría podido llamar al webhook (le
+-- haría falta un JWT de Supabase que no tiene). Corregido en el acto con la
+-- v6 (verify_jwt=false, confirmado con una petición GET de prueba: responde
+-- 403 desde el código propio, no un 401 del gateway). Ventana real de
+-- exposición: un par de segundos entre ambos despliegues: impacto esperado
+-- nulo o mínimo (Meta reintenta los webhooks que fallan).
+
+-- "Corregir importe cobrado" — para el descuadre de banco (30/09/2026,
+-- implementado y PROBADO EN VIVO con un alumno/recibo de prueba, borrado
+-- después). Escenario de Adrián: se cobró un recibo de 130€ pero en el banco
+-- solo hay 120€. Hasta ahora no había forma de tocar el importe de un recibo
+-- YA cobrado desde la app ("Editar recibo" ✏️ solo sale para pendientes) ni
+-- de corregir el Ingreso que ya se había contabilizado (el trigger
+-- sincronizar_finanzas_recibo() solo actúa al CAMBIAR de estado, no si el
+-- importe cambia estando ya pagado).
+--
+-- Nuevo botón "💶 Corregir importe" en Recibos, SOLO para
+-- profesores.puede_corregir_cobros=true (hoy: Judith y Adrián, igual que
+-- ve_movimientos_profesores — a propósito NO Dani). Solo aparece en recibos
+-- pagados SIN pagos parciales (recibo_pagos) — esos ya tienen su propio
+-- flujo de corrección ("Pago incompleto"). modalCorregirCobro(r): deja
+-- cambiar el importe TOTAL (la matrícula, si la lleva, no se toca aquí); al
+-- guardar:
+--   1. recibos.importe/importe_letras se actualizan y se regenera el PDF.
+--   2. El movimiento "Mensualidad" en finanzas_movimientos (el que creó el
+--      trigger al cobrarlo) se corrige al nuevo importe — la "Matrícula" no
+--      se toca. Si por lo que sea no existiera esa fila, se crea.
+--   3. Si el alumno tiene UNA sola matrícula mensual (con varias, no se
+--      adivina a cuál corresponde y no se toca nada de la ficha), se ofrece
+--      (casilla marcada por defecto, se puede desmarcar) actualizar
+--      matriculas.tarifa al resultado de repartir la mensualidad corregida
+--      entre los meses que cubra el recibo (recibos.periodos.length).
+--   4. Queda constancia en la tabla nueva recibos_correcciones (recibo_id,
+--      alumno_id, corregido_por, fecha, importe_antes/después,
+--      tarifa_antes/después) — RLS de solo lectura para is_admin().
+--
+-- Integrado en "Movimientos profesores" como 7º bloque ("Recibos cobrados
+-- corregidos"). Como esta acción la hacen Judith/Adrián, que NO dan clases
+-- (da_clases=false, quedan fuera de profesoresActivos()), las pestañas de
+-- Movimientos profesores ahora son profesoresActivos() + quien tenga
+-- puede_corregir_cobros, para que cada uno vea también lo que ha corregido
+-- él mismo — el resto de bloques les saldrá casi siempre a 0, es normal.

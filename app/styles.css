@@ -524,3 +524,10 @@ td.celda-fin.vacia { color: var(--gris); }
   transition: filter .1s ease;
 }
 .chip-toggle:hover { filter: brightness(.95); }
+.chip.mini { padding: 2px 7px; font-size: 11px; margin-right: 4px; }
+
+/* ---- Ficha: entregado/firmado por documento ---- */
+.tabla-entregado-firmado { margin-top: 8px; max-width: 420px; }
+.tabla-entregado-firmado th, .tabla-entregado-firmado td { text-align: center; padding: 6px 10px; }
+.tabla-entregado-firmado th:first-child, .tabla-entregado-firmado td:first-child { text-align: left; }
+.tabla-entregado-firmado input[type="checkbox"] { width: 18px; height: 18px; }

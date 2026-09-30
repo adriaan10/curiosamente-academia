@@ -23,6 +23,8 @@ const S = {
   excepciones: [],
   notas: [],
   profesorHorario: [],
+  profesorHorarioCambios: [],
+  recibosCorrecciones: [],
   cambiosHorario: [],
   reactivaciones: [],
   bajasAsignatura: [],
@@ -38,6 +40,8 @@ const S = {
   filtroRevisorProfesor: '',
   vistaAdminRevisor: 'resumen',
   mesFaltas: '',
+  mesMovimientos: '',
+  profMovimientos: '',
   recibosSeleccionados: new Set(),
   vistaRosterRecibos: false,
   filtros: { texto: '', asignatura: '', estado: 'activo', profesor: '', textoRecibo: '' },
@@ -68,6 +72,8 @@ function reiniciarEstadoSesion() {
   S.excepciones = [];
   S.notas = [];
   S.profesorHorario = [];
+  S.profesorHorarioCambios = [];
+  S.recibosCorrecciones = [];
   S.cambiosHorario = [];
   S.reactivaciones = [];
   S.bajasAsignatura = [];
@@ -83,6 +89,8 @@ function reiniciarEstadoSesion() {
   S.filtroRevisorProfesor = '';
   S.vistaAdminRevisor = 'resumen';
   S.mesFaltas = '';
+  S.mesMovimientos = '';
+  S.profMovimientos = '';
   S.recibosSeleccionados = new Set();
   S.vistaRosterRecibos = false;
   S.filtros = { texto: '', asignatura: '', estado: 'activo', profesor: '', textoRecibo: '' };
@@ -183,7 +191,7 @@ async function cargarTodo() {
   else S.profAsig = profAsig.data || [];
   await Promise.all([
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(), cargarFaltas(),
-    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
+    cargarHorarioTrabajo(), cargarMovimientosHorarioTrabajo(), cargarMovimientosCorrecciones(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
     cargarFinanzas(), cargarFinanzasCategorias(), cargarCuentasSaldoInicial(), cargarAvisosDescartados()
   ]);
   backupAutomatico();
@@ -205,7 +213,7 @@ async function cargarTodo() {
 // golpe. Con los tamaños de datos de una academia esto es prácticamente
 // instantáneo, así que no compensa la complejidad de ir más fino.
 const TABLAS_TIEMPO_REAL = [
-  'alumnos', 'matriculas', 'clases', 'clase_horarios', 'clase_alumnos', 'clase_excepciones',
+  'alumnos', 'matriculas', 'clases', 'clase_asignaturas', 'clase_horarios', 'clase_alumnos', 'clase_excepciones',
   'recibos', 'notas', 'profesor_horario', 'cambios_horario', 'reactivaciones_alumno', 'bajas_asignatura', 'faltas_alumnos',
   'finanzas_movimientos', 'finanzas_categorias', 'profesores', 'asignaturas', 'profesor_asignaturas',
   'cuentas_saldo_inicial', 'avisos_descartados', 'recibo_pagos'
@@ -281,7 +289,7 @@ async function recargarTrasCambioRemoto() {
     S.sb.from('asignaturas').select('*').order('id'),
     S.sb.from('profesor_asignaturas').select('*'),
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(), cargarFaltas(),
-    cargarHorarioTrabajo(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
+    cargarHorarioTrabajo(), cargarMovimientosHorarioTrabajo(), cargarMovimientosCorrecciones(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
     cargarFinanzas(), cargarFinanzasCategorias(), cargarCuentasSaldoInicial(), cargarAvisosDescartados()
   ]);
   // Si alguna de estas tres falla (un hipo de red, el token de sesión
@@ -431,6 +439,24 @@ async function cargarHorarioTrabajo() {
   S.profesorHorario = data || [];
 }
 
+// Historial de cambios del horario de trabajo, para "Movimientos profesores"
+// (solo lo ve quien tenga profesores.ve_movimientos_profesores — la RLS ya
+// lo filtra sola, esto es solo para no pedirlo de balde al resto).
+async function cargarMovimientosHorarioTrabajo() {
+  if (!S.profesor?.ve_movimientos_profesores) { S.profesorHorarioCambios = []; return; }
+  const { data, error } = await S.sb.from('profesor_horario_cambios').select('*');
+  if (error) return avisar('Error cargando movimientos de horario: ' + error.message, true);
+  S.profesorHorarioCambios = data || [];
+}
+
+// Correcciones de recibos ya cobrados, para "Movimientos profesores".
+async function cargarMovimientosCorrecciones() {
+  if (!S.profesor?.ve_movimientos_profesores) { S.recibosCorrecciones = []; return; }
+  const { data, error } = await S.sb.from('recibos_correcciones').select('*, recibos(referencia, concepto)');
+  if (error) return avisar('Error cargando correcciones de recibos: ' + error.message, true);
+  S.recibosCorrecciones = data || [];
+}
+
 async function cargarNotas() {
   const { data, error } = await S.sb.from('notas').select('*').order('created_at', { ascending: false });
   if (error) return avisar('Error cargando notas: ' + error.message, true);
@@ -440,7 +466,7 @@ async function cargarNotas() {
 async function cargarClases() {
   const [clases, excepciones] = await Promise.all([
     S.sb.from('clases')
-      .select('*, asignaturas(nombre), profesores(nombre), clase_horarios(*), clase_alumnos(alumno_id)')
+      .select('*, clase_asignaturas(asignaturas(id, nombre)), profesores(nombre), clase_horarios(*), clase_alumnos(alumno_id)')
       .order('nombre'),
     S.sb.from('clase_excepciones').select('*').order('fecha')
   ]);
@@ -812,6 +838,7 @@ function renderVistaActual() {
   else if (S.vista === 'reestructuracion') renderReestructuracion();
   else if (S.vista === 'admin-revisor') renderAdminRevisor();
   else if (S.vista === 'informacion-alumnado') renderInformacionAlumnado();
+  else if (S.vista === 'movimientos-profesores') renderMovimientosProfesores();
   else renderAjustes();
 }
 
@@ -830,11 +857,13 @@ function renderInicio() {
     a.estado === 'activo' && (S.profesor?.es_admin || misMatriculas(a).length > 0));
   const activos = misAlumnosActivos.length;
   // Para la tarjeta "Información alumnado": a cuántos de mis alumnos les
-  // falta entregar y a cuántos les falta firmar, por separado (redes
-  // sociales e intolerancias son solo informativos, no cuentan como
-  // "pendiente"). Un mismo alumno puede contar en los dos a la vez.
-  const sinEntregar = misAlumnosActivos.filter(a => !a.entregado).length;
-  const sinFirmar = misAlumnosActivos.filter(a => !a.firmado).length;
+  // falta entregar y a cuántos les falta firmar ALGUNO de los 3 documentos
+  // (circular, redes, intolerancias), por separado. Un mismo alumno puede
+  // contar en los dos a la vez, o en uno por un documento y no por otro.
+  const sinEntregar = misAlumnosActivos.filter(a =>
+    !a.entregado_circular || !a.entregado_redes || !a.entregado_intolerancias).length;
+  const sinFirmar = misAlumnosActivos.filter(a =>
+    !a.firmado_circular || !a.firmado_redes || !a.firmado_intolerancias).length;
   // Faltas de las clases propias (faltas_alumnos.profesor_id, copiado al
   // marcarlas — no depende de a quién esté asignada la clase AHORA MISMO).
   const misFaltas = S.faltas.filter(f => f.profesor_id === S.profesor?.id);
@@ -889,6 +918,11 @@ function renderInicio() {
         <div class="pc-titulo">ADMIN REVISOR</div>
         <div class="pc-detalle">Vista completa de la academia, mes a mes</div>
       </div>
+      ${S.profesor?.ve_movimientos_profesores ? `
+      <div class="portada-card admin-revisor" data-ir="movimientos-profesores">
+        <div class="pc-titulo">MOVIMIENTOS PROFESORES</div>
+        <div class="pc-detalle">Qué ha hecho cada uno, mes a mes</div>
+      </div>` : ''}
     </div>` : ''}
     <div class="portada-cards">
       ${daClases ? `
@@ -1912,6 +1946,15 @@ function renderAlumnos() {
 // cambiar algo aquí o en la ficha es lo mismo, sin nada que sincronizar
 // aparte). Mismo filtro que Alumnos (S.filtros/alumnosFiltrados): cada
 // profesor ve los suyos, con "Toda la academia" para ver el resto.
+// Celda con los dos chips "E"/"F" (entregado/firmado) de un documento
+// concreto (circular/redes/intolerancias) — mismo campo genérico que ya usa
+// el resto de la tabla (data-toggle-campo), solo cambia el sufijo.
+function celdaEntregadoFirmado(a, sufijo) {
+  const campoE = `entregado_${sufijo}`, campoF = `firmado_${sufijo}`;
+  return `<button type="button" class="chip-toggle chip mini ${a[campoE] ? 'activo' : 'pendiente'}" data-toggle-campo="${a.id}|${campoE}" title="Entregado">E</button>
+    <button type="button" class="chip-toggle chip mini ${a[campoF] ? 'activo' : 'pendiente'}" data-toggle-campo="${a.id}|${campoF}" title="Firmado">F</button>`;
+}
+
 function renderInformacionAlumnado() {
   const esAdmin = S.profesor?.es_admin;
   const lista = alumnosFiltrados();
@@ -1930,11 +1973,11 @@ function renderInformacionAlumnado() {
     </select>` : `<label class="check-inline"><input type="checkbox" id="f-todos" ${S.filtros.verTodos ? 'checked' : ''}> Toda la academia</label>`}
     <span class="flex1"></span>
   </div>
-  <p class="ayuda">Toca "Ninguna"/el texto para las intolerancias, y SI/NO para redes sociales, entregado y firmado — se guarda al momento y es lo mismo que ves en la ficha del alumno.</p>
+  <p class="ayuda">Toca "Ninguna"/el texto para las intolerancias, SI/NO para redes sociales, y E/F (entregado/firmado) para cada documento — se guarda al momento y es lo mismo que ves en la ficha del alumno.</p>
   ${lista.length === 0 ? `<div class="vacio">No hay alumnos que coincidan.</div>` : `
-  <table>
+  <div class="tabla-wrap"><table>
     <thead><tr>
-      <th>Alumno</th>${esAdmin ? '<th>Profesor</th>' : ''}<th>Intolerancias</th><th>Redes sociales</th><th>Entregado</th><th>Firmado</th>
+      <th>Alumno</th>${esAdmin ? '<th>Profesor</th>' : ''}<th>Intolerancias</th><th>Redes sociales</th><th>Circular academia</th><th>Redes (doc.)</th><th>Intolerancias (doc.)</th>
     </tr></thead>
     <tbody>
     ${lista.map(a => `<tr class="${a.estado === 'baja' ? 'apagado' : ''}">
@@ -1942,11 +1985,12 @@ function renderInformacionAlumnado() {
       ${esAdmin ? `<td><small>${e(profesoresDeAlumno(a))}</small></td>` : ''}
       <td><button type="button" class="chip-toggle chip ${a.intolerancias ? 'pendiente' : 'baja'}" data-editar-intol="${a.id}" title="Toca para editar">${a.intolerancias ? e(a.intolerancias) : 'Ninguna'}</button></td>
       <td><button type="button" class="chip-toggle chip ${a.redes_sociales ? 'activo' : 'pendiente'}" data-toggle-campo="${a.id}|redes_sociales">${a.redes_sociales ? 'SI' : 'NO'}</button></td>
-      <td><button type="button" class="chip-toggle chip ${a.entregado ? 'activo' : 'pendiente'}" data-toggle-campo="${a.id}|entregado">${a.entregado ? 'SI' : 'NO'}</button></td>
-      <td><button type="button" class="chip-toggle chip ${a.firmado ? 'activo' : 'pendiente'}" data-toggle-campo="${a.id}|firmado">${a.firmado ? 'SI' : 'NO'}</button></td>
+      <td>${celdaEntregadoFirmado(a, 'circular')}</td>
+      <td>${celdaEntregadoFirmado(a, 'redes')}</td>
+      <td>${celdaEntregadoFirmado(a, 'intolerancias')}</td>
     </tr>`).join('')}
     </tbody>
-  </table>`}`;
+  </table></div>`}`;
 
   document.getElementById('ia-volver').onclick = () => { S.vista = 'inicio'; renderMain(); };
   const rerender = () => renderInformacionAlumnado();
@@ -2001,6 +2045,121 @@ function modalEditarIntolerancias(alumno) {
     if (S.vista === 'informacion-alumnado') renderInformacionAlumnado();
     avisar('Intolerancias actualizadas.');
   };
+}
+
+// ------------------------------------------------------ movimientos profesores
+//
+// Solo para quien tenga profesores.ve_movimientos_profesores (hoy: Judith y
+// el desarrollador) — pensada para que Judith pueda ver lo que hace Dani (y
+// cualquier otro profesor) mes a mes, sin depender de los avisos del día a
+// día (esos son para actuar y se van marcando vistos; esto es un histórico
+// de consulta, no se "resuelve" nunca).
+function soloFecha(iso) { return fmtFecha(String(iso || '').slice(0, 10)); }
+
+function movimientosDeProfesor(profesorId, mes) {
+  const enMes = (fecha) => claveMes(fecha) === mes;
+  const horarioTrabajo = S.profesorHorarioCambios
+    .filter(c => c.profesor_id === profesorId && enMes(c.fecha))
+    .sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
+  const clasesAnadidas = S.clases
+    .filter(c => c.profesor_id === profesorId && enMes(c.created_at))
+    .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+  const faltas = S.faltas
+    .filter(f => f.profesor_id === profesorId && enMes(f.fecha))
+    .map(f => ({ ...f, alumno: S.alumnos.find(a => a.id === f.alumno_id) }))
+    .sort((a, b) => compararAlumnosPorApellido(a.alumno || {}, b.alumno || {}));
+  const altas = S.alumnos
+    .filter(a => a.creado_por === profesorId && enMes(a.created_at))
+    .slice().sort(compararAlumnosPorApellido);
+  const cobros = [];
+  for (const r of S.recibos) {
+    if (r.cobrado_por !== profesorId || !enMes(r.fecha_pago)) continue;
+    cobros.push({
+      tipo: r.cobro_rapido ? 'Cobro rápido' : 'Cobrado', alumno: S.alumnos.find(a => a.id === r.alumno_id),
+      importe: r.importe, fecha: r.fecha_pago
+    });
+  }
+  for (const p of S.reciboPagos) {
+    if (p.creado_por !== profesorId || !enMes(p.created_at)) continue;
+    const r = S.recibos.find(x => x.id === p.recibo_id);
+    cobros.push({ tipo: 'Pago parcial', alumno: r ? S.alumnos.find(a => a.id === r.alumno_id) : null, importe: p.importe, fecha: p.created_at });
+  }
+  // Cobrados por orden alfabético de apellidos, tal cual se pidió.
+  cobros.sort((a, b) => compararAlumnosPorApellido(a.alumno || {}, b.alumno || {}));
+  const horasModificadas = S.cambiosHorario
+    .filter(c => c.profesor_id === profesorId && enMes(c.fecha))
+    .map(c => ({ ...c, alumno: S.alumnos.find(a => a.id === c.alumno_id) }))
+    .sort((a, b) => compararAlumnosPorApellido(a.alumno || {}, b.alumno || {}));
+  const recibosCorregidos = S.recibosCorrecciones
+    .filter(c => c.corregido_por === profesorId && enMes(c.fecha))
+    .map(c => ({ ...c, alumno: S.alumnos.find(a => a.id === c.alumno_id) }))
+    .sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
+  return { horarioTrabajo, clasesAnadidas, faltas, altas, cobros, horasModificadas, recibosCorregidos };
+}
+
+function bloqueMovimientos(titulo, filasHtml) {
+  return `<h3 class="mes-seccion">${e(titulo)} <small>${filasHtml.length}</small></h3>
+    ${filasHtml.length ? `<ul class="detalle-alumnos">${filasHtml.join('')}</ul>` : '<p class="ayuda">Nada este mes.</p>'}`;
+}
+const filaMovHorarioTrabajo = (c) => `<li><strong>${soloFecha(c.fecha)}</strong> — cambió su horario de trabajo: antes <em>${e(c.resumen_antes)}</em>, ahora <em>${e(c.resumen_despues)}</em></li>`;
+const filaMovClase = (c) => `<li><strong>${soloFecha(c.created_at)}</strong> — añadió la clase "${e(c.nombre)}" (${e(nombresAsignaturasClase(c))})</li>`;
+const filaMovFalta = (f) => `<li><strong>${fmtFecha(f.fecha)}</strong> — falta de ${e(f.alumno?.nombre || 'alumno')}</li>`;
+const filaMovAlta = (a) => `<li><strong>${soloFecha(a.created_at)}</strong> — dio de alta a ${e(a.nombre)}</li>`;
+const filaMovCobro = (c) => `<li><strong>${soloFecha(c.fecha)}</strong> — ${e(c.tipo)} de ${e(c.alumno?.nombre || 'alumno')}: <strong>${formatoImporte(c.importe)}€</strong></li>`;
+const filaMovHoras = (c) => `<li><strong>${soloFecha(c.fecha)}</strong> — horas de ${e(c.alumno?.nombre || 'alumno')}: ${c.horas_antes ?? '?'} → ${c.horas_despues ?? '?'} h/sem</li>`;
+const filaMovCorreccion = (c) => `<li><strong>${soloFecha(c.fecha)}</strong> — corrigió el recibo R-${String(c.recibos?.referencia ?? '?').padStart(5, '0')}
+  de ${e(c.alumno?.nombre || 'alumno')}: ${formatoImporte(c.importe_antes)}€ → ${formatoImporte(c.importe_despues)}€${c.tarifa_despues != null
+    ? ` (y el precio de la ficha: ${formatoImporte(c.tarifa_antes)}€ → ${formatoImporte(c.tarifa_despues)}€/mes)` : ''}</li>`;
+
+function renderMovimientosProfesores() {
+  if (!S.profesor?.ve_movimientos_profesores) { S.vista = 'inicio'; renderInicio(); return; }
+  if (!S.mesMovimientos) S.mesMovimientos = claveMes(new Date().toISOString());
+  // Normalmente los que dan clases; además, quien pueda corregir cobros (hoy
+  // Judith y Adrián) también sale con su propia pestaña aunque no dé
+  // clases — para poder repasar lo que ha corregido, no solo lo que enseña.
+  const extra = S.profesores.filter(p => p.estado !== 'baja' && p.puede_corregir_cobros);
+  const profesores = [...profesoresActivos(), ...extra.filter(p => !profesoresActivos().some(x => x.id === p.id))]
+    .sort((a, b) => a.nombre.localeCompare(b.nombre));
+  if (!S.profMovimientos || !profesores.some(p => p.id === S.profMovimientos)) {
+    S.profMovimientos = profesores[0]?.id || '';
+  }
+  const mes = S.mesMovimientos;
+  const mov = S.profMovimientos ? movimientosDeProfesor(S.profMovimientos, mes) : null;
+  const sumarMes = (delta) => {
+    let [a, m] = mes.split('-').map(Number);
+    m += delta;
+    while (m < 1) { m += 12; a--; }
+    while (m > 12) { m -= 12; a++; }
+    return `${a}-${String(m).padStart(2, '0')}`;
+  };
+
+  document.getElementById('contenido').innerHTML = `
+  <div class="barra">
+    <button class="btn liso" id="mp-volver">← Inicio</button>
+    <div class="segmentos" id="mp-tabs">
+      ${profesores.map(p => `<button class="seg ${p.id === S.profMovimientos ? 'activo' : ''}" data-tab-prof="${p.id}">${e(p.nombre)}</button>`).join('')}
+    </div>
+    <span class="flex1"></span>
+    <div class="mes-nav">
+      <button class="btn chico liso" id="mp-mes-ant">‹</button>
+      <strong>${tituloMes(mes)}</strong>
+      <button class="btn chico liso" id="mp-mes-sig">›</button>
+    </div>
+  </div>
+  ${!mov ? '<div class="vacio">No hay profesores todavía.</div>' : `
+  ${bloqueMovimientos('Cambios de su horario de trabajo', mov.horarioTrabajo.map(filaMovHorarioTrabajo))}
+  ${bloqueMovimientos('Clases añadidas', mov.clasesAnadidas.map(filaMovClase))}
+  ${bloqueMovimientos('Faltas de alumnos marcadas', mov.faltas.map(filaMovFalta))}
+  ${bloqueMovimientos('Alumnos dados de alta', mov.altas.map(filaMovAlta))}
+  ${bloqueMovimientos('Cobros (normal, rápido o parcial)', mov.cobros.map(filaMovCobro))}
+  ${bloqueMovimientos('Horas de alumno modificadas', mov.horasModificadas.map(filaMovHoras))}
+  ${bloqueMovimientos('Recibos cobrados corregidos', mov.recibosCorregidos.map(filaMovCorreccion))}
+  `}`;
+
+  document.getElementById('mp-volver').onclick = () => { S.vista = 'inicio'; renderMain(); };
+  document.querySelectorAll('[data-tab-prof]').forEach(b => b.onclick = () => { S.profMovimientos = b.dataset.tabProf; renderMovimientosProfesores(); });
+  document.getElementById('mp-mes-ant').onclick = () => { S.mesMovimientos = sumarMes(-1); renderMovimientosProfesores(); };
+  document.getElementById('mp-mes-sig').onclick = () => { S.mesMovimientos = sumarMes(1); renderMovimientosProfesores(); };
 }
 
 function separarNombreApellidos(a) {
@@ -2137,11 +2296,22 @@ function modalAlumno(alumno) {
   </label>
   <input id="a-intolerancias" placeholder="ej. Frutos secos, lactosa…" value="${e(a.intolerancias || '')}"
     style="${a.intolerancias ? '' : 'display:none'}; margin-top:6px">
-  <div class="grid2" style="margin-top:12px">
-    <label class="check-inline"><input type="checkbox" id="a-redes" ${a.redes_sociales ? 'checked' : ''}> Puede salir en redes sociales</label>
-    <label class="check-inline"><input type="checkbox" id="a-entregado" ${a.entregado ? 'checked' : ''}> Entregado</label>
-    <label class="check-inline"><input type="checkbox" id="a-firmado" ${a.firmado ? 'checked' : ''}> Firmado</label>
-  </div>
+  <label class="check-inline" style="margin-top:8px"><input type="checkbox" id="a-redes" ${a.redes_sociales ? 'checked' : ''}> Puede salir en redes sociales</label>
+  <h3 class="seccion">Entregado y firmado</h3>
+  <table class="tabla-entregado-firmado">
+    <thead><tr><th></th><th>Entregado</th><th>Firmado</th></tr></thead>
+    <tbody>
+      <tr><td>Circular academia</td>
+        <td><input type="checkbox" id="a-ent-circular" ${a.entregado_circular ? 'checked' : ''}></td>
+        <td><input type="checkbox" id="a-firm-circular" ${a.firmado_circular ? 'checked' : ''}></td></tr>
+      <tr><td>Redes sociales</td>
+        <td><input type="checkbox" id="a-ent-redes" ${a.entregado_redes ? 'checked' : ''}></td>
+        <td><input type="checkbox" id="a-firm-redes" ${a.firmado_redes ? 'checked' : ''}></td></tr>
+      <tr><td>Intolerancias</td>
+        <td><input type="checkbox" id="a-ent-intolerancias" ${a.entregado_intolerancias ? 'checked' : ''}></td>
+        <td><input type="checkbox" id="a-firm-intolerancias" ${a.firmado_intolerancias ? 'checked' : ''}></td></tr>
+    </tbody>
+  </table>
   <label>Notas / observaciones<textarea id="a-notas" rows="3">${e(a.notas || '')}</textarea></label>
   <div class="pie-modal">
     ${alumno ? (a.estado === 'baja'
@@ -2282,8 +2452,12 @@ function modalAlumno(alumno) {
       facturacion_direccion: v('a-fact-dir') || null,
       intolerancias: v('a-intolerancias') || null,
       redes_sociales: document.getElementById('a-redes').checked,
-      entregado: document.getElementById('a-entregado').checked,
-      firmado: document.getElementById('a-firmado').checked,
+      entregado_circular: document.getElementById('a-ent-circular').checked,
+      firmado_circular: document.getElementById('a-firm-circular').checked,
+      entregado_redes: document.getElementById('a-ent-redes').checked,
+      firmado_redes: document.getElementById('a-firm-redes').checked,
+      entregado_intolerancias: document.getElementById('a-ent-intolerancias').checked,
+      firmado_intolerancias: document.getElementById('a-firm-intolerancias').checked,
       notas: v('a-notas') || null,
       descuento_extra: esAdmin ? (Number(v('a-descuento')) || 0) : undefined,
       matricula_importe: esAdmin ? (v('a-matricula') ? Number(v('a-matricula')) : null) : undefined,
@@ -2326,6 +2500,7 @@ function modalAlumno(alumno) {
       const { error } = await S.sb.from('alumnos').update(fila).eq('id', alumno.id);
       if (error) return msg(errorAlumno(error));
     } else {
+      fila.creado_por = S.profesor.id;
       const { data, error } = await S.sb.from('alumnos').insert(fila).select('id').single();
       if (error) return msg(errorAlumno(error));
       alumnoId = data.id;
@@ -2960,9 +3135,20 @@ const COLORES_CLASE = ['#F28C28', '#3D7DC8', '#2E9E5B', '#8E5BBF', '#C8506A',
   '#2C6E8C', '#8E6BC8', '#3E9E7A', '#B87333', '#5C6BC0',
   '#9E3E6B', '#4A9E9E', '#8A9E2E', '#9E6B2E', '#6E4E9E'];
 
-// Color de una clase: el elegido por el usuario o, si no, uno fijo según la asignatura.
+// Una clase puede tener varias asignaturas (ej. un alumno suelto entre medio
+// de dos niveles: "Inglés B2" + "Inglés B1" en el mismo grupo).
+function idsAsignaturasClase(clase) {
+  return (clase?.clase_asignaturas || []).map(x => x.asignaturas?.id ?? x.asignatura_id).filter(id => id != null);
+}
+function nombresAsignaturasClase(clase) {
+  return (clase?.clase_asignaturas || []).map(x => x.asignaturas?.nombre).filter(Boolean).join(' + ');
+}
+
+// Color de una clase: el elegido por el usuario o, si no, uno fijo según su
+// primera asignatura.
 function colorClase(clase) {
-  const borde = clase?.color || COLORES_CLASE[(Number(clase?.asignatura_id) || 0) % COLORES_CLASE.length];
+  const primeraAsig = idsAsignaturasClase(clase)[0];
+  const borde = clase?.color || COLORES_CLASE[(Number(primeraAsig) || 0) % COLORES_CLASE.length];
   return { borde, fondo: borde + '22' }; // fondo = mismo color con transparencia suave
 }
 
@@ -2988,7 +3174,7 @@ function renderClases() {
       return `<div class="clase-tile" data-abrir-clase="${c.id}"
         style="background:${col.fondo}; border-top-color:${col.borde}">
         <div class="tile-nombre">${e(c.nombre)}</div>
-        <div class="tile-asig">${e(c.asignaturas?.nombre || '')}</div>
+        <div class="tile-asig">${e(nombresAsignaturasClase(c))}</div>
         <div class="tile-horario">${e(textoHorarios(c))}</div>
         <div class="tile-pie">${n}/${cap} alumnos${n >= cap ? ' · lleno' : ''}${esAdmin ? ' · ' + e(c.profesores?.nombre || '') : ''}</div>
       </div>`;
@@ -3021,7 +3207,7 @@ function modalDetalleClase(clase, fechaCtx) {
   <div class="detalle-cabecera" style="border-left: 5px solid ${color.borde}">
     <div>
       <h2>${e(clase.nombre)}</h2>
-      <p class="ayuda">${e(clase.asignaturas?.nombre || '')}${S.profesor?.es_admin ? ' · ' + e(clase.profesores?.nombre || '') : ''}</p>
+      <p class="ayuda">${e(nombresAsignaturasClase(clase))}${S.profesor?.es_admin ? ' · ' + e(clase.profesores?.nombre || '') : ''}</p>
     </div>
     <button class="btn btn-lapiz" id="d-editar" title="Editar la clase">✏️</button>
   </div>
@@ -3296,14 +3482,16 @@ function modalClase(clase) {
   }));
   if (!hs.length) hs.push({ dia_semana: 1, hora: '17:00', duracion_min: 60 });
   const marcados = new Set((c.clase_alumnos || []).map(ca => ca.alumno_id));
+  // Normalmente una sola asignatura; puede haber varias si el grupo mezcla
+  // niveles (ej. un alumno suelto que da Inglés B1 mientras el resto da B2).
+  const asigs = idsAsignaturasClase(c).length
+    ? [...idsAsignaturasClase(c)]
+    : [asignaturasDeProfesor(c.profesor_id || S.profesor.id)[0]?.id ?? null];
 
   abrirModal(`
   <h2>${clase ? 'Editar clase' : 'Nueva clase'}</h2>
   <div class="grid2">
     <label>Nombre del grupo *<input id="c-nombre" value="${e(c.nombre || '')}" placeholder="ej. B1 tardes"></label>
-    <label>Asignatura *<select id="c-asig">
-      ${opcionesAsignaturas(c.profesor_id || S.profesor.id, c.asignatura_id)}
-    </select></label>
     ${esAdmin ? `<label>Profesor<select id="c-prof">
       ${profesoresActivos().map(p => `<option value="${p.id}" ${p.id === (c.profesor_id || S.profesor.id) ? 'selected' : ''}>${e(p.nombre)}</option>`).join('')}
     </select></label>` : ''}
@@ -3312,6 +3500,10 @@ function modalClase(clase) {
     </select></label>
     <label>Notas<input id="c-notas" value="${e(c.notas || '')}"></label>
   </div>
+  <h3 class="seccion">Asignatura(s) *</h3>
+  <p class="ayuda">Normalmente una sola; añade otra si el grupo mezcla niveles (ej. un alumno suelto que da Inglés B1 mientras el resto da B2).</p>
+  <div id="c-asignaturas"></div>
+  <button class="btn chico" id="c-add-asig">+ Añadir asignatura</button>
   <p class="ayuda">Cuando el grupo llegue a su aforo, esa hora deja de salir como "hueco libre" en el horario.</p>
   <h3 class="seccion">Color de la clase</h3>
   <p class="ayuda">Elige uno rápido de la paleta, o "Personalizado…" para cualquier color.</p>
@@ -3431,14 +3623,35 @@ function modalClase(clase) {
     });
   };
 
+  const pintarAsignaturas = () => {
+    const pid = profesorActual();
+    document.getElementById('c-asignaturas').innerHTML = asigs.map((asigId, i) => `
+      <div class="fila-horario">
+        <select data-a-asig="${i}">${opcionesAsignaturas(pid, asigId)}</select>
+        <button class="btn chico liso" data-a-quitar="${i}" ${asigs.length === 1 ? 'disabled' : ''} title="Quitar esta asignatura">✕</button>
+      </div>`).join('');
+    const cont = document.getElementById('c-asignaturas');
+    cont.querySelectorAll('[data-a-asig]').forEach(s => s.onchange = () => { asigs[Number(s.dataset.aAsig)] = Number(s.value); });
+    cont.querySelectorAll('[data-a-quitar]').forEach(b => b.onclick = () => { asigs.splice(Number(b.dataset.aQuitar), 1); pintarAsignaturas(); });
+  };
+
   pintarHorarios();
+  pintarAsignaturas();
   pintarAlumnos();
   document.getElementById('c-buscar-alumno').oninput = pintarAlumnos;
+  document.getElementById('c-add-asig').onclick = () => {
+    const pid = profesorActual();
+    const disponibles = (S.profesor?.es_admin && !pid ? S.asignaturas : asignaturasDeProfesor(pid)).map(x => x.id);
+    asigs.push(disponibles.find(id => !asigs.includes(id)) ?? disponibles[0] ?? null);
+    pintarAsignaturas();
+  };
   const selProf = document.getElementById('c-prof');
   if (selProf) selProf.onchange = () => {
     marcados.clear();
     pintarAlumnos();
-    document.getElementById('c-asig').innerHTML = opcionesAsignaturas(selProf.value, null);
+    asigs.length = 0;
+    asigs.push(asignaturasDeProfesor(selProf.value)[0]?.id ?? null);
+    pintarAsignaturas();
     pintarAvisosHorario(); // el horario de trabajo es el del profesor recién elegido
   };
 
@@ -3465,9 +3678,16 @@ function modalClase(clase) {
         + 'Elige otra hora, u otro profesor, o ajusta el horario en Ajustes → Horario de trabajo.';
       return;
     }
+    if (asigs.some(id => !id)) {
+      document.getElementById('m-msg').textContent = 'Elige la asignatura en cada fila.';
+      return;
+    }
+    if (new Set(asigs).size !== asigs.length) {
+      document.getElementById('m-msg').textContent = 'No repitas la misma asignatura en el mismo grupo.';
+      return;
+    }
     const fila = {
       nombre,
-      asignatura_id: Number(document.getElementById('c-asig').value),
       profesor_id: pidClase,
       color: colorSel,
       capacidad: Number(document.getElementById('c-aforo').value),
@@ -3492,6 +3712,9 @@ function modalClase(clase) {
       document.getElementById('m-msg').textContent =
         err.message.startsWith('Conflicto de horario') ? '⚠ ' + err.message : 'Error al guardar: ' + err.message;
     };
+    await S.sb.from('clase_asignaturas').delete().eq('clase_id', claseId);
+    const { error: eas } = await S.sb.from('clase_asignaturas').insert(asigs.map(id => ({ clase_id: claseId, asignatura_id: id })));
+    if (eas) return mostrarError(eas);
     await S.sb.from('clase_horarios').delete().eq('clase_id', claseId);
     if (hs.length) {
       const { error: eh } = await S.sb.from('clase_horarios').insert(hs.map(h => ({ ...h, clase_id: claseId })));
@@ -5245,7 +5468,8 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables, permitirCobroRapi
       <td class="acciones">
         ${pagados
           ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>
-             <button class="btn chico liso" data-editar-cuenta="${r.id}" title="Corregir efectivo/banco">✎</button>` : '')
+             <button class="btn chico liso" data-editar-cuenta="${r.id}" title="Corregir efectivo/banco">✎</button>
+             ${S.profesor?.puede_corregir_cobros && !r.importe_parcial ? `<button class="btn chico liso" data-corregir-cobro="${r.id}" title="El importe cobrado de verdad no coincide con el del recibo (descuadre de banco)">💶 Corregir importe</button>` : ''}` : '')
           : `${permitirCobroRapido
                ? (esAdmin ? `<button class="btn chico cobro-rapido" data-cobro-rapido="${r.id}" title="Cobrado en persona al momento, sin enviar nada">⚡ Cobro rápido</button>` : '')
                : `<button class="btn chico pagar" data-pagar="${r.id}">✓ Cobrado</button>`}
@@ -5526,6 +5750,10 @@ function renderRecibos() {
         renderRecibos();
         avisar('Cuenta corregida.');
       });
+  });
+  document.querySelectorAll('[data-corregir-cobro]').forEach(b => b.onclick = () => {
+    const r = S.recibos.find(x => x.id === b.dataset.corregirCobro);
+    if (r) modalCorregirCobro(r);
   });
   document.querySelectorAll('[data-despagar]').forEach(b => b.onclick = async () => {
     const r = S.recibos.find(x => x.id === b.dataset.despagar);
@@ -5864,6 +6092,130 @@ function modalEditarRecibo(r) {
     cerrarModal();
     renderRecibos();
     avisar('Recibo actualizado y PDF regenerado.');
+  };
+}
+
+// Corregir el importe de un recibo YA cobrado, para el caso de descuadre de
+// banco (se cobró 130 y en realidad eran 120): distinto de "Editar recibo"
+// (esa es solo para pendientes) — aquí, además de corregir el recibo, se
+// corrige también el Ingreso ya contabilizado (el trigger de la base de
+// datos solo actualiza Ingresos al pasar A pagado, no si el importe cambia
+// estando ya pagado) y, si se quiere, el precio de la ficha (la matrícula ya
+// cobrada no se toca; el resto del importe se reparte entre los meses del
+// recibo para sacar la mensualidad correcta). Solo para quien tenga
+// profesores.puede_corregir_cobros (hoy: Judith y Adrián).
+function modalCorregirCobro(r) {
+  const alumno = S.alumnos.find(a => a.id === r.alumno_id);
+  const matriculaFija = Number(r.importe_matricula) || 0;
+  const numMeses = (r.periodos || []).length || 1;
+  // Solo se propone tocar la ficha si hay una única matrícula mensual: con
+  // varias, no hay forma fiable de adivinar a cuál de las asignaturas
+  // corresponde este recibo.
+  const matriculasMes = (alumno?.matriculas || []).filter(m => m.tipo_tarifa === 'mes');
+  const round2 = (n) => Math.round(n * 100) / 100;
+
+  abrirModal(`
+  <h2>Corregir importe cobrado — ${e(alumno?.nombre || '')}</h2>
+  <p class="ayuda">Para cuando el banco no cuadra con lo que dice el recibo (se cobró de más o de
+  menos de lo que se apuntó). Corrige el recibo, el Ingreso que ya se contabilizó
+  ${matriculaFija ? `(la matrícula de ${formatoImporte(matriculaFija)}€ no se toca aquí)` : ''}
+  y, si quieres, el precio de la ficha.</p>
+  <p class="ayuda">R-${String(r.referencia).padStart(5, '0')} · ${e(r.concepto)} · cobrado
+  el ${r.fecha_pago ? fmtFecha(String(r.fecha_pago).slice(0, 10)) : '—'}</p>
+  <label>Importe total cobrado de verdad (€)<input id="cor-importe" type="number" min="0" step="0.01" value="${Number(r.importe)}"></label>
+  <p class="ayuda" id="cor-detalle"></p>
+  ${matriculasMes.length === 1 ? `
+  <label class="check-inline" style="margin-top:8px">
+    <input type="checkbox" id="cor-sync-ficha" checked>
+    Actualizar también el precio de ${e(matriculasMes[0].asignaturas?.nombre || 'su ficha')} a lo que salga la mensualidad
+  </label>` : matriculasMes.length > 1
+    ? '<p class="ayuda">Este alumno tiene varias asignaturas mensuales: para no equivocarme de cuál, no toco el precio de la ficha aquí — cámbialo tú a mano si hace falta.</p>'
+    : ''}
+  <div class="pie-modal">
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+    <button class="btn primario" id="cor-guardar">Guardar corrección</button>
+  </div>
+  <p id="m-msg" class="error"></p>`);
+
+  const $importe = document.getElementById('cor-importe');
+  const $detalle = document.getElementById('cor-detalle');
+  const pintarDetalle = () => {
+    const total = Number($importe.value) || 0;
+    const mensualidad = round2(total - matriculaFija);
+    const porMes = round2(mensualidad / numMeses);
+    $detalle.textContent = numMeses > 1
+      ? `Mensualidad: ${formatoImporte(mensualidad)}€ entre ${numMeses} meses → ${formatoImporte(porMes)}€/mes`
+      : `Mensualidad: ${formatoImporte(mensualidad)}€`;
+  };
+  $importe.oninput = pintarDetalle;
+  pintarDetalle();
+
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('cor-guardar').onclick = async () => {
+    const nuevoTotal = Number($importe.value);
+    if (!nuevoTotal || nuevoTotal <= 0) {
+      document.getElementById('m-msg').textContent = 'Pon un importe válido.';
+      return;
+    }
+    if (nuevoTotal < matriculaFija) {
+      document.getElementById('m-msg').textContent = `La matrícula de este recibo ya es ${formatoImporte(matriculaFija)}€: el total no puede ser menor que eso.`;
+      return;
+    }
+    const importeAntes = Number(r.importe);
+    const nuevaMensualidad = round2(nuevoTotal - matriculaFija);
+    const nuevaTarifaPorMes = round2(nuevaMensualidad / numMeses);
+    const btn = document.getElementById('cor-guardar');
+    btn.disabled = true; btn.textContent = 'Guardando…';
+
+    const { error } = await S.sb.from('recibos').update({
+      importe: nuevoTotal, importe_letras: importeALetras(nuevoTotal), pdf_path: null
+    }).eq('id', r.id);
+    if (error) {
+      btn.disabled = false; btn.textContent = 'Guardar corrección';
+      document.getElementById('m-msg').textContent = 'Error: ' + error.message;
+      return;
+    }
+
+    // El trigger de la base de datos solo crea/borra Ingresos al CAMBIAR de
+    // estado (a pagado o desde pagado) — si ya estaba pagado y solo cambia el
+    // importe, no se entera solo: hay que corregir aquí el Ingreso de
+    // "Mensualidad" que ya se había contabilizado (la Matrícula no se toca).
+    const { data: movs } = await S.sb.from('finanzas_movimientos')
+      .select('id').eq('recibo_id', r.id).eq('origen', 'automatico').eq('categoria', 'Mensualidad');
+    if (movs && movs.length) {
+      await S.sb.from('finanzas_movimientos').update({ importe: nuevaMensualidad }).eq('id', movs[0].id);
+    } else if (nuevaMensualidad > 0) {
+      await S.sb.from('finanzas_movimientos').insert({
+        tipo: 'ingreso', categoria: 'Mensualidad', importe: nuevaMensualidad,
+        fecha: r.fecha_pago ? String(r.fecha_pago).slice(0, 10) : fechaISO(new Date()),
+        descripcion: 'Recibo R-' + String(r.referencia).padStart(5, '0'), origen: 'automatico',
+        recibo_id: r.id, cuenta: r.cuenta
+      });
+    }
+
+    let matriculaIdSync = null, tarifaAntes = null, tarifaDespues = null;
+    const chkFicha = document.getElementById('cor-sync-ficha');
+    if (matriculasMes.length === 1 && chkFicha?.checked) {
+      matriculaIdSync = matriculasMes[0].id;
+      tarifaAntes = matriculasMes[0].tarifa;
+      tarifaDespues = nuevaTarifaPorMes;
+      await S.sb.from('matriculas').update({
+        tarifa: nuevaTarifaPorMes, actualizado_por: S.profesor.id, actualizado_en: new Date().toISOString()
+      }).eq('id', matriculaIdSync);
+    }
+
+    await S.sb.from('recibos_correcciones').insert({
+      recibo_id: r.id, alumno_id: r.alumno_id, corregido_por: S.profesor.id,
+      importe_antes: importeAntes, importe_despues: nuevoTotal,
+      matricula_id: matriculaIdSync, tarifa_antes: tarifaAntes, tarifa_despues: tarifaDespues
+    });
+
+    await Promise.all([cargarRecibos(), cargarAlumnos(), cargarFinanzas(), cargarMovimientosCorrecciones()]);
+    const actualizado = S.recibos.find(x => x.id === r.id);
+    if (actualizado) await regenerarPdf(actualizado);
+    cerrarModal();
+    renderRecibos();
+    avisar('Recibo corregido' + (tarifaDespues != null ? ' y precio de la ficha actualizado.' : '.'));
   };
 }
 
@@ -7329,6 +7681,25 @@ async function renderAjustes() {
         await cargarHorarioTrabajo();
         return avisar('Error al guardar (se ha dejado el horario anterior): ' + error.message, true);
       }
+    }
+    // Para "Movimientos profesores": texto legible de antes/después, solo si
+    // de verdad cambió algo (si se abre y se guarda sin tocar nada, no se
+    // registra ruido).
+    const resumenTramos = (lista) => {
+      if (!lista.length) return '(sin horario)';
+      const porDia = {};
+      for (const t of lista) (porDia[t.dia_semana] ??= []).push(t);
+      return Object.keys(porDia).map(Number).sort((x, y) => x - y)
+        .map(d => `${DIAS[d - 1]} ${porDia[d].sort((x, y) => x.hora_inicio.localeCompare(y.hora_inicio))
+          .map(t => `${horaCorta(t.hora_inicio)}–${horaCorta(t.hora_fin)}`).join(' y ')}`).join(' · ');
+    };
+    const resumenAntes = resumenTramos(previos);
+    const resumenDespues = resumenTramos(tramos.map(t => ({ ...t })));
+    if (resumenAntes !== resumenDespues) {
+      await S.sb.from('profesor_horario_cambios').insert({
+        profesor_id: profesorHorarioId, cambiado_por: S.profesor.id, resumen_antes: resumenAntes, resumen_despues: resumenDespues
+      });
+      await cargarMovimientosHorarioTrabajo();
     }
     await cargarHorarioTrabajo();
     // Clases de este profesor que con el horario nuevo quedan fuera: no se
