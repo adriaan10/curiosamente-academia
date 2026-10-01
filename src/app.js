@@ -41,6 +41,7 @@ const S = {
   vistaAdminRevisor: 'resumen',
   mesFaltas: '',
   mesMovimientos: '',
+  modoMovimientos: '',
   profMovimientos: '',
   recibosSeleccionados: new Set(),
   vistaRosterRecibos: false,
@@ -90,6 +91,7 @@ function reiniciarEstadoSesion() {
   S.vistaAdminRevisor = 'resumen';
   S.mesFaltas = '';
   S.mesMovimientos = '';
+  S.modoMovimientos = '';
   S.profMovimientos = '';
   S.recibosSeleccionados = new Set();
   S.vistaRosterRecibos = false;
@@ -2056,50 +2058,58 @@ function modalEditarIntolerancias(alumno) {
 // de consulta, no se "resuelve" nunca).
 function soloFecha(iso) { return fmtFecha(String(iso || '').slice(0, 10)); }
 
-function movimientosDeProfesor(profesorId, mes) {
-  const enMes = (fecha) => claveMes(fecha) === mes;
+// filtro = { dia: 'YYYY-MM-DD' } para ver solo hoy, o { mes: 'YYYY-MM' } para
+// el mes entero — en cuanto pasa el día, esos mismos movimientos ya están
+// disponibles sin más en la vista de "Este mes" (son los mismos datos, solo
+// cambia cómo se filtran, no hace falta guardar nada aparte).
+function movimientosDeProfesor(profesorId, filtro) {
+  const coincide = (fecha) => filtro.dia ? String(fecha || '').slice(0, 10) === filtro.dia : claveMes(fecha) === filtro.mes;
   const horarioTrabajo = S.profesorHorarioCambios
-    .filter(c => c.profesor_id === profesorId && enMes(c.fecha))
+    .filter(c => c.profesor_id === profesorId && coincide(c.fecha))
     .sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
   const clasesAnadidas = S.clases
-    .filter(c => c.profesor_id === profesorId && enMes(c.created_at))
+    .filter(c => c.profesor_id === profesorId && coincide(c.created_at))
     .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
   const faltas = S.faltas
-    .filter(f => f.profesor_id === profesorId && enMes(f.fecha))
+    .filter(f => f.profesor_id === profesorId && coincide(f.fecha))
     .map(f => ({ ...f, alumno: S.alumnos.find(a => a.id === f.alumno_id) }))
     .sort((a, b) => compararAlumnosPorApellido(a.alumno || {}, b.alumno || {}));
   const altas = S.alumnos
-    .filter(a => a.creado_por === profesorId && enMes(a.created_at))
+    .filter(a => a.creado_por === profesorId && coincide(a.created_at))
     .slice().sort(compararAlumnosPorApellido);
   const cobros = [];
   for (const r of S.recibos) {
-    if (r.cobrado_por !== profesorId || !enMes(r.fecha_pago)) continue;
+    if (r.cobrado_por !== profesorId || !coincide(r.fecha_pago)) continue;
     cobros.push({
       tipo: r.cobro_rapido ? 'Cobro rápido' : 'Cobrado', alumno: S.alumnos.find(a => a.id === r.alumno_id),
       importe: r.importe, fecha: r.fecha_pago
     });
   }
   for (const p of S.reciboPagos) {
-    if (p.creado_por !== profesorId || !enMes(p.created_at)) continue;
+    if (p.creado_por !== profesorId || !coincide(p.created_at)) continue;
     const r = S.recibos.find(x => x.id === p.recibo_id);
     cobros.push({ tipo: 'Pago parcial', alumno: r ? S.alumnos.find(a => a.id === r.alumno_id) : null, importe: p.importe, fecha: p.created_at });
   }
   // Cobrados por orden alfabético de apellidos, tal cual se pidió.
   cobros.sort((a, b) => compararAlumnosPorApellido(a.alumno || {}, b.alumno || {}));
   const horasModificadas = S.cambiosHorario
-    .filter(c => c.profesor_id === profesorId && enMes(c.fecha))
+    .filter(c => c.profesor_id === profesorId && coincide(c.fecha))
     .map(c => ({ ...c, alumno: S.alumnos.find(a => a.id === c.alumno_id) }))
     .sort((a, b) => compararAlumnosPorApellido(a.alumno || {}, b.alumno || {}));
   const recibosCorregidos = S.recibosCorrecciones
-    .filter(c => c.corregido_por === profesorId && enMes(c.fecha))
+    .filter(c => c.corregido_por === profesorId && coincide(c.fecha))
     .map(c => ({ ...c, alumno: S.alumnos.find(a => a.id === c.alumno_id) }))
     .sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
   return { horarioTrabajo, clasesAnadidas, faltas, altas, cobros, horasModificadas, recibosCorregidos };
 }
 
-function bloqueMovimientos(titulo, filasHtml) {
-  return `<h3 class="mes-seccion">${e(titulo)} <small>${filasHtml.length}</small></h3>
-    ${filasHtml.length ? `<ul class="detalle-alumnos">${filasHtml.join('')}</ul>` : '<p class="ayuda">Nada este mes.</p>'}`;
+// Una tarjeta de color por tipo de movimiento, en vez de una lista plana en
+// blanco y negro — mismo lenguaje visual que las portada-card de Inicio.
+function bloqueMovimientos(icono, color, titulo, filasHtml) {
+  return `<div class="mov-tarjeta" style="--mov-color:${color}">
+    <h3 class="mov-titulo"><span class="mov-icono">${icono}</span>${e(titulo)}<span class="mov-contador">${filasHtml.length}</span></h3>
+    ${filasHtml.length ? `<ul class="mov-lista">${filasHtml.join('')}</ul>` : '<p class="mov-vacio">Nada por aquí.</p>'}
+  </div>`;
 }
 const filaMovHorarioTrabajo = (c) => `<li><strong>${soloFecha(c.fecha)}</strong> — cambió su horario de trabajo: antes <em>${e(c.resumen_antes)}</em>, ahora <em>${e(c.resumen_despues)}</em></li>`;
 const filaMovClase = (c) => `<li><strong>${soloFecha(c.created_at)}</strong> — añadió la clase "${e(c.nombre)}" (${e(nombresAsignaturasClase(c))})</li>`;
@@ -2114,6 +2124,7 @@ const filaMovCorreccion = (c) => `<li><strong>${soloFecha(c.fecha)}</strong> —
 function renderMovimientosProfesores() {
   if (!S.profesor?.ve_movimientos_profesores) { S.vista = 'inicio'; renderInicio(); return; }
   if (!S.mesMovimientos) S.mesMovimientos = claveMes(new Date().toISOString());
+  if (!S.modoMovimientos) S.modoMovimientos = 'dia'; // por defecto, lo de hoy
   // Normalmente los que dan clases; además, quien pueda corregir cobros (hoy
   // Judith) también sale con su propia pestaña aunque no dé clases — para
   // poder repasar lo que ha corregido, no solo lo que enseña. El desarrollador
@@ -2125,8 +2136,11 @@ function renderMovimientosProfesores() {
   if (!S.profMovimientos || !profesores.some(p => p.id === S.profMovimientos)) {
     S.profMovimientos = profesores[0]?.id || '';
   }
+  const esDia = S.modoMovimientos === 'dia';
   const mes = S.mesMovimientos;
-  const mov = S.profMovimientos ? movimientosDeProfesor(S.profMovimientos, mes) : null;
+  const hoyIso = fechaISO(new Date());
+  const filtro = esDia ? { dia: hoyIso } : { mes };
+  const mov = S.profMovimientos ? movimientosDeProfesor(S.profMovimientos, filtro) : null;
   const sumarMes = (delta) => {
     let [a, m] = mes.split('-').map(Number);
     m += delta;
@@ -2142,26 +2156,36 @@ function renderMovimientosProfesores() {
       ${profesores.map(p => `<button class="seg ${p.id === S.profMovimientos ? 'activo' : ''}" data-tab-prof="${p.id}">${e(p.nombre)}</button>`).join('')}
     </div>
     <span class="flex1"></span>
-    <div class="mes-nav">
-      <button class="btn chico liso" id="mp-mes-ant">‹</button>
-      <strong>${tituloMes(mes)}</strong>
-      <button class="btn chico liso" id="mp-mes-sig">›</button>
+    <div class="segmentos">
+      <button class="seg ${esDia ? 'activo' : ''}" data-modo-mov="dia">Hoy</button>
+      <button class="seg ${!esDia ? 'activo' : ''}" data-modo-mov="mes">Este mes</button>
     </div>
+    ${esDia
+      ? `<strong class="mov-hoy-fecha">${fmtFecha(hoyIso)}</strong>`
+      : `<div class="mes-nav">
+          <button class="btn chico liso" id="mp-mes-ant">‹</button>
+          <strong>${tituloMes(mes)}</strong>
+          <button class="btn chico liso" id="mp-mes-sig">›</button>
+        </div>`}
   </div>
   ${!mov ? '<div class="vacio">No hay profesores todavía.</div>' : `
-  ${bloqueMovimientos('Cambios de su horario de trabajo', mov.horarioTrabajo.map(filaMovHorarioTrabajo))}
-  ${bloqueMovimientos('Clases añadidas', mov.clasesAnadidas.map(filaMovClase))}
-  ${bloqueMovimientos('Faltas de alumnos marcadas', mov.faltas.map(filaMovFalta))}
-  ${bloqueMovimientos('Alumnos dados de alta', mov.altas.map(filaMovAlta))}
-  ${bloqueMovimientos('Cobros (normal, rápido o parcial)', mov.cobros.map(filaMovCobro))}
-  ${bloqueMovimientos('Horas de alumno modificadas', mov.horasModificadas.map(filaMovHoras))}
-  ${bloqueMovimientos('Recibos cobrados corregidos', mov.recibosCorregidos.map(filaMovCorreccion))}
-  `}`;
+  <div class="mov-grid">
+  ${bloqueMovimientos('🕐', '#1a6dc4', 'Horario de trabajo cambiado', mov.horarioTrabajo.map(filaMovHorarioTrabajo))}
+  ${bloqueMovimientos('📚', '#8E5BBF', 'Clases añadidas', mov.clasesAnadidas.map(filaMovClase))}
+  ${bloqueMovimientos('⚠️', '#c0392b', 'Faltas de alumnos marcadas', mov.faltas.map(filaMovFalta))}
+  ${bloqueMovimientos('✨', '#1e8e4e', 'Alumnos dados de alta', mov.altas.map(filaMovAlta))}
+  ${bloqueMovimientos('💰', '#F28C28', 'Cobros (normal, rápido o parcial)', mov.cobros.map(filaMovCobro))}
+  ${bloqueMovimientos('⏱️', '#5C1722', 'Horas de alumno modificadas', mov.horasModificadas.map(filaMovHoras))}
+  ${bloqueMovimientos('💶', '#C8506A', 'Recibos cobrados corregidos', mov.recibosCorregidos.map(filaMovCorreccion))}
+  </div>`}`;
 
   document.getElementById('mp-volver').onclick = () => { S.vista = 'inicio'; renderMain(); };
   document.querySelectorAll('[data-tab-prof]').forEach(b => b.onclick = () => { S.profMovimientos = b.dataset.tabProf; renderMovimientosProfesores(); });
-  document.getElementById('mp-mes-ant').onclick = () => { S.mesMovimientos = sumarMes(-1); renderMovimientosProfesores(); };
-  document.getElementById('mp-mes-sig').onclick = () => { S.mesMovimientos = sumarMes(1); renderMovimientosProfesores(); };
+  document.querySelectorAll('[data-modo-mov]').forEach(b => b.onclick = () => { S.modoMovimientos = b.dataset.modoMov; renderMovimientosProfesores(); });
+  const mpMesAnt = document.getElementById('mp-mes-ant');
+  const mpMesSig = document.getElementById('mp-mes-sig');
+  if (mpMesAnt) mpMesAnt.onclick = () => { S.mesMovimientos = sumarMes(-1); renderMovimientosProfesores(); };
+  if (mpMesSig) mpMesSig.onclick = () => { S.mesMovimientos = sumarMes(1); renderMovimientosProfesores(); };
 }
 
 function separarNombreApellidos(a) {

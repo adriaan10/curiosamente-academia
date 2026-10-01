@@ -531,3 +531,26 @@ td.celda-fin.vacia { color: var(--gris); }
 .tabla-entregado-firmado th, .tabla-entregado-firmado td { text-align: center; padding: 6px 10px; }
 .tabla-entregado-firmado th:first-child, .tabla-entregado-firmado td:first-child { text-align: left; }
 .tabla-entregado-firmado input[type="checkbox"] { width: 18px; height: 18px; }
+
+/* ---- Movimientos profesores: tarjetas de color en vez de listas planas ---- */
+.mov-hoy-fecha { color: var(--gris); font-weight: 600; text-transform: capitalize; }
+.mov-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 16px; }
+.mov-tarjeta {
+  background: #fff; border: 1px solid var(--borde); border-left: 5px solid var(--mov-color, var(--naranja));
+  border-radius: 12px; padding: 14px 16px;
+}
+.mov-titulo { margin: 0 0 8px; font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; color: var(--tinta); }
+.mov-icono {
+  font-size: 15px; width: 28px; height: 28px; flex: none; border-radius: 9px;
+  background: color-mix(in srgb, var(--mov-color, var(--naranja)) 16%, #fff);
+  display: flex; align-items: center; justify-content: center;
+}
+.mov-contador {
+  margin-left: auto; background: var(--mov-color, var(--naranja)); color: #fff;
+  border-radius: 99px; min-width: 20px; text-align: center; padding: 1px 8px; font-size: 12px; font-weight: 700;
+}
+.mov-lista { list-style: none; padding: 0; margin: 0; max-height: 280px; overflow-y: auto; }
+.mov-lista li { padding: 7px 2px; border-bottom: 1px solid var(--fondo); font-size: 13px; line-height: 1.4; }
+.mov-lista li:last-child { border-bottom: none; }
+.mov-lista li strong { color: var(--mov-color, var(--tinta)); }
+.mov-vacio { color: var(--gris); font-size: 13px; padding: 2px 0 0; }

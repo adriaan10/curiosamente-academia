@@ -3512,3 +3512,36 @@ alter table public.alumnos add column matricula_importe numeric;
 -- puede_corregir_cobros Y NO sea es_desarrollador. Sigue viendo la pantalla
 -- entera igual (ve_movimientos_profesores no se toca) — solo deja de tener
 -- su propia pestaña dentro.
+
+-- ⚠ Recibos mensuales automáticos DESACTIVADOS DE MOMENTO (30/09/2026).
+-- Adrián pidió quitar "los recibos automáticos cada 1 de mes" sin dar más
+-- detalle (a revisar con él qué lo motivó). Es el cron job de pg_cron
+-- "recibos-mensuales" (jobid 5, `0 6 1 1-6,10-12 *` — las 6:00 UTC del día 1
+-- de cada mes salvo jul/ago/sep) que llama a generar_recibos_mensuales().
+-- NO se ha borrado el job ni tocado la función, solo se desactivó:
+--   select cron.alter_job(job_id := 5, active := false);
+-- Así queda fácil de reactivar (select cron.alter_job(job_id := 5, active :=
+-- true);) en cuanto se decida seguir. La próxima vez que habría saltado
+-- solo era mañana, 1 de octubre — justo a tiempo. IMPORTANTE: mientras esté
+-- así, NADIE recibirá su recibo de mensualidad en automático el día 1 —
+-- habrá que generarlos a mano (como ya se hace en septiembre) o reactivar el
+-- cron antes del día 1 del mes que corresponda.
+
+-- Movimientos profesores: vista "Hoy" + rediseño visual (01/10/2026, sin
+-- publicar, PROBADO EN VIVO con capturas reales). Solo app.js/styles.css,
+-- sin cambios de esquema (son los mismos datos de siempre, solo cambia cómo
+-- se filtran).
+-- 1) Nuevo selector "Hoy" / "Este mes" (segmentos, "Hoy" por defecto): "Hoy"
+--    filtra los mismos 7 bloques a la fecha de hoy exacta en vez de al mes
+--    entero; "Este mes" es el comportamiento de siempre (navegación ‹ mes ›).
+--    movimientosDeProfesor(profesorId, filtro) generalizado: antes tomaba
+--    un `mes`, ahora toma `{dia}` o `{mes}` — no hace falta guardar nada
+--    aparte, en cuanto pasa el día esos mismos movimientos ya están
+--    disponibles sin más en "Este mes" (son la misma consulta, solo cambia
+--    el filtro de fecha).
+-- 2) Rediseño visual: Adrián dijo que estaba "muy blanco y negro, sosa".
+--    Los 7 bloques eran listas planas una debajo de otra; ahora son
+--    tarjetas de color en una rejilla (.mov-grid/.mov-tarjeta, mismo
+--    lenguaje visual que las portada-card de Inicio), cada una con su icono
+--    y color: 🕐 azul horario, 📚 morado clases, ⚠️ rojo faltas, ✨ verde
+--    altas, 💰 naranja cobros, ⏱️ granate horas, 💶 rosa recibos corregidos.
