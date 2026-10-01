@@ -3545,3 +3545,63 @@ alter table public.alumnos add column matricula_importe numeric;
 --    lenguaje visual que las portada-card de Inicio), cada una con su icono
 --    y color: 🕐 azul horario, 📚 morado clases, ⚠️ rojo faltas, ✨ verde
 --    altas, 💰 naranja cobros, ⏱️ granate horas, 💶 rosa recibos corregidos.
+
+-- Recibos: agrupar por el mes real del recibo, no por el día de emisión
+-- (01/10/2026, sin publicar, PROBADO EN VIVO). Judith avisó de que "octubre
+-- está mal contabilizado" con recibos de un mes apareciendo en el filtro del
+-- otro. Causa confirmada con datos reales: la pestaña Recibos (y el resumen
+-- de Admin Revisor) agrupaban cada recibo por `fecha_emision` (el día que se
+-- generó el PDF) en vez de por su periodo de facturación real (`periodos`/
+-- lo que dice el concepto) — casi siempre coinciden, pero no cuando se
+-- genera con unos días de diferencia:
+--   - R-00264 Lea Sánchez Terol, R-00268 Victor Aracil Beltran, R-00270
+--     Rayan El Hamoudi Legadi (ya cobrado): los tres son "Septiembre +
+--     Matrícula" pero se generaron el 1 de octubre (septiembre se genera a
+--     mano, se está poniendo al día) — salían en el filtro de Octubre.
+--   - R-00245 Miguel García Hernández: es "Octubre" (empieza el mes que
+--     viene) pero se generó el 30 de septiembre — salía en el filtro de
+--     Septiembre.
+-- Los Ingresos (finanzas_movimientos) NO estaban mal — ahí cada ingreso se
+-- fecha por cuándo se cobró de verdad (fecha_pago), que es lo correcto. El
+-- lío era solo de visualización en la pestaña Recibos.
+-- Arreglo: nuevas mesesDeRecibo(r)/reciboEsDelMes(r, mes) (usan periodos; si
+-- un recibo muy antiguo no tiene periodos, caen a fecha_emision como antes).
+-- Sustituido claveMes(r.fecha_emision) === mes por reciboEsDelMes(r, mes) en
+-- los 4 sitios que agrupaban recibos por mes: mesesConRecibos(), el filtro
+-- principal de la pestaña Recibos, la vista por alumno, y el resumen de
+-- Admin Revisor. A propósito NO se tocó recibosDeAlumnosEnMismoPaso() (junta
+-- hermanos/hermanastros del mismo LOTE de generación para enviar/cobrar
+-- juntos — ahí sí interesa la fecha de emisión real, es otra cosa distinta).
+-- Verificado con los 4 recibos reales: los 3 de septiembre desaparecen del
+-- filtro de octubre y aparecen en el de septiembre (cada uno en su pestaña
+-- según su estado — Rayan en "Pagados" por estar ya cobrado); Miguel
+-- desaparece de septiembre y aparece en "Pendientes de envío" de octubre.
+-- Mismo patrón comprobado en el resumen de Admin Revisor.
+
+-- Ingresos y gastos: agrupar TAMBIÉN por el mes del recibo, no por el día de
+-- cobro (01/10/2026, sin publicar, PROBADO EN VIVO). Tras el arreglo
+-- anterior, Adrián vio que Ingresos de octubre mostraba 1.290€ cuando
+-- debían ser 190€ — comprobado con datos reales: 1.100€ eran 23 recibos de
+-- SEPTIEMBRE cobrados hoy (poniéndose al día, septiembre es manual), y solo
+-- 190€ (125+65€) eran los dos recibos de verdad de octubre. Decisión
+-- explícita de Adrián tras explicarle el tradeoff (esto deja de cuadrar
+-- línea a línea con el banco por fecha exacta): "los recibos de septiembre
+-- aunque se cobren en otro mes, tienen que irse a las cuentas de
+-- septiembre, con los otros meses igual".
+-- Nuevas mesesDeMovimiento(m)/movimientoEsDelMes(m, mes): si el movimiento
+-- está ligado a un recibo (m.recibo_id — tanto cobro entero como pago
+-- parcial), usan mesesDeRecibo() de ESE recibo; sin recibo detrás (gastos
+-- sueltos, ajustes manuales…) se quedan con su propia fecha, que es lo
+-- único que hay. Sustituido claveMesFecha(m.fecha) por esto en los 4 sitios
+-- que agrupaban por mes en Finanzas: totalCategoriaMes(), totalTipoEnMeses(),
+-- la lista de cursos con datos, mesesConDatos() de Finanzas, y el desglose
+-- de una categoría/mes (modalCategoriaMovimientos). A propósito NO se tocó
+-- `fecha` en finanzas_movimientos (ni saldoCuenta(), que no filtra por mes:
+-- es un acumulado de siempre) — así que el saldo actual de Efectivo/Banco
+-- sigue exactamente igual (comprobado: 1.592,54€ banco / 3.917€ efectivo,
+-- mismos números que antes del cambio) y cada movimiento conserva su fecha
+-- real de cobro para poder cuadrarlo con el banco mirando la fila en
+-- concreto — lo único que cambia es a qué MES se cuenta para el resumen.
+-- Verificado en vivo: Ingresos de octubre pasó de 1.290€ a 190€, y al
+-- entrar en la categoría "Mensualidad" de octubre solo salen los dos
+-- recibos de verdad (R-00266 Pablo 125€, R-00265 Valentina 65€).

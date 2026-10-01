@@ -1205,7 +1205,7 @@ function renderRevisorResumen(filtroProf) {
   const esElMasReciente = mes === meses[0];
   const esElMasAntiguo = mes === meses[meses.length - 1];
 
-  const recibosDelMes = juntarHermanastros(S.recibos.filter(r => claveMes(r.fecha_emision) === mes
+  const recibosDelMes = juntarHermanastros(S.recibos.filter(r => reciboEsDelMes(r, mes)
     && (!filtroProf || (r.profesor_titular_ids || []).includes(filtroProf))), r => r.alumno_id);
   const sinRecibo = alumnosSinReciboDelMes(mes).filter(a => !filtroProf || matriculasDeProfesor(a, filtroProf).length > 0);
 
@@ -5072,6 +5072,18 @@ function claveMes(fechaIso) {
   return String(fechaIso || '').slice(0, 7); // "2026-07"
 }
 
+// El mes "de verdad" de un recibo es el de su periodo de facturación
+// (periodos), no el día en que se generó el PDF — casi siempre coinciden,
+// pero no cuando se genera con unos días de margen (septiembre es manual) o
+// de antelación ("empieza el próximo mes"). Sin periodos (recibos muy
+// antiguos), se usa la fecha de emisión como mejor estimación disponible.
+function mesesDeRecibo(r) {
+  return (r.periodos && r.periodos.length) ? r.periodos : [claveMes(r.fecha_emision)];
+}
+function reciboEsDelMes(r, mes) {
+  return mesesDeRecibo(r).includes(mes);
+}
+
 // Meses a mostrar en el recap de "Faltas alumnos": desde el primero que
 // tenga alguna falta hasta el actual (o el más reciente con datos, si hay
 // alguno en el futuro) — mismo criterio que mesesConRecibos(), para que el
@@ -5514,7 +5526,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables, permitirCobroRapi
 // (mismo patrón que ya usa Finanzas). Devuelve el HTML y dice qué meses hay.
 function mesesConRecibos() {
   const mesActual = claveMes(new Date().toISOString());
-  const mesesConDatos = S.recibos.map(r => claveMes(r.fecha_emision)).sort();
+  const mesesConDatos = S.recibos.flatMap(mesesDeRecibo).sort();
   const primerMes = mesesConDatos.length ? mesesConDatos[0] : mesActual;
   const ultimoMes = mesesConDatos.length && mesesConDatos[mesesConDatos.length - 1] > mesActual
     ? mesesConDatos[mesesConDatos.length - 1] : mesActual;
@@ -5551,7 +5563,7 @@ function renderRecibos() {
   const sub = (['enviar', 'pagados-enviar'].includes(S.vistaRecibos) && !esAdmin) ? 'pendientes' : (S.vistaRecibos || 'pendientes');
   const barraMes = barraMesRecibos(); // fija S.mesRecibos por defecto antes de filtrar
   const lista = recibosFiltrados();
-  const delMes = lista.filter(r => claveMes(r.fecha_emision) === S.mesRecibos);
+  const delMes = lista.filter(r => reciboEsDelMes(r, S.mesRecibos));
   const noPagados = delMes.filter(r => r.estado !== 'pagado');
   const pagados = delMes.filter(r => r.estado === 'pagado');
   // Cadena de estados: sin enviar el recibo no tiene sentido "pendiente de
@@ -5842,7 +5854,7 @@ function renderRecibosPorAlumno() {
     .sort(compararAlumnosPorApellido);
 
   const filas = alumnos.map(a => {
-    const recibo = S.recibos.find(r => r.alumno_id === a.id && claveMes(r.fecha_emision) === S.mesRecibos);
+    const recibo = S.recibos.find(r => r.alumno_id === a.id && reciboEsDelMes(r, S.mesRecibos));
     const chip = !recibo ? '<span class="chip baja">sin recibo</span>'
       : recibo.estado === 'pagado' ? '<span class="chip pagado">cobrado</span>'
       : '<span class="chip pendiente">pendiente</span>';
@@ -6963,9 +6975,24 @@ function nombreCortoMes(claveMes) {
   return MESES[Number(claveMes.split('-')[1]) - 1].slice(0, 3);
 }
 
+// El mes "de verdad" de un movimiento de Ingresos y gastos ligado a un
+// recibo (recibo_id, tanto si es el cobro entero como un pago parcial) es
+// el periodo de facturación de ESE recibo, no el día en que entró el dinero
+// — mismo criterio que se aplicó a la pestaña Recibos (ver reciboEsDelMes):
+// así un recibo de septiembre se contabiliza en septiembre aunque se cobre
+// más tarde. Sin recibo detrás (gastos sueltos, ajustes manuales…) se usa
+// su propia fecha, que es lo único que hay.
+function mesesDeMovimiento(m) {
+  const recibo = m.recibo_id ? S.recibos.find(r => r.id === m.recibo_id) : null;
+  return recibo ? mesesDeRecibo(recibo) : [claveMesFecha(m.fecha)];
+}
+function movimientoEsDelMes(m, mes) {
+  return mesesDeMovimiento(m).includes(mes);
+}
+
 function totalCategoriaMes(tipo, categoria, claveMes, cuenta = null) {
   return S.finanzas
-    .filter(m => m.tipo === tipo && m.categoria === categoria && claveMesFecha(m.fecha) === claveMes
+    .filter(m => m.tipo === tipo && m.categoria === categoria && movimientoEsDelMes(m, claveMes)
       && (!cuenta || m.cuenta === cuenta))
     .reduce((s, m) => s + Number(m.importe), 0);
 }
@@ -6973,7 +7000,7 @@ function totalCategoriaMes(tipo, categoria, claveMes, cuenta = null) {
 function totalTipoEnMeses(tipo, clavesMes, cuenta = null) {
   const set = new Set(clavesMes);
   return S.finanzas
-    .filter(m => m.tipo === tipo && set.has(claveMesFecha(m.fecha)) && (!cuenta || m.cuenta === cuenta))
+    .filter(m => m.tipo === tipo && mesesDeMovimiento(m).some(mm => set.has(mm)) && (!cuenta || m.cuenta === cuenta))
     .reduce((s, m) => s + Number(m.importe), 0);
 }
 
@@ -7064,7 +7091,7 @@ function renderFinanzas() {
 
   if (modo === 'anual') {
     const cursoAct = cursoActual();
-    const cursosConDatos = S.finanzas.map(m => cursoDeClaveMes(claveMesFecha(m.fecha)));
+    const cursosConDatos = S.finanzas.flatMap(mesesDeMovimiento).map(cursoDeClaveMes);
     const iniciosConDatos = cursosConDatos.map(c => Number(c.split('-')[0]));
     const inicioActual = Number(cursoAct.split('-')[0]);
     const primerInicio = iniciosConDatos.length ? Math.min(inicioActual, ...iniciosConDatos) : inicioActual;
@@ -7114,7 +7141,7 @@ function renderFinanzas() {
     </table></div>`;
   } else {
     const mesActual = claveMesFecha(new Date().toISOString());
-    const mesesConDatos = S.finanzas.map(m => claveMesFecha(m.fecha)).sort();
+    const mesesConDatos = S.finanzas.flatMap(mesesDeMovimiento).sort();
     const primerMes = mesesConDatos.length ? mesesConDatos[0] : mesActual;
     // El límite de avance normal es el mes actual, pero si hay algún movimiento
     // metido con fecha futura (p. ej. el alquiler de agosto apuntado en julio),
@@ -7349,7 +7376,7 @@ function modalFijarSaldoInicial(cuenta) {
 // "Eliminar esta columna" la usa para no tocar la otra cuenta (ver abajo).
 function modalCategoriaMovimientos(tipo, categoria, claveMes, filtroCuenta = null) {
   const lista = S.finanzas
-    .filter(m => m.tipo === tipo && m.categoria === categoria && claveMesFecha(m.fecha) === claveMes)
+    .filter(m => m.tipo === tipo && m.categoria === categoria && movimientoEsDelMes(m, claveMes))
     .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
   const total = lista.reduce((s, m) => s + Number(m.importe), 0);
   // Dónde está esta columna ahora mismo: reflejado con dos checkboxes
