@@ -3652,3 +3652,27 @@ alter table public.alumnos add column matricula_importe numeric;
 --    confirmación "¿Guardar igualmente?" (no bloquea, por si se apunta a
 --    medias). Alumnos activos con teléfono a 8 dígitos hoy: África Ibañez
 --    Moscoso (63559445) y Sergio Lario Romero (66733485), por corregir a mano.
+
+-- Cobro rápido también tiene justificante, con opción Papel/WhatsApp
+-- (05/10/2026, probado en vivo con un recibo de prueba cobrado de verdad por
+-- la interfaz — borrado después; sin publicar). A petición de Adrián:
+-- 1) Un cobro rápido (que se salta el envío del RECIBO) ahora aparece en
+--    "Justificantes por enviar" Y en "Cobrados", igual que un cobrado normal,
+--    hasta que se le dé el justificante. Quitado `!r.cobro_rapido` /
+--    `|| r.cobro_rapido` de: pestaña Recibos (pagadosPorEnviar), resumen de
+--    Admin Revisor (pagadosPorEnviar/cobrados) y el aviso de Inicio "Recibos
+--    cobrados por enviar" (pagadosPorEnviarParaAdmin). Aviso: los cobros
+--    rápidos ANTERIORES (los de hoy y de días pasados) también pasan a salir
+--    como "por enviar" hasta que se les dé justificante.
+-- 2) Nuevo botón "📤 Justificante" en cada recibo cobrado sin justificante
+--    (modalJustificantePago): "📄 Papel" abre el PDF PAGADO para imprimirlo y
+--    lo marca como dado; "💬 Enviar por WhatsApp" abre el envío de siempre
+--    (modalEnvioMasivo con 1, con confirmación). "Seleccionar todos" + "Enviar
+--    seleccionados" no cambia: manda todo por WhatsApp (ahora incluye los
+--    cobros rápidos, que ya están en esa lista).
+-- 3) Nueva columna recibos.justificante_papel (boolean): el papel reutiliza
+--    fecha_envio_whatsapp_pago/envio_pago_por para salir de "por enviar" (y
+--    para el "Hecho por X" del otro admin), y este flag solo cambia el texto
+--    ("Cobro rápido · justificante en papel" / "Dado en papel por X" en el
+--    aviso). "↩ Pendiente" lo resetea. estadoRecibo(): COBRO RÁPIDO · por
+--    enviar → Cobro rápido y enviado / en papel.

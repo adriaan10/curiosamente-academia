@@ -1212,8 +1212,8 @@ function renderRevisorResumen(filtroProf) {
   const porEnviar = recibosDelMes.filter(r => r.estado !== 'pagado' && !r.importe_parcial && !r.fecha_envio_whatsapp);
   const pendientesPago = recibosDelMes.filter(r => r.estado !== 'pagado' && !r.importe_parcial && r.fecha_envio_whatsapp);
   const parciales = recibosDelMes.filter(r => r.estado !== 'pagado' && r.importe_parcial);
-  const pagadosPorEnviar = recibosDelMes.filter(r => r.estado === 'pagado' && !r.fecha_envio_whatsapp_pago && !r.cobro_rapido);
-  const cobrados = recibosDelMes.filter(r => r.estado === 'pagado' && (r.fecha_envio_whatsapp_pago || r.cobro_rapido));
+  const pagadosPorEnviar = recibosDelMes.filter(r => r.estado === 'pagado' && !r.fecha_envio_whatsapp_pago);
+  const cobrados = recibosDelMes.filter(r => r.estado === 'pagado' && r.fecha_envio_whatsapp_pago);
 
   // Cobrado = lo de los recibos ya pagados + lo que llevan pagado los de pago parcial
   const totalCobrado = [...cobrados, ...pagadosPorEnviar].reduce((s, r) => s + Number(r.importe), 0)
@@ -1573,7 +1573,7 @@ function pagadosPorEnviarParaAdmin() {
   const esDev = S.profesor?.es_desarrollador;
   const items = [];
   for (const r of S.recibos) {
-    if (r.estado !== 'pagado' || r.cobro_rapido) continue;
+    if (r.estado !== 'pagado') continue;
     if (!r.fecha_envio_whatsapp_pago) { items.push({ recibo: r, resuelto: false }); continue; }
     if (!r.envio_pago_por) continue;
     const ref = `${r.id}|${r.fecha_envio_whatsapp_pago}`;
@@ -1602,7 +1602,7 @@ function filaPagoParcialAviso({ recibo: r, resuelto, ref, quien }) {
 }
 function filaPagadoPorEnviarAviso({ recibo: r, resuelto, ref, quien }) {
   const cabecera = `${cabeceraReciboAviso(r)}<br><small>${formatoImporte(r.importe)}€${textoCuentas(r) ? ' · ' + textoCuentas(r) : ''}${r.fecha_pago ? ' · cobrado el ' + fmtFecha(String(r.fecha_pago).slice(0, 10)) : ''}</small>`;
-  if (resuelto) return filaAvisoResuelto('pago_por_enviar', ref, cabecera, nombreProfesor(quien), 'Justificante enviado por');
+  if (resuelto) return filaAvisoResuelto('pago_por_enviar', ref, cabecera, nombreProfesor(quien), r.justificante_papel ? 'Justificante dado en papel por' : 'Justificante enviado por');
   return `<li data-item="${r.id}">${cabecera} <span class="chip justificante-no">⚠ Justificante sin enviar</span></li>`;
 }
 
@@ -5190,10 +5190,15 @@ function estadoRecibo(r, pagados) {
       ? { clase: 'envio-no', texto: 'Pendiente por cobrar' }
       : { clase: 'pendiente', texto: 'Pendiente de envío' };
   }
-  if (r.cobro_rapido) return { clase: 'cobro-rapido', texto: 'COBRO RÁPIDO' };
-  return r.fecha_envio_whatsapp_pago
-    ? { clase: 'pagado', texto: 'Cobrado y enviado' }
-    : { clase: 'envio-no', texto: 'Cobrado y por enviar' };
+  // Un cobro rápido también tiene justificante de pago (se puede mandar por
+  // WhatsApp o dar en papel); lo único distinto es que se saltó el envío del
+  // recibo original.
+  if (r.cobro_rapido && !r.fecha_envio_whatsapp_pago) return { clase: 'cobro-rapido', texto: 'COBRO RÁPIDO · por enviar' };
+  const base = r.cobro_rapido ? 'Cobro rápido' : 'Cobrado';
+  if (r.fecha_envio_whatsapp_pago) {
+    return { clase: r.cobro_rapido ? 'cobro-rapido' : 'pagado', texto: r.justificante_papel ? `${base} · justificante en papel` : `${base} y enviado` };
+  }
+  return { clase: 'envio-no', texto: 'Cobrado y por enviar' };
 }
 
 // Modal pequeño de "¿efectivo o banco?", reutilizado tanto al marcar un
@@ -5255,10 +5260,59 @@ function modalElegirCuentaCobro(titulo, mensaje, onElegir) {
 // directo a Cobrado, sin justificante pendiente. Aparte del cobro normal
 // para no liarlos: pregunta Efectivo/Banco y el resultado se marca con
 // `cobro_rapido: true` para que se identifique luego en la pestaña de Cobrados.
+// Justificante de pago de UN recibo ya cobrado (cobro normal o rápido): se
+// elige cómo se le da. "Enviar todos" (casillas + botón de arriba en
+// Justificantes por enviar) sigue mandando todo por WhatsApp; esto es para el
+// caso suelto — en papel (se abre el PDF para imprimirlo y queda marcado como
+// dado) o por WhatsApp (el mismo envío de siempre, con confirmación).
+function modalJustificantePago(r) {
+  abrirModal(`
+  <h2>Justificante de pago — ${e(r.alumnos?.nombre || '')}</h2>
+  <p class="ayuda">R-${String(r.referencia).padStart(5, '0')} · ${e(r.concepto)} · <strong>${formatoImporte(r.importe)}€</strong>${r.cobro_rapido ? ' · cobro rápido' : ''}. ¿Cómo se lo das?</p>
+  <div class="pie-modal columna">
+    <button class="btn primario" id="jp-papel">📄 Papel</button>
+    <button class="btn primario" id="jp-whatsapp">💬 Enviar por WhatsApp</button>
+    <button class="btn liso" id="m-cancelar">Cancelar</button>
+  </div>
+  <p id="m-msg" class="error"></p>`);
+  document.getElementById('m-cancelar').onclick = cerrarModal;
+  document.getElementById('jp-whatsapp').onclick = () => modalEnvioMasivo([r], 'pago');
+  document.getElementById('jp-papel').onclick = async () => {
+    const btn = document.getElementById('jp-papel');
+    btn.disabled = true;
+    try {
+      // Tras cobrar, pdf_path se vacía: el PDF se rehace ya con el sello PAGADO.
+      let ruta = r.pdf_path;
+      let abierto = ruta ? await window.api.openPdf(ruta) : false;
+      if (!abierto) {
+        ruta = await regenerarPdf(r);
+        abierto = await window.api.openPdf(ruta);
+      }
+      if (!abierto) throw new Error('no se pudo abrir el PDF');
+    } catch (err) {
+      btn.disabled = false;
+      document.getElementById('m-msg').textContent = 'No se pudo abrir el PDF para imprimirlo: ' + err.message;
+      return;
+    }
+    const { error } = await S.sb.from('recibos').update({
+      fecha_envio_whatsapp_pago: new Date().toISOString(), envio_pago_por: S.profesor.id, justificante_papel: true
+    }).eq('id', r.id);
+    if (error) {
+      btn.disabled = false;
+      document.getElementById('m-msg').textContent = 'Se abrió el PDF pero no se pudo marcar como dado: ' + error.message;
+      return;
+    }
+    cerrarModal();
+    await cargarRecibos();
+    renderRecibos();
+    avisar('Justificante marcado como dado en papel.');
+  };
+}
+
 function modalCobroRapido(mensaje, onElegir) {
   abrirModal(`
   <h2>⚡ Cobro rápido</h2>
-  <p class="ayuda">${mensaje} No se enviará ningún justificante — se marcará como cobrado directamente.</p>
+  <p class="ayuda">${mensaje} No se enviará el recibo: se marca como cobrado directamente y su justificante de pago queda en "Justificantes por enviar" (WhatsApp o papel).</p>
   <div class="pie-modal columna">
     <button class="btn cobro-rapido" id="cr-efectivo">💶 Efectivo</button>
     <button class="btn cobro-rapido" id="cr-banco">🏦 Banco</button>
@@ -5514,7 +5568,8 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables, permitirCobroRapi
           : ''}</div></td>
       <td class="acciones">
         ${pagados
-          ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>
+          ? (esAdmin ? `${r.fecha_envio_whatsapp_pago ? '' : `<button class="btn chico enviar-parcial" data-justificante="${r.id}" title="Dar el justificante de pago: en papel o por WhatsApp">📤 Justificante</button>`}
+             <button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>
              <button class="btn chico liso" data-editar-cuenta="${r.id}" title="Corregir efectivo/banco">✎</button>
              ${S.profesor?.puede_corregir_cobros && !r.importe_parcial ? `<button class="btn chico liso" data-corregir-cobro="${r.id}" title="El importe cobrado de verdad no coincide con el del recibo (descuadre de banco)">💶 Corregir importe</button>` : ''}` : '')
           : `${permitirCobroRapido
@@ -5587,7 +5642,7 @@ function renderRecibos() {
   const sinParcial = noPagados.filter(r => !r.importe_parcial);
   const porEnviar = sinParcial.filter(r => !r.fecha_envio_whatsapp);
   const pendientesPago = sinParcial.filter(r => r.fecha_envio_whatsapp);
-  const pagadosPorEnviar = pagados.filter(r => !r.fecha_envio_whatsapp_pago && !r.cobro_rapido);
+  const pagadosPorEnviar = pagados.filter(r => !r.fecha_envio_whatsapp_pago);
   // La pestaña activa (si es una que se puede enviar en bloque) y su tipo de
   // envío, para que el bloque de casillas/selección de abajo sirva para las
   // tres — "Pagos parciales" solo entra aquí para el admin (es el único que
@@ -5815,7 +5870,7 @@ function renderRecibos() {
     if (!(await confirmarAccion(`¿Estás segura de que quieres volver a dejar PENDIENTE el recibo de ${nombres} (${formatoImporte(r.importe)}€, ${r.concepto})? Si tenía pagos parciales anotados, también se borran (y lo que sumaran en Ingresos y gastos).`))) return;
     const ids = [r.id, ...hermanos.map(h => h.id)];
     await S.sb.from('recibo_pagos').delete().in('recibo_id', ids);
-    const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null, envio_pago_por: null, cuenta: null, cobro_rapido: false, cobrado_por: null, importe_parcial: null, pdf_path: null })
+    const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null, envio_pago_por: null, justificante_papel: false, cuenta: null, cobro_rapido: false, cobrado_por: null, importe_parcial: null, pdf_path: null })
       .in('id', ids);
     if (error) return avisar('Error: ' + error.message, true);
     await Promise.all([cargarRecibos(), cargarFinanzas()]);
@@ -5833,6 +5888,10 @@ function renderRecibos() {
   });
   document.querySelectorAll('[data-editar-recibo]').forEach(b => b.onclick = () =>
     modalEditarRecibo(S.recibos.find(x => x.id === b.dataset.editarRecibo)));
+  document.querySelectorAll('[data-justificante]').forEach(b => b.onclick = () => {
+    const r = S.recibos.find(x => x.id === b.dataset.justificante);
+    if (r) modalJustificantePago(r);
+  });
   document.querySelectorAll('[data-pdf]').forEach(b => b.onclick = async () => {
     const r = S.recibos.find(x => x.id === b.dataset.pdf);
     const abierto = await window.api.openPdf(r.pdf_path);
@@ -7907,6 +7966,7 @@ function avisar(texto, esError = false) {
 }
 
 init();
+
 
 
 
