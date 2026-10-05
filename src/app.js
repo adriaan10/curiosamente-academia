@@ -2520,6 +2520,15 @@ function modalAlumno(alumno) {
     if (esAdmin && ms.some(m => m.tarifa !== '' && m.tarifa != null && Number(m.tarifa) <= 0)) {
       return msg('Si pones un precio, tiene que ser mayor que 0.');
     }
+    // Aviso (sin bloquear: a veces se apunta un número a medias) si algún
+    // teléfono no tiene 9 dígitos — con eso WhatsApp no lo entrega y el envío
+    // de recibos lo trata como "sin teléfono válido".
+    const telefonosRaros = [['teléfono', fila.telefono], ['teléfono de la madre', fila.madre_telefono], ['teléfono del padre', fila.padre_telefono]]
+      .filter(([, t]) => t && String(t).replace(/\D/g, '').length !== 9);
+    if (telefonosRaros.length) {
+      const piezas = telefonosRaros.map(([n, t]) => `${n} "${t}" (${String(t).replace(/\D/g, '').length} dígitos)`).join(', ');
+      if (!(await confirmarAccion(`Revisa: ${piezas}. Debería tener 9 dígitos; con otro número no se podrán enviar recibos por WhatsApp. ¿Guardar igualmente?`))) return;
+    }
 
     let alumnoId = alumno?.id;
     if (alumno) {
@@ -5507,7 +5516,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables, permitirCobroRapi
         ${pagados
           ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>
              <button class="btn chico liso" data-editar-cuenta="${r.id}" title="Corregir efectivo/banco">✎</button>
-             ${S.profesor?.puede_corregir_cobros && !r.importe_parcial && !S.reciboPagos.some(p => p.recibo_id === r.id) ? `<button class="btn chico liso" data-corregir-cobro="${r.id}" title="El importe cobrado de verdad no coincide con el del recibo (descuadre de banco)">💶 Corregir importe</button>` : ''}` : '')
+             ${S.profesor?.puede_corregir_cobros && !r.importe_parcial ? `<button class="btn chico liso" data-corregir-cobro="${r.id}" title="El importe cobrado de verdad no coincide con el del recibo (descuadre de banco)">💶 Corregir importe</button>` : ''}` : '')
           : `${permitirCobroRapido
                ? (esAdmin ? `<button class="btn chico cobro-rapido" data-cobro-rapido="${r.id}" title="Cobrado en persona al momento, sin enviar nada">⚡ Cobro rápido</button>` : '')
                : `<button class="btn chico pagar" data-pagar="${r.id}">✓ Cobrado</button>`}
@@ -6144,11 +6153,15 @@ function modalEditarRecibo(r) {
 // profesores.puede_corregir_cobros (hoy: Judith y Adrián).
 function modalCorregirCobro(r) {
   // Un recibo cobrado mediante pagos parciales (recibo_pagos) deja de tener
-  // importe_parcial al completarse, pero sus Ingresos son "automatico_parcial",
-  // no "automatico": esta corrección no los reconoce y duplicaría el ingreso.
-  if (S.reciboPagos.some(p => p.recibo_id === r.id)) {
-    return avisar('Este recibo se cobró con pagos parciales: corrígelo desde "Pago incompleto", no desde aquí.', true);
-  }
+  // importe_parcial al completarse, y sus Ingresos son "automatico_parcial"
+  // (uno o dos por pago, los crea el trigger al insertar cada pago), no el
+  // "automatico" único de un cobro de golpe. Con pagos, al BAJAR el importe se
+  // recorta el sobrante empezando por los últimos pagos (borrar un pago borra
+  // sus Ingresos en cascada; si solo sobra una parte, se rehace con lo que
+  // quede y el trigger recrea su Ingreso); subirlo no se permite aquí.
+  const pagosR = S.reciboPagos.filter(p => p.recibo_id === r.id)
+    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  const sumaPagos = pagosR.reduce((s, p) => s + Number(p.importe), 0);
   const alumno = S.alumnos.find(a => a.id === r.alumno_id);
   const matriculaFija = Number(r.importe_matricula) || 0;
   const numMeses = (r.periodos || []).length || 1;
@@ -6166,6 +6179,8 @@ function modalCorregirCobro(r) {
   y, si quieres, el precio de la ficha.</p>
   <p class="ayuda">R-${String(r.referencia).padStart(5, '0')} · ${e(r.concepto)} · cobrado
   el ${r.fecha_pago ? fmtFecha(String(r.fecha_pago).slice(0, 10)) : '—'}</p>
+  ${pagosR.length ? `<p class="ayuda">Se cobró en ${pagosR.length} pagos (${pagosR.map(p => formatoImporte(p.importe) + '€').join(' + ')} = ${formatoImporte(sumaPagos)}€).
+  Si bajas el importe, se quita el sobrante de los últimos pagos (y de Ingresos y gastos). No se puede subir por encima de lo ya cobrado.</p>` : ''}
   <label>Importe total cobrado de verdad (€)<input id="cor-importe" type="number" min="0" step="0.01" value="${Number(r.importe)}"></label>
   <p class="ayuda" id="cor-detalle"></p>
   ${matriculasMes.length === 1 ? `
@@ -6205,6 +6220,10 @@ function modalCorregirCobro(r) {
       document.getElementById('m-msg').textContent = `La matrícula de este recibo ya es ${formatoImporte(matriculaFija)}€: el total no puede ser menor que eso.`;
       return;
     }
+    if (pagosR.length && nuevoTotal > round2(sumaPagos)) {
+      document.getElementById('m-msg').textContent = `Solo hay ${formatoImporte(sumaPagos)}€ cobrados en los pagos de este recibo: no se puede subir por encima.`;
+      return;
+    }
     const importeAntes = Number(r.importe);
     const nuevaMensualidad = round2(nuevoTotal - matriculaFija);
     const nuevaTarifaPorMes = round2(nuevaMensualidad / numMeses);
@@ -6224,9 +6243,35 @@ function modalCorregirCobro(r) {
     // estado (a pagado o desde pagado) — si ya estaba pagado y solo cambia el
     // importe, no se entera solo: hay que corregir aquí el Ingreso de
     // "Mensualidad" que ya se había contabilizado (la Matrícula no se toca).
-    const { data: movs } = await S.sb.from('finanzas_movimientos')
+    if (pagosR.length) {
+      let exceso = round2(sumaPagos - nuevoTotal);
+      for (const p of [...pagosR].reverse()) {
+        if (exceso <= 0) break;
+        const importeP = Number(p.importe);
+        const { error: errDel } = await S.sb.from('recibo_pagos').delete().eq('id', p.id);
+        if (errDel) {
+          await Promise.all([cargarRecibos(), cargarFinanzas()]);
+          btn.disabled = false; btn.textContent = 'Guardar corrección';
+          document.getElementById('m-msg').textContent = 'Se cambió el importe pero no se pudo recortar un pago: ' + errDel.message;
+          return;
+        }
+        if (importeP > exceso) {
+          await S.sb.from('recibo_pagos').insert({
+            recibo_id: r.id, importe: round2(importeP - exceso), cuenta: p.cuenta, fecha: p.fecha,
+            creado_por: S.profesor.id, justificante_enviado_en: p.justificante_enviado_en,
+            justificante_enviado_por: p.justificante_enviado_por
+          });
+          exceso = 0;
+        } else {
+          exceso = round2(exceso - importeP);
+        }
+      }
+    }
+    const { data: movs } = pagosR.length ? { data: null } : await S.sb.from('finanzas_movimientos')
       .select('id').eq('recibo_id', r.id).eq('origen', 'automatico').eq('categoria', 'Mensualidad');
-    if (movs && movs.length) {
+    if (pagosR.length) {
+      // Sus Ingresos los llevan los propios pagos (ya recortados arriba).
+    } else if (movs && movs.length) {
       await S.sb.from('finanzas_movimientos').update({ importe: nuevaMensualidad }).eq('id', movs[0].id);
     } else if (nuevaMensualidad > 0) {
       await S.sb.from('finanzas_movimientos').insert({
@@ -7862,6 +7907,8 @@ function avisar(texto, esError = false) {
 }
 
 init();
+
+
 
 
 

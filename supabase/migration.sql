@@ -3623,3 +3623,32 @@ alter table public.alumnos add column matricula_importe numeric;
 -- único descuadrado. Pendiente de confirmar con Judith si los 20€ del segundo
 -- pago parcial de R-00274 se cobraron de verdad (ahora Finanzas suma 85€ para
 -- un recibo de 65€).
+
+-- Corregir importe cobrado ahora SÍ funciona con pagos parciales (05/10/2026,
+-- probado en vivo con un alumno de prueba, borrado después; sin publicar). A
+-- petición de Adrián: "si bajan el precio después, que se reste el resto".
+-- Antes (1.23.10) se bloqueaba en recibos cobrados por pagos parciales para
+-- no duplicar ingresos; ahora, si el recibo tiene recibo_pagos, al bajar el
+-- importe se recorta el sobrante empezando por los últimos pagos: un pago que
+-- sobra entero se borra (sus Ingresos se borran en cascada, FK
+-- recibo_pago_id ON DELETE CASCADE); si solo sobra parte, se borra y se rehace
+-- con lo que quede (el trigger recrea su Ingreso respetando matrícula-primero).
+-- No se puede SUBIR por encima de lo ya cobrado (habría que registrar otro
+-- pago). Probado: 85€ con pagos 65+20 → 65€ deja pagos 65 e Ingresos 65; 110€
+-- con matrícula 45 y pagos 65+45 → 100€ deja pagos 65+35 e Ingresos
+-- Matrícula 45 + Mensualidad 20 + 35 = 100.
+-- Dato: borrado el pago de 20€ sobrante de R-00274 (Nil Hernández) a petición
+-- de Adrián; el recibo queda 65€ / pagos 65€ / Ingresos 65€.
+
+-- Teléfonos incompletos: aviso al guardar y no válido al enviar (05/10/2026,
+-- probado en vivo con la ficha real de África Ibañez Moscoso, sin guardar
+-- nada). Judith no pudo enviar el recibo de octubre de África porque su
+-- teléfono tenía 8 dígitos (63559445, falta uno) y la app no lo detectaba.
+-- 1) util.telefonoWa() ahora devuelve '' si el número normalizado no tiene
+--    entre 10 y 15 dígitos (el 34 se añade a móviles de 9) — los avisos que ya
+--    existían de "sin teléfono válido" (envío individual, en bloque,
+--    justificantes) saltan solos; tests nuevos en test/test-pdf.mjs.
+-- 2) guardarFicha(): si teléfono/madre/padre no tiene 9 dígitos, sale una
+--    confirmación "¿Guardar igualmente?" (no bloquea, por si se apunta a
+--    medias). Alumnos activos con teléfono a 8 dígitos hoy: África Ibañez
+--    Moscoso (63559445) y Sergio Lario Romero (66733485), por corregir a mano.

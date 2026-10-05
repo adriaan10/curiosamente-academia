@@ -22,6 +22,10 @@ export function telefonoWa(telefono) {
   let t = String(telefono || '').replace(/[^\d+]/g, '');
   if (t.startsWith('+')) t = t.slice(1);
   if (t.length === 9 && /^[679]/.test(t)) t = '34' + t;
+  // Un número que no llega a ser un móvil completo (ej. 8 dígitos por faltar
+  // uno al escribirlo) no es válido: WhatsApp lo rechazaría. Entre 10 y 15
+  // dígitos (E.164) se deja pasar para números con prefijo de otro país.
+  if (t.length < 10 || t.length > 15) return '';
   return t;
 }
 

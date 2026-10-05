@@ -33,6 +33,9 @@ esperar(conceptoDesdeMeses(['Septiembre']), 'Septiembre', 'concepto 1 mes');
 // ---- teléfono WhatsApp ----
 esperar(telefonoWa('612 34 56 78'), '34612345678', 'tel español');
 esperar(telefonoWa('+34 612345678'), '34612345678', 'tel con prefijo');
+esperar(telefonoWa('63559445'), '', 'tel con 8 dígitos no es válido');
+esperar(telefonoWa(''), '', 'tel vacío no es válido');
+esperar(telefonoWa('+44 7911 123456'), '447911123456', 'tel de otro país con prefijo');
 
 // ---- formato importe ----
 esperar(formatoImporte(210), '210', 'importe entero');
