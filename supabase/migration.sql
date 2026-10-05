@@ -3605,3 +3605,21 @@ alter table public.alumnos add column matricula_importe numeric;
 -- Verificado en vivo: Ingresos de octubre pasó de 1.290€ a 190€, y al
 -- entrar en la categoría "Mensualidad" de octubre solo salen los dos
 -- recibos de verdad (R-00266 Pablo 125€, R-00265 Valentina 65€).
+
+-- Corregir importe cobrado: ya no duplica ingresos en recibos cobrados con
+-- pagos parciales (05/10/2026, fallo mío en la 1.23.6, detectado a raíz de una
+-- pregunta de Adrián sobre un alumno de Judith). R-00274 (Nil Hernández,
+-- Octubre) acabó con 150€ en Ingresos (Banco) para un recibo de 65€: había
+-- 2 pagos parciales (65 + 20, origen 'automatico_parcial') y Judith pulsó
+-- "💶 Corregir importe" (85 → 65). Esa función busca el ingreso de
+-- Mensualidad con origen 'automatico'; los recibos cobrados por pagos
+-- parciales lo tienen 'automatico_parcial', así que no lo encontró y CREÓ uno
+-- nuevo de 65€. El botón solo se ocultaba con importe_parcial > 0, pero al
+-- completarse los pagos importe_parcial vuelve a null y el botón reaparecía.
+-- Arreglo: el botón (y modalCorregirCobro) se bloquean si el recibo tiene
+-- filas en recibo_pagos — esos se corrigen desde "Pago incompleto". Dato
+-- corregido: borrado el ingreso duplicado (automatico, 65€, sin creado_por) de
+-- R-00274. Repaso de TODOS los recibos pagados (ingresos vs importe): era el
+-- único descuadrado. Pendiente de confirmar con Judith si los 20€ del segundo
+-- pago parcial de R-00274 se cobraron de verdad (ahora Finanzas suma 85€ para
+-- un recibo de 65€).

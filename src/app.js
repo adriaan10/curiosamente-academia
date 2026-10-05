@@ -5507,7 +5507,7 @@ function filasRecibos(lista, esAdmin, pagados, seleccionables, permitirCobroRapi
         ${pagados
           ? (esAdmin ? `<button class="btn chico liso" data-despagar="${r.id}">↩ Pendiente</button>
              <button class="btn chico liso" data-editar-cuenta="${r.id}" title="Corregir efectivo/banco">✎</button>
-             ${S.profesor?.puede_corregir_cobros && !r.importe_parcial ? `<button class="btn chico liso" data-corregir-cobro="${r.id}" title="El importe cobrado de verdad no coincide con el del recibo (descuadre de banco)">💶 Corregir importe</button>` : ''}` : '')
+             ${S.profesor?.puede_corregir_cobros && !r.importe_parcial && !S.reciboPagos.some(p => p.recibo_id === r.id) ? `<button class="btn chico liso" data-corregir-cobro="${r.id}" title="El importe cobrado de verdad no coincide con el del recibo (descuadre de banco)">💶 Corregir importe</button>` : ''}` : '')
           : `${permitirCobroRapido
                ? (esAdmin ? `<button class="btn chico cobro-rapido" data-cobro-rapido="${r.id}" title="Cobrado en persona al momento, sin enviar nada">⚡ Cobro rápido</button>` : '')
                : `<button class="btn chico pagar" data-pagar="${r.id}">✓ Cobrado</button>`}
@@ -6143,6 +6143,12 @@ function modalEditarRecibo(r) {
 // recibo para sacar la mensualidad correcta). Solo para quien tenga
 // profesores.puede_corregir_cobros (hoy: Judith y Adrián).
 function modalCorregirCobro(r) {
+  // Un recibo cobrado mediante pagos parciales (recibo_pagos) deja de tener
+  // importe_parcial al completarse, pero sus Ingresos son "automatico_parcial",
+  // no "automatico": esta corrección no los reconoce y duplicaría el ingreso.
+  if (S.reciboPagos.some(p => p.recibo_id === r.id)) {
+    return avisar('Este recibo se cobró con pagos parciales: corrígelo desde "Pago incompleto", no desde aquí.', true);
+  }
   const alumno = S.alumnos.find(a => a.id === r.alumno_id);
   const matriculaFija = Number(r.importe_matricula) || 0;
   const numMeses = (r.periodos || []).length || 1;
