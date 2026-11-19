@@ -29,6 +29,22 @@ export function telefonoWa(telefono) {
   return t;
 }
 
+// Meses que factura un recibo: sus periodos, o (recibos muy antiguos sin
+// periodos) el mes de su fecha de emisión.
+export function mesesDeRecibo(r) {
+  return (r?.periodos && r.periodos.length)
+    ? r.periodos
+    : [String(r?.fecha_emision || '').slice(0, 7)];
+}
+
+// ¿Dos recibos facturan exactamente los mismos meses? Es lo que decide si dos
+// hermanos "van juntos" (envío y cobro conjuntos): Octubre con Octubre sí,
+// Octubre con Noviembre NO aunque se hayan generado el mismo día.
+export function mismosMesesDeRecibo(a, b) {
+  const clave = (r) => [...mesesDeRecibo(r)].sort().join(',');
+  return clave(a) === clave(b);
+}
+
 export function linkWhatsApp(telefono, mensaje) {
   const t = telefonoWa(telefono);
   if (!t) return null;

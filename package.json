@@ -1,13 +1,13 @@
 {
   "name": "curiosamente-app",
-  "version": "1.23.12",
+  "version": "1.23.13",
   "description": "App de escritorio de gestión de alumnos y recibos para Academia Curiosamente",
   "main": "main.js",
   "scripts": {
     "build": "esbuild src/app.js --bundle --outfile=app/bundle.js --format=iife --platform=browser",
     "build:web": "npm run build && node scripts/buildWeb.cjs",
     "start": "npm run build && electron .",
-    "test": "node test/test-pdf.mjs",
+    "test": "node test/test-pdf.mjs && node test/test-movimientos.mjs && node test/test-mensajes.mjs && node test/test-clases.mjs",
     "dist": "npm run build && electron-builder --win",
     "dist:mac": "npm run build && electron-builder --mac",
     "release": "npm run build && electron-builder --win --publish always"

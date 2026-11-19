@@ -1,7 +1,7 @@
 // Test rápido: conversión de importe a letras + generación de un recibo PDF de muestra.
 import { importeALetras } from '../src/lib/numeroALetras.js';
 import { generarReciboPdf, nombreArchivoRecibo } from '../src/lib/pdf.js';
-import { conceptoDesdeMeses, telefonoWa, formatoImporte } from '../src/lib/util.js';
+import { conceptoDesdeMeses, telefonoWa, formatoImporte, mismosMesesDeRecibo } from '../src/lib/util.js';
 import fs from 'node:fs';
 
 let fallos = 0;
@@ -36,6 +36,15 @@ esperar(telefonoWa('+34 612345678'), '34612345678', 'tel con prefijo');
 esperar(telefonoWa('63559445'), '', 'tel con 8 dígitos no es válido');
 esperar(telefonoWa(''), '', 'tel vacío no es válido');
 esperar(telefonoWa('+44 7911 123456'), '447911123456', 'tel de otro país con prefijo');
+
+// ---- recibos de hermanos: solo se juntan si facturan los mismos meses ----
+const oct = { periodos: ['2026-10'], fecha_emision: '2026-11-18' };
+const nov = { periodos: ['2026-11'], fecha_emision: '2026-11-18' };
+esperar(mismosMesesDeRecibo(oct, { periodos: ['2026-10'], fecha_emision: '2026-10-30' }), true, 'octubre con octubre (aunque se emitieran en meses distintos)');
+esperar(mismosMesesDeRecibo(oct, nov), false, 'octubre con noviembre, emitidos el mismo día, NO se juntan');
+esperar(mismosMesesDeRecibo({ periodos: ['2026-10', '2026-11'] }, { periodos: ['2026-11', '2026-10'] }), true, 'mismos varios meses en otro orden');
+esperar(mismosMesesDeRecibo({ periodos: ['2026-10', '2026-11'] }, nov), false, 'octubre+noviembre con solo noviembre NO');
+esperar(mismosMesesDeRecibo({ periodos: null, fecha_emision: '2026-05-03' }, { periodos: [], fecha_emision: '2026-05-20' }), true, 'sin periodos: cae al mes de emisión');
 
 // ---- formato importe ----
 esperar(formatoImporte(210), '210', 'importe entero');

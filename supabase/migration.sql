@@ -3676,3 +3676,84 @@ alter table public.alumnos add column matricula_importe numeric;
 --    ("Cobro rápido · justificante en papel" / "Dado en papel por X" en el
 --    aviso). "↩ Pendiente" lo resetea. estadoRecibo(): COBRO RÁPIDO · por
 --    enviar → Cobro rápido y enviado / en papel.
+
+-- Recibos de hermanos: solo se juntan si facturan el MISMO MES (19/11/2026,
+-- sin publicar en desktop). Antes se juntaban por mes de EMISIÓN: un recibo
+-- de octubre generado en noviembre se unía al de noviembre del hermano y, al
+-- cobrar uno, se daba por cobrado el otro. Ahora `mismosMesesDeRecibo()`
+-- (src/lib/util.js, con tests) compara los periodos del recibo.
+
+-- Panel de "Movimientos" en Inicio (19/11/2026, sin publicar). Aplicado en
+-- Supabase como migraciones `actividad_profesores` y `realtime_clase_asignaturas`:
+-- 1) Tabla `actividad` (profesor_id, tipo, alumno_id, detalle, importe, fecha):
+--    lo que hace cada profesor y no queda guardado ya en otra tabla (baja de
+--    alumno, baja de asignatura/reactivación hechas por un admin, recibo
+--    eliminado o vuelto a pendiente, recibo enviado por WhatsApp, ficha o
+--    documentos editados). RLS: cada uno inserta solo a su nombre y lee lo
+--    suyo; quien tenga profesores.ve_movimientos_profesores (función
+--    puede_ver_movimientos()) lee todo. No se edita ni se borra. En
+--    supabase_realtime. El resto de movimientos (cobros, pagos parciales,
+--    altas, faltas, horas, clases, recibos generados/corregidos, justificantes,
+--    horario de trabajo, gastos manuales) se lee de las tablas de siempre.
+-- 2) profesor_horario_cambios_select: ahora también la ve su autor / el
+--    profesor afectado (antes solo admin), para "Mis movimientos".
+-- 3) FALLO ARREGLADO: la app escuchaba cambios en tiempo real de
+--    clase_asignaturas (desde la 1.23.6) pero esa tabla NO estaba en la
+--    publicación supabase_realtime, y con una sola así el canal entero dejaba
+--    de entregar cambios — ningún ordenador veía lo de los demás sin reiniciar.
+--    Añadida: `alter publication supabase_realtime add table clase_asignaturas`.
+--    REGLA: toda tabla de TABLAS_TIEMPO_REAL (src/app.js) tiene que estar en
+--    la publicación.
+
+-- Pestaña "Mensajes" (solo admin: Judith, Dani y el desarrollador) — 19/11/2026,
+-- sin publicar. Mensajes sueltos por WhatsApp con plantillas de Meta
+-- (migración `mensajes_whatsapp`):
+-- 1) mensajes_plantillas (tipo PK, titulo, descripcion, categoria
+--    marketing/utility, nombre_meta, idioma, cuerpo con {{n}}, variables,
+--    ejemplos, lleva_pdf, activa, activada_por/en). Sembrada con 4 tipos:
+--    felicitacion_navidad, error_justificante_pago, recibo_importe_de_mas,
+--    recibo_importe_de_menos. TODAS nacen con activa = false: no se envía nada
+--    hasta que cada plantilla esté creada y APROBADA en Meta y un admin la
+--    marque activa desde la propia pestaña. RLS: solo admin (select/update).
+-- 2) mensajes_whatsapp: historial por destinatario (estado enviado/error, error
+--    de Meta, id de mensaje). RLS: solo admin (select/insert propio).
+-- 3) Edge function NUEVA `enviar-mensaje` (verify_jwt = true, solo admin), aparte
+--    de `enviar-whatsapp` para no tocar lo de los recibos. Lee la plantilla de
+--    la tabla, se niega (409) si no está activa, comprueba nº de datos y PDF y
+--    llama a la API de Meta. Fuente: supabase/functions/enviar-mensaje.
+--    Probado: sin sesión 401; plantilla inactiva 409; tipo inexistente 404; y
+--    el circuito entero (confirmación, progreso, error de Meta, historial) con
+--    una plantilla activada un momento con un nombre inexistente en Meta
+--    (#132001, no se entrega nada) — luego revertido. El ÉXITO real contra Meta
+--    no se ha podido probar sin plantillas aprobadas.
+-- 4) Los envíos se anotan también en `actividad` (tipo 'mensaje', categoría
+--    "Mensajes" del panel de movimientos). No hay seguimiento de entregado/leído
+--    (el webhook solo conoce los recibos): "enviado" = aceptado por Meta.
+
+-- Alumno que solo va ALGUNOS días de una clase (19/11/2026, sin publicar; lo pidió
+-- un profesor: la clase se da lunes y miércoles pero hay alumnos que solo van uno).
+-- Migración `clase_alumnos_dias_semana`:
+-- 1) clase_alumnos.dias_semana smallint[] (NULL = todos los días de la clase, lo
+--    de siempre; nada de lo existente cambia). CHECK: al menos un día y solo 1-7.
+-- 2) check_conflicto_alumno() y check_conflicto_horario() (choques de horario
+--    de un alumno entre clases) ahora solo cuentan los días que el alumno va de
+--    verdad a cada clase. Probado dentro de una transacción que se deshizo:
+--    clase de lun+mié con el alumno solo el lunes NO choca con otra suya del
+--    miércoles; con todos los días o solo el miércoles SÍ choca; día 9 rechazado.
+-- 3) App (src/lib/clases.js, con tests): en el editor de la clase, cada alumno
+--    marcado muestra "Va: Lun Mié…" (botones por día, mínimo uno); el pase de
+--    lista de la ficha de la clase solo enseña a quien viene ese día ("No viene
+--    este día: …"); las plazas libres/ocupadas del Horario cuentan por sesión; y
+--    el aforo y "lleno" son por sesión (el día con más gente). Las versiones
+--    antiguas de la app ignoran la columna (verían al alumno en todos los días).
+-- (19/11/2026, corrección del mismo cambio) Los días de cada alumno NO se tocan en el
+-- editor de la clase (vuelve a ser el de siempre, una lista con casillas), sino en
+-- la FICHA de la clase (al pulsarla), junto a cada alumno: pastillas "✓ Lun ✓ Mié";
+-- tocar un día lo marca "✕ Mié" (tachado, rojo = NO va ese día) y se guarda al
+-- momento; volver a tocarlo lo deshace; mínimo un día. El que no viene el día
+-- elegido sale atenuado con "No viene este día" y sin botón de falta. Guardar
+-- el editor conserva los días ya marcados. Migración `clase_alumnos_dias_update`:
+-- el trigger de choques también se dispara al CAMBIAR dias_semana (solo comprueba
+-- los días que se AÑADEN, para no bloquear a quien ya tuviera un choque antiguo);
+-- probado en transacción deshecha (añadir día que choca: rechazado; sin choque:
+-- permitido; quitar días: siempre permitido).

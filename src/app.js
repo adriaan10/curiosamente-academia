@@ -5,8 +5,16 @@ import { importeALetras } from './lib/numeroALetras.js';
 import { generarReciboPdf, nombreArchivoRecibo } from './lib/pdf.js';
 import {
   MESES, conceptoDesdeMeses, hoyDDMMAAAA, telefonoWa,
-  formatoImporte, aCsv, escapeHtml
+  formatoImporte, aCsv, escapeHtml, mesesDeRecibo, mismosMesesDeRecibo
 } from './lib/util.js';
+import {
+  CATEGORIAS as CATEGORIAS_MOV, TIPOS as TIPOS_MOV, construirEventos, filtrarEventos, agruparPorDia,
+  conteoSemana, resumenEventos, rangoMovimientos, sumarDias, horaLocal
+} from './lib/movimientos.js';
+import {
+  primerNombre, limpiarVariable, rellenarPlantilla, parsearDestinatarios, sinTelefonosRepetidos, unirNombres, familiasDeAlumnos
+} from './lib/mensajes.js';
+import { asisteEnDia, apuntadosEnDia, diasDeClase, normalizarDias, alternarDia } from './lib/clases.js';
 
 const S = {
   cfg: {},
@@ -25,6 +33,10 @@ const S = {
   profesorHorario: [],
   profesorHorarioCambios: [],
   recibosCorrecciones: [],
+  plantillasMensajes: [], // plantillas de WhatsApp de la pestaña Mensajes (solo admin)
+  mensajesEnviados: [],   // historial de esos mensajes
+  msg: null,              // estado de la pantalla Mensajes (ver msgEstado)
+  actividad: [],      // registro de lo que hace cada profesor y no queda en otra tabla
   cambiosHorario: [],
   reactivaciones: [],
   bajasAsignatura: [],
@@ -40,9 +52,9 @@ const S = {
   filtroRevisorProfesor: '',
   vistaAdminRevisor: 'resumen',
   mesFaltas: '',
-  mesMovimientos: '',
-  modoMovimientos: '',
-  profMovimientos: '',
+  // Panel "Movimientos" de Inicio: quién (mios | profes), día o semana, qué
+  // día/semana (ancla), profesor y categoría elegidos para filtrar.
+  mov: { alcance: '', modo: 'dia', ancla: '', prof: '', cat: '' },
   recibosSeleccionados: new Set(),
   vistaRosterRecibos: false,
   filtros: { texto: '', asignatura: '', estado: 'activo', profesor: '', textoRecibo: '' },
@@ -75,6 +87,10 @@ function reiniciarEstadoSesion() {
   S.profesorHorario = [];
   S.profesorHorarioCambios = [];
   S.recibosCorrecciones = [];
+  S.actividad = [];
+  S.plantillasMensajes = [];
+  S.mensajesEnviados = [];
+  S.msg = null;
   S.cambiosHorario = [];
   S.reactivaciones = [];
   S.bajasAsignatura = [];
@@ -90,9 +106,7 @@ function reiniciarEstadoSesion() {
   S.filtroRevisorProfesor = '';
   S.vistaAdminRevisor = 'resumen';
   S.mesFaltas = '';
-  S.mesMovimientos = '';
-  S.modoMovimientos = '';
-  S.profMovimientos = '';
+  S.mov = { alcance: '', modo: 'dia', ancla: '', prof: '', cat: '' };
   S.recibosSeleccionados = new Set();
   S.vistaRosterRecibos = false;
   S.filtros = { texto: '', asignatura: '', estado: 'activo', profesor: '', textoRecibo: '' };
@@ -193,7 +207,7 @@ async function cargarTodo() {
   else S.profAsig = profAsig.data || [];
   await Promise.all([
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(), cargarFaltas(),
-    cargarHorarioTrabajo(), cargarMovimientosHorarioTrabajo(), cargarMovimientosCorrecciones(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
+    cargarHorarioTrabajo(), cargarMovimientosHorarioTrabajo(), cargarMovimientosCorrecciones(), cargarActividad(), cargarMensajes(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
     cargarFinanzas(), cargarFinanzasCategorias(), cargarCuentasSaldoInicial(), cargarAvisosDescartados()
   ]);
   backupAutomatico();
@@ -218,7 +232,7 @@ const TABLAS_TIEMPO_REAL = [
   'alumnos', 'matriculas', 'clases', 'clase_asignaturas', 'clase_horarios', 'clase_alumnos', 'clase_excepciones',
   'recibos', 'notas', 'profesor_horario', 'cambios_horario', 'reactivaciones_alumno', 'bajas_asignatura', 'faltas_alumnos',
   'finanzas_movimientos', 'finanzas_categorias', 'profesores', 'asignaturas', 'profesor_asignaturas',
-  'cuentas_saldo_inicial', 'avisos_descartados', 'recibo_pagos'
+  'cuentas_saldo_inicial', 'avisos_descartados', 'recibo_pagos', 'actividad'
 ];
 
 let canalTiempoReal = null;
@@ -291,7 +305,7 @@ async function recargarTrasCambioRemoto() {
     S.sb.from('asignaturas').select('*').order('id'),
     S.sb.from('profesor_asignaturas').select('*'),
     cargarAlumnos(), cargarRecibos(), cargarClases(), cargarNotas(), cargarFaltas(),
-    cargarHorarioTrabajo(), cargarMovimientosHorarioTrabajo(), cargarMovimientosCorrecciones(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
+    cargarHorarioTrabajo(), cargarMovimientosHorarioTrabajo(), cargarMovimientosCorrecciones(), cargarActividad(), cargarMensajes(), cargarCambiosHorario(), cargarReactivaciones(), cargarBajasAsignatura(),
     cargarFinanzas(), cargarFinanzasCategorias(), cargarCuentasSaldoInicial(), cargarAvisosDescartados()
   ]);
   // Si alguna de estas tres falla (un hipo de red, el token de sesión
@@ -441,22 +455,70 @@ async function cargarHorarioTrabajo() {
   S.profesorHorario = data || [];
 }
 
-// Historial de cambios del horario de trabajo, para "Movimientos profesores"
-// (solo lo ve quien tenga profesores.ve_movimientos_profesores — la RLS ya
-// lo filtra sola, esto es solo para no pedirlo de balde al resto).
+// Historial de cambios del horario de trabajo, para el panel de movimientos de
+// Inicio. La RLS ya da a cada uno solo lo suyo (y a los admin, todo).
 async function cargarMovimientosHorarioTrabajo() {
-  if (!S.profesor?.ve_movimientos_profesores) { S.profesorHorarioCambios = []; return; }
   const { data, error } = await S.sb.from('profesor_horario_cambios').select('*');
   if (error) return avisar('Error cargando movimientos de horario: ' + error.message, true);
   S.profesorHorarioCambios = data || [];
 }
 
-// Correcciones de recibos ya cobrados, para "Movimientos profesores".
+// Correcciones de recibos ya cobrados (solo las hacen y las ven los admin),
+// para el panel de movimientos.
 async function cargarMovimientosCorrecciones() {
-  if (!S.profesor?.ve_movimientos_profesores) { S.recibosCorrecciones = []; return; }
+  if (!S.profesor?.es_admin) { S.recibosCorrecciones = []; return; }
   const { data, error } = await S.sb.from('recibos_correcciones').select('*, recibos(referencia, concepto)');
   if (error) return avisar('Error cargando correcciones de recibos: ' + error.message, true);
   S.recibosCorrecciones = data || [];
+}
+
+// Plantillas de WhatsApp y historial de la pestaña Mensajes (solo admin: la RLS
+// ya lo impide al resto). No están en el canal de tiempo real a propósito: se
+// recargan aquí al entrar y tras cada cambio/envío.
+async function cargarMensajes() {
+  if (!S.profesor?.es_admin) { S.plantillasMensajes = []; S.mensajesEnviados = []; return; }
+  const [pl, hist] = await Promise.all([
+    S.sb.from('mensajes_plantillas').select('*').order('orden'),
+    S.sb.from('mensajes_whatsapp').select('*').order('fecha', { ascending: false }).limit(100)
+  ]);
+  if (pl.error) avisar('Error cargando plantillas de mensajes: ' + pl.error.message, true);
+  else S.plantillasMensajes = pl.data || [];
+  if (hist.error) avisar('Error cargando mensajes enviados: ' + hist.error.message, true);
+  else S.mensajesEnviados = hist.data || [];
+}
+
+// Registro de actividad (tabla `actividad`): lo que hace cada profesor y no
+// queda guardado en ninguna otra tabla. La RLS da a cada uno lo suyo y a
+// quien tenga ve_movimientos_profesores, todo. Solo los últimos 120 días, en
+// páginas de 1000 (el máximo que devuelve Supabase de una vez).
+async function cargarActividad() {
+  const desde = new Date(Date.now() - 120 * 24 * 3600 * 1000).toISOString();
+  const filas = [];
+  for (let pagina = 0; pagina < 8; pagina++) {
+    const { data, error } = await S.sb.from('actividad').select('*')
+      .gte('fecha', desde).order('fecha', { ascending: false })
+      .range(pagina * 1000, pagina * 1000 + 999);
+    if (error) return avisar('Error cargando actividad: ' + error.message, true);
+    filas.push(...(data || []));
+    if ((data || []).length < 1000) break;
+  }
+  S.actividad = filas;
+}
+
+// Apunta en `actividad` algo que el profesor acaba de hacer y que no queda ya
+// guardado en otra tabla (para "Movimientos"). Va "a lo suyo": no espera, no
+// bloquea la acción principal y, si falla, solo avisa por consola — que no
+// quede constancia nunca debe impedir hacer el trabajo.
+function registrarActividad(tipo, { alumnoId = null, detalle = null, importe = null } = {}) {
+  try {
+    if (!S.profesor?.id) return;
+    S.sb.from('actividad')
+      .insert({ profesor_id: S.profesor.id, tipo, alumno_id: alumnoId, detalle, importe })
+      .then(({ error }) => { if (error) console.warn('No se pudo apuntar la actividad:', error.message); },
+        (err) => console.warn('No se pudo apuntar la actividad:', err?.message));
+  } catch (err) {
+    console.warn('No se pudo apuntar la actividad:', err?.message);
+  }
 }
 
 async function cargarNotas() {
@@ -468,7 +530,7 @@ async function cargarNotas() {
 async function cargarClases() {
   const [clases, excepciones] = await Promise.all([
     S.sb.from('clases')
-      .select('*, clase_asignaturas(asignaturas(id, nombre)), profesores(nombre), clase_horarios(*), clase_alumnos(alumno_id)')
+      .select('*, clase_asignaturas(asignaturas(id, nombre)), profesores(nombre), clase_horarios(*), clase_alumnos(alumno_id, dias_semana)')
       .order('nombre'),
     S.sb.from('clase_excepciones').select('*').order('fecha')
   ]);
@@ -794,6 +856,7 @@ function renderMain() {
       <button data-v="recibos" class="tab ${S.vista === 'recibos' ? 'activa' : ''}">Recibos</button>
       <button data-v="notas" class="tab ${S.vista === 'notas' ? 'activa' : ''}">Notas</button>
       <button data-v="profesores" class="tab ${S.vista === 'profesores' ? 'activa' : ''}">Profesores</button>
+      ${esAdmin ? `<button data-v="mensajes" class="tab ${S.vista === 'mensajes' ? 'activa' : ''}">Mensajes</button>` : ''}
       ${esAdmin ? `<button data-v="finanzas" class="tab ${S.vista === 'finanzas' ? 'activa' : ''}">Ingresos y gastos</button>` : ''}
       ${esAdmin ? `<button data-v="reestructuracion" class="tab ${S.vista === 'reestructuracion' ? 'activa' : ''}">Reestructuración</button>` : ''}
       <button data-v="ajustes" class="tab ${S.vista === 'ajustes' ? 'activa' : ''}">Ajustes</button>
@@ -836,11 +899,11 @@ function renderVistaActual() {
   else if (S.vista === 'recibos') renderRecibos();
   else if (S.vista === 'notas') renderNotas();
   else if (S.vista === 'profesores') renderProfesores();
+  else if (S.vista === 'mensajes') renderMensajes();
   else if (S.vista === 'finanzas') renderFinanzas();
   else if (S.vista === 'reestructuracion') renderReestructuracion();
   else if (S.vista === 'admin-revisor') renderAdminRevisor();
   else if (S.vista === 'informacion-alumnado') renderInformacionAlumnado();
-  else if (S.vista === 'movimientos-profesores') renderMovimientosProfesores();
   else renderAjustes();
 }
 
@@ -920,11 +983,6 @@ function renderInicio() {
         <div class="pc-titulo">ADMIN REVISOR</div>
         <div class="pc-detalle">Vista completa de la academia, mes a mes</div>
       </div>
-      ${S.profesor?.ve_movimientos_profesores ? `
-      <div class="portada-card admin-revisor" data-ir="movimientos-profesores">
-        <div class="pc-titulo">MOVIMIENTOS PROFESORES</div>
-        <div class="pc-detalle">Qué ha hecho cada uno, mes a mes</div>
-      </div>` : ''}
     </div>` : ''}
     <div class="portada-cards">
       ${daClases ? `
@@ -1016,7 +1074,9 @@ function renderInicio() {
         <div class="pc-detalle">Un profesor ha dado de baja a un alumno de una asignatura: revisa el precio</div>
       </div>` : ''}
     </div>` : ''}
+    <section class="mov-panel" id="panel-mov"></section>
   </div>`;
+  pintarPanelMovimientos();
 
   document.querySelectorAll('[data-ir]').forEach(c => c.onclick = () => {
     S.vista = c.dataset.ir;
@@ -2011,6 +2071,12 @@ function renderInformacionAlumnado() {
     b.disabled = true;
     const { error } = await S.sb.from('alumnos').update({ [campo]: !a[campo] }).eq('id', id);
     if (error) { b.disabled = false; return avisar('Error: ' + error.message, true); }
+    // campo = "entregado_circular" / "firmado_redes" / "firmado_intolerancias"…
+    const [paso, doc] = campo.split('_');
+    const nombreDoc = { circular: 'Circular academia', redes: 'Redes sociales', intolerancias: 'Intolerancias' }[doc] || doc;
+    registrarActividad('documento', {
+      alumnoId: id, detalle: `${nombreDoc} · ${paso === 'entregado' ? 'entregado' : 'firmado'}: ${!a[campo] ? 'sí' : 'no'}`
+    });
     await cargarAlumnos();
     renderInformacionAlumnado();
   });
@@ -2043,149 +2109,660 @@ function modalEditarIntolerancias(alumno) {
     const { error } = await S.sb.from('alumnos').update({ intolerancias: valor }).eq('id', alumno.id);
     cerrarModal();
     if (error) return avisar('Error: ' + error.message, true);
+    registrarActividad('ficha_editada', { alumnoId: alumno.id, detalle: `Intolerancias: ${valor || 'ninguna'}` });
     await cargarAlumnos();
     if (S.vista === 'informacion-alumnado') renderInformacionAlumnado();
     avisar('Intolerancias actualizadas.');
   };
 }
 
-// ------------------------------------------------------ movimientos profesores
+// ------------------------------------------------------ panel de movimientos
 //
-// Solo para quien tenga profesores.ve_movimientos_profesores (hoy: Judith y
-// el desarrollador) — pensada para que Judith pueda ver lo que hace Dani (y
-// cualquier otro profesor) mes a mes, sin depender de los avisos del día a
-// día (esos son para actuar y se van marcando vistos; esto es un histórico
-// de consulta, no se "resuelve" nunca).
-function soloFecha(iso) { return fmtFecha(String(iso || '').slice(0, 10)); }
+// Recuadro de Inicio con lo que ha hecho cada profesor (cobros, altas, bajas,
+// faltas, recibos, fichas…), por día o por semana. Cada profesor ve SUS
+// movimientos; quien tenga profesores.ve_movimientos_profesores (hoy: Judith y
+// el desarrollador) ve además los de todos los profesores. Es un histórico de
+// consulta, no una lista de cosas por hacer: nunca se "resuelve". La lógica
+// (de dónde sale cada cosa, días, semanas, resúmenes) está en
+// lib/movimientos.js, con sus tests.
 
-// filtro = { dia: 'YYYY-MM-DD' } para ver solo hoy, o { mes: 'YYYY-MM' } para
-// el mes entero — en cuanto pasa el día, esos mismos movimientos ya están
-// disponibles sin más en la vista de "Este mes" (son los mismos datos, solo
-// cambia cómo se filtran, no hace falta guardar nada aparte).
-function movimientosDeProfesor(profesorId, filtro) {
-  const coincide = (fecha) => filtro.dia ? String(fecha || '').slice(0, 10) === filtro.dia : claveMes(fecha) === filtro.mes;
-  const horarioTrabajo = S.profesorHorarioCambios
-    .filter(c => c.profesor_id === profesorId && coincide(c.fecha))
-    .sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
-  const clasesAnadidas = S.clases
-    .filter(c => c.profesor_id === profesorId && coincide(c.created_at))
-    .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
-  const faltas = S.faltas
-    .filter(f => f.profesor_id === profesorId && coincide(f.fecha))
-    .map(f => ({ ...f, alumno: S.alumnos.find(a => a.id === f.alumno_id) }))
-    .sort((a, b) => compararAlumnosPorApellido(a.alumno || {}, b.alumno || {}));
-  const altas = S.alumnos
-    .filter(a => a.creado_por === profesorId && coincide(a.created_at))
-    .slice().sort(compararAlumnosPorApellido);
-  const cobros = [];
-  for (const r of S.recibos) {
-    if (r.cobrado_por !== profesorId || !coincide(r.fecha_pago)) continue;
-    cobros.push({
-      tipo: r.cobro_rapido ? 'Cobro rápido' : 'Cobrado', alumno: S.alumnos.find(a => a.id === r.alumno_id),
-      importe: r.importe, fecha: r.fecha_pago
-    });
-  }
-  for (const p of S.reciboPagos) {
-    if (p.creado_por !== profesorId || !coincide(p.created_at)) continue;
-    const r = S.recibos.find(x => x.id === p.recibo_id);
-    cobros.push({ tipo: 'Pago parcial', alumno: r ? S.alumnos.find(a => a.id === r.alumno_id) : null, importe: p.importe, fecha: p.created_at });
-  }
-  // Cobrados por orden alfabético de apellidos, tal cual se pidió.
-  cobros.sort((a, b) => compararAlumnosPorApellido(a.alumno || {}, b.alumno || {}));
-  const horasModificadas = S.cambiosHorario
-    .filter(c => c.profesor_id === profesorId && coincide(c.fecha))
-    .map(c => ({ ...c, alumno: S.alumnos.find(a => a.id === c.alumno_id) }))
-    .sort((a, b) => compararAlumnosPorApellido(a.alumno || {}, b.alumno || {}));
-  const recibosCorregidos = S.recibosCorrecciones
-    .filter(c => c.corregido_por === profesorId && coincide(c.fecha))
-    .map(c => ({ ...c, alumno: S.alumnos.find(a => a.id === c.alumno_id) }))
-    .sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
-  return { horarioTrabajo, clasesAnadidas, faltas, altas, cobros, horasModificadas, recibosCorregidos };
+// Un color fijo por profesor (el mismo en todas las pantallas), sacado de su id.
+const PALETA_PROFESORES = ['#C8506A', '#1A6DC4', '#1E8E4E', '#8E5BBF', '#E07B12', '#00897B', '#7B5E3B', '#B23A8C'];
+function colorProfesor(id) {
+  let h = 0;
+  for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return PALETA_PROFESORES[h % PALETA_PROFESORES.length];
+}
+function inicialesDe(nombre) {
+  const partes = String(nombre || '?').trim().split(/\s+/).filter(Boolean);
+  return ((partes[0]?.[0] || '?') + (partes[1]?.[0] || '')).toUpperCase();
 }
 
-// Una tarjeta de color por tipo de movimiento, en vez de una lista plana en
-// blanco y negro — mismo lenguaje visual que las portada-card de Inicio.
-function bloqueMovimientos(icono, color, titulo, filasHtml) {
-  return `<div class="mov-tarjeta" style="--mov-color:${color}">
-    <h3 class="mov-titulo"><span class="mov-icono">${icono}</span>${e(titulo)}<span class="mov-contador">${filasHtml.length}</span></h3>
-    ${filasHtml.length ? `<ul class="mov-lista">${filasHtml.join('')}</ul>` : '<p class="mov-vacio">Nada por aquí.</p>'}
+// "jueves, 19 de noviembre" (sin año; el año solo si no es el actual).
+function diaLargo(iso) {
+  const [a, m, d] = iso.split('-').map(Number);
+  const fecha = new Date(a, m - 1, d);
+  const sufijo = a !== new Date().getFullYear() ? ` de ${a}` : '';
+  return `${DIAS[(fecha.getDay() + 6) % 7].toLowerCase()}, ${d} de ${MESES[m - 1].toLowerCase()}${sufijo}`;
+}
+function etiquetaRangoSemana(desde, hasta) {
+  const [a1, m1, d1] = desde.split('-').map(Number);
+  const [, m2, d2] = hasta.split('-').map(Number);
+  const mes = (m) => MESES[m - 1].toLowerCase();
+  return m1 === m2
+    ? `${d1} – ${d2} de ${mes(m2)}`
+    : `${d1} de ${mes(m1)} – ${d2} de ${mes(m2)}${a1 !== new Date().getFullYear() ? ` de ${a1}` : ''}`;
+}
+
+// Todos los movimientos conocidos (de todos los profesores que este usuario
+// puede ver): se recalcula en cada pintado, son pocos miles como mucho.
+function todosLosMovimientos() {
+  const alumnosPorId = new Map(S.alumnos.map(a => [a.id, a]));
+  const clasesPorId = new Map(S.clases.map(c => [c.id, c]));
+  const profesoresPorId = new Map(S.profesores.map(p => [p.id, p]));
+  return construirEventos({
+    recibos: S.recibos, reciboPagos: S.reciboPagos, alumnos: S.alumnos, faltas: S.faltas, clases: S.clases,
+    cambiosHorario: S.cambiosHorario, reactivaciones: S.reactivaciones, bajasAsignatura: S.bajasAsignatura,
+    profesorHorarioCambios: S.profesorHorarioCambios, recibosCorrecciones: S.recibosCorrecciones,
+    finanzas: S.finanzas, actividad: S.actividad
+  }, {
+    alumnoNombre: (id) => alumnosPorId.get(id)?.nombre,
+    claseNombre: (id) => clasesPorId.get(id)?.nombre,
+    asignaturasDeClase: (c) => nombresAsignaturasClase(c),
+    profesorNombre: (id) => profesoresPorId.get(id)?.nombre
+  });
+}
+
+// Profesores que salen en la vista "Profesores": todos los que no están de
+// baja (más los de baja que hayan hecho algo en el rango), SIN el
+// desarrollador — esto es para que Judith vea a su equipo (y a sí misma), y el
+// desarrollador tiene su propia pestaña "Míos".
+function profesoresDelPanel(eventosEnRango) {
+  const conActividad = new Set(eventosEnRango.map(x => x.prof));
+  return S.profesores
+    .filter(p => !p.es_desarrollador && (p.estado !== 'baja' || conActividad.has(p.id)))
+    .sort((a, b) => a.nombre.localeCompare(b.nombre));
+}
+
+function htmlFilaMovimiento(ev, mostrarProfesor) {
+  const tipo = TIPOS_MOV[ev.tipo];
+  const cat = CATEGORIAS_MOV[ev.cat];
+  const prof = mostrarProfesor ? S.profesores.find(p => p.id === ev.prof) : null;
+  const dinero = ev.importe == null ? '<span class="mov-importe"></span>' : ev.dinero === 'sale'
+    ? `<span class="mov-importe sale">−${formatoImporte(ev.importe)}€</span>`
+    : ev.dinero === 'entra'
+      ? `<span class="mov-importe entra">+${formatoImporte(ev.importe)}€</span>`
+      : `<span class="mov-importe">${formatoImporte(ev.importe)}€</span>`;
+  return `<div class="mov-fila" style="--mov-color:${cat.color}">
+    <span class="mov-hora">${horaLocal(ev.ts)}</span>
+    <span class="mov-burbuja" title="${e(cat.etiqueta)}">${tipo.icono}</span>
+    <div class="mov-cuerpo">
+      <div class="mov-linea"><strong>${e(ev.titulo || tipo.titulo)}</strong>${ev.alumno ? ` <span class="mov-alumno">${e(ev.alumno)}</span>` : ''}</div>
+      ${ev.detalle ? `<div class="mov-detalle">${e(ev.detalle)}</div>` : ''}
+    </div>
+    ${prof ? `<span class="mov-quien" style="--q:${colorProfesor(prof.id)}" title="${e(prof.nombre)}"><i>${e(inicialesDe(prof.nombre))}</i>${e(prof.nombre)}</span>` : ''}
+    ${dinero}
   </div>`;
 }
-const filaMovHorarioTrabajo = (c) => `<li><strong>${soloFecha(c.fecha)}</strong> — cambió su horario de trabajo: antes <em>${e(c.resumen_antes)}</em>, ahora <em>${e(c.resumen_despues)}</em></li>`;
-const filaMovClase = (c) => `<li><strong>${soloFecha(c.created_at)}</strong> — añadió la clase "${e(c.nombre)}" (${e(nombresAsignaturasClase(c))})</li>`;
-const filaMovFalta = (f) => `<li><strong>${fmtFecha(f.fecha)}</strong> — falta de ${e(f.alumno?.nombre || 'alumno')}</li>`;
-const filaMovAlta = (a) => `<li><strong>${soloFecha(a.created_at)}</strong> — dio de alta a ${e(a.nombre)}</li>`;
-const filaMovCobro = (c) => `<li><strong>${soloFecha(c.fecha)}</strong> — ${e(c.tipo)} de ${e(c.alumno?.nombre || 'alumno')}: <strong>${formatoImporte(c.importe)}€</strong></li>`;
-const filaMovHoras = (c) => `<li><strong>${soloFecha(c.fecha)}</strong> — horas de ${e(c.alumno?.nombre || 'alumno')}: ${c.horas_antes ?? '?'} → ${c.horas_despues ?? '?'} h/sem</li>`;
-const filaMovCorreccion = (c) => `<li><strong>${soloFecha(c.fecha)}</strong> — corrigió el recibo R-${String(c.recibos?.referencia ?? '?').padStart(5, '0')}
-  de ${e(c.alumno?.nombre || 'alumno')}: ${formatoImporte(c.importe_antes)}€ → ${formatoImporte(c.importe_despues)}€${c.tarifa_despues != null
-    ? ` (y el precio de la ficha: ${formatoImporte(c.tarifa_antes)}€ → ${formatoImporte(c.tarifa_despues)}€/mes)` : ''}</li>`;
 
-function renderMovimientosProfesores() {
-  if (!S.profesor?.ve_movimientos_profesores) { S.vista = 'inicio'; renderInicio(); return; }
-  if (!S.mesMovimientos) S.mesMovimientos = claveMes(new Date().toISOString());
-  if (!S.modoMovimientos) S.modoMovimientos = 'dia'; // por defecto, lo de hoy
-  // Normalmente los que dan clases; además, quien pueda corregir cobros (hoy
-  // Judith) también sale con su propia pestaña aunque no dé clases — para
-  // poder repasar lo que ha corregido, no solo lo que enseña. El desarrollador
-  // (Adrián) se queda fuera a propósito: esto es para que Judith vea a los
-  // profesores (y a sí misma), no para que le salga también el desarrollador.
-  const extra = S.profesores.filter(p => p.estado !== 'baja' && p.puede_corregir_cobros && !p.es_desarrollador);
-  const profesores = [...profesoresActivos(), ...extra.filter(p => !profesoresActivos().some(x => x.id === p.id))]
-    .sort((a, b) => a.nombre.localeCompare(b.nombre));
-  if (!S.profMovimientos || !profesores.some(p => p.id === S.profMovimientos)) {
-    S.profMovimientos = profesores[0]?.id || '';
+function pintarPanelMovimientos() {
+  const cont = document.getElementById('panel-mov');
+  if (!cont || !S.profesor) return;
+  const M = S.mov;
+  const veTodos = Boolean(S.profesor.ve_movimientos_profesores);
+  if (!veTodos) M.alcance = 'mios';
+  else if (!M.alcance) M.alcance = 'profes';
+  const hoy = fechaISO(new Date());
+  if (!M.ancla) M.ancla = hoy;
+  const esDia = M.modo === 'dia';
+  const rango = rangoMovimientos(M.modo, M.ancla);
+  const deProfes = M.alcance === 'profes';
+
+  const todos = todosLosMovimientos();
+  // 1) Quiénes entran en esta vista
+  const enRango = filtrarEventos(todos, rango);
+  const profesores = deProfes ? profesoresDelPanel(enRango) : [];
+  if (deProfes && M.prof && !profesores.some(p => p.id === M.prof)) M.prof = '';
+  const idsVista = deProfes
+    ? new Set(M.prof ? [M.prof] : profesores.map(p => p.id))
+    : new Set([S.profesor.id]);
+  const deLaVista = todos.filter(x => idsVista.has(x.prof));
+
+  // 2) Lo que se ve (con el filtro de categoría) y los resúmenes
+  const visibles = filtrarEventos(deLaVista, { ...rango, cat: M.cat });
+  const enRangoVista = filtrarEventos(deLaVista, rango); // sin filtro de categoría: para los chips
+  const resumen = resumenEventos(enRangoVista);
+  const semana = conteoSemana(deLaVista.filter(x => !M.cat || x.cat === M.cat), M.ancla);
+  const maxDia = Math.max(1, ...semana.map(x => x.n));
+
+  const etiqueta = esDia
+    ? `${M.ancla === hoy ? 'Hoy · ' : M.ancla === sumarDias(hoy, -1) ? 'Ayer · ' : ''}${diaLargo(M.ancla)}`
+    : `${rango.desde <= hoy && hoy <= rango.hasta ? 'Esta semana · ' : ''}${etiquetaRangoSemana(rango.desde, rango.hasta)}`;
+  const esActual = esDia ? M.ancla === hoy : (rango.desde <= hoy && hoy <= rango.hasta);
+
+  // 3) Tarjetas de profesores (solo en la vista "Profesores")
+  const cuentaPorProfesor = new Map();
+  for (const x of enRango) cuentaPorProfesor.set(x.prof, (cuentaPorProfesor.get(x.prof) || 0) + (x.n || 1));
+  const conMovimientos = profesores
+    .filter(p => cuentaPorProfesor.get(p.id) || M.prof === p.id)
+    .sort((a, b) => (cuentaPorProfesor.get(b.id) || 0) - (cuentaPorProfesor.get(a.id) || 0) || a.nombre.localeCompare(b.nombre));
+  const sinMovimientos = profesores.filter(p => !conMovimientos.includes(p));
+  const tarjetasProfes = deProfes ? `
+    <div class="mov-profes">
+      <button class="mov-prof ${!M.prof ? 'activo' : ''}" data-mov-prof="">
+        <span class="mov-avatar todos">👥</span><span class="mov-prof-nombre">Todos</span>
+        <span class="mov-prof-n">${profesores.reduce((s, p) => s + (cuentaPorProfesor.get(p.id) || 0), 0)}</span>
+      </button>
+      ${conMovimientos.map(p => {
+        const n = cuentaPorProfesor.get(p.id) || 0;
+        return `<button class="mov-prof ${M.prof === p.id ? 'activo' : ''}" data-mov-prof="${p.id}" style="--q:${colorProfesor(p.id)}"
+          title="${n} movimiento${n === 1 ? '' : 's'}">
+          <span class="mov-avatar">${e(inicialesDe(p.nombre))}</span><span class="mov-prof-nombre">${e(p.nombre)}</span>
+          <span class="mov-prof-n">${n}</span>
+        </button>`;
+      }).join('')}
+    </div>
+    ${sinMovimientos.length && conMovimientos.length ? `<p class="mov-sin">Sin movimientos ${esDia ? 'este día' : 'esta semana'}: ${e(sinMovimientos.map(p => p.nombre).join(', '))}</p>` : ''}` : '';
+
+  // 4) Resumen por categoría (cada chip filtra la lista)
+  const chips = Object.entries(CATEGORIAS_MOV).map(([clave, c]) => {
+    const n = resumen.porCat[clave] || 0;
+    if (!n && M.cat !== clave) return '';
+    return `<button class="mov-chip ${M.cat === clave ? 'activo' : ''}" data-mov-cat="${clave}" style="--c:${c.color}" title="Ver solo: ${e(c.etiqueta)}">
+      <span>${c.icono}</span>${e(c.etiqueta)}<b>${n}</b></button>`;
+  }).join('');
+
+  // 5) La lista
+  const mostrarProfesor = deProfes && !M.prof;
+  let cuerpo;
+  if (!visibles.length) {
+    const vacioDia = esDia ? 'este día' : 'esta semana';
+    cuerpo = `<div class="mov-vacio">${M.cat ? `Nada de “${e(CATEGORIAS_MOV[M.cat].etiqueta)}” ${vacioDia}.`
+      : deProfes ? `Nadie ha registrado movimientos ${vacioDia}.` : `No hay movimientos tuyos ${vacioDia}.`}
+      <span>${resumen.total && M.cat ? 'Quita el filtro para ver el resto.' : ''}</span></div>`;
+  } else if (esDia) {
+    cuerpo = agruparPorDia(visibles).map(g => g.eventos.map(x => htmlFilaMovimiento(x, mostrarProfesor)).join('')).join('');
+  } else {
+    cuerpo = agruparPorDia(visibles).map(g => `
+      <div class="mov-dia-cab"><span>${e(diaLargo(g.dia))}${g.dia === hoy ? ' <em>hoy</em>' : ''}</span><small>${g.eventos.reduce((s, x) => s + (x.n || 1), 0)}</small></div>
+      ${g.eventos.map(x => htmlFilaMovimiento(x, mostrarProfesor)).join('')}`).join('');
   }
-  const esDia = S.modoMovimientos === 'dia';
-  const mes = S.mesMovimientos;
-  const hoyIso = fechaISO(new Date());
-  const filtro = esDia ? { dia: hoyIso } : { mes };
-  const mov = S.profMovimientos ? movimientosDeProfesor(S.profMovimientos, filtro) : null;
-  const sumarMes = (delta) => {
-    let [a, m] = mes.split('-').map(Number);
-    m += delta;
-    while (m < 1) { m += 12; a--; }
-    while (m > 12) { m -= 12; a++; }
-    return `${a}-${String(m).padStart(2, '0')}`;
-  };
 
-  document.getElementById('contenido').innerHTML = `
-  <div class="barra">
-    <button class="btn liso" id="mp-volver">← Inicio</button>
-    <div class="segmentos" id="mp-tabs">
-      ${profesores.map(p => `<button class="seg ${p.id === S.profMovimientos ? 'activo' : ''}" data-tab-prof="${p.id}">${e(p.nombre)}</button>`).join('')}
-    </div>
+  cont.innerHTML = `
+  <div class="mov-cabecera">
+    <h3 class="mov-h">🕘 ${veTodos ? 'Movimientos' : 'Mis movimientos'}</h3>
+    ${veTodos ? `<div class="segmentos mov-seg">
+      <button class="seg ${deProfes ? 'activo' : ''}" data-mov-alcance="profes">👥 Profesores</button>
+      <button class="seg ${!deProfes ? 'activo' : ''}" data-mov-alcance="mios">👤 Míos</button>
+    </div>` : ''}
     <span class="flex1"></span>
-    <div class="segmentos">
-      <button class="seg ${esDia ? 'activo' : ''}" data-modo-mov="dia">Hoy</button>
-      <button class="seg ${!esDia ? 'activo' : ''}" data-modo-mov="mes">Este mes</button>
+    <div class="segmentos mov-seg">
+      <button class="seg ${esDia ? 'activo' : ''}" data-mov-modo="dia">Día</button>
+      <button class="seg ${!esDia ? 'activo' : ''}" data-mov-modo="semana">Semana</button>
     </div>
-    ${esDia
-      ? `<strong class="mov-hoy-fecha">${fmtFecha(hoyIso)}</strong>`
-      : `<div class="mes-nav">
-          <button class="btn chico liso" id="mp-mes-ant">‹</button>
-          <strong>${tituloMes(mes)}</strong>
-          <button class="btn chico liso" id="mp-mes-sig">›</button>
-        </div>`}
   </div>
-  ${!mov ? '<div class="vacio">No hay profesores todavía.</div>' : `
-  <div class="mov-grid">
-  ${bloqueMovimientos('🕐', '#1a6dc4', 'Horario de trabajo cambiado', mov.horarioTrabajo.map(filaMovHorarioTrabajo))}
-  ${bloqueMovimientos('📚', '#8E5BBF', 'Clases añadidas', mov.clasesAnadidas.map(filaMovClase))}
-  ${bloqueMovimientos('⚠️', '#c0392b', 'Faltas de alumnos marcadas', mov.faltas.map(filaMovFalta))}
-  ${bloqueMovimientos('✨', '#1e8e4e', 'Alumnos dados de alta', mov.altas.map(filaMovAlta))}
-  ${bloqueMovimientos('💰', '#F28C28', 'Cobros (normal, rápido o parcial)', mov.cobros.map(filaMovCobro))}
-  ${bloqueMovimientos('⏱️', '#5C1722', 'Horas de alumno modificadas', mov.horasModificadas.map(filaMovHoras))}
-  ${bloqueMovimientos('💶', '#C8506A', 'Recibos cobrados corregidos', mov.recibosCorregidos.map(filaMovCorreccion))}
-  </div>`}`;
+  <div class="mov-nav">
+    <button class="btn chico liso" id="mov-ant" title="${esDia ? 'Día anterior' : 'Semana anterior'}">‹</button>
+    <strong class="mov-etiqueta">${e(etiqueta)}</strong>
+    <button class="btn chico liso" id="mov-sig" title="${esDia ? 'Día siguiente' : 'Semana siguiente'}">›</button>
+    ${esActual ? '' : '<button class="btn chico" id="mov-hoy">Volver a hoy</button>'}
+  </div>
+  <div class="mov-semana">
+    ${semana.map((x, i) => {
+      const seleccionado = esDia && x.dia === M.ancla;
+      return `<button class="mov-dia ${seleccionado ? 'sel' : ''} ${x.dia === hoy ? 'es-hoy' : ''} ${x.dia > hoy ? 'futuro' : ''}" data-mov-dia="${x.dia}" title="${e(diaLargo(x.dia))}: ${x.n} movimiento${x.n === 1 ? '' : 's'}">
+        <span class="mov-dia-n">${x.n || ''}</span>
+        <span class="mov-dia-barra"><i style="height:${x.n ? Math.max(8, Math.round(x.n / maxDia * 100)) : 0}%"></i></span>
+        <span class="mov-dia-letra">${DIAS_CORTO[i]}</span>
+        <span class="mov-dia-num">${Number(x.dia.slice(8))}</span>
+      </button>`;
+    }).join('')}
+  </div>
+  ${tarjetasProfes}
+  ${enRangoVista.length ? `<div class="mov-resumen">
+    <div class="mov-chips">${chips}</div>
+    ${resumen.cobrado > 0 ? `<div class="mov-cobrado" title="Dinero cobrado en este periodo">💰 <strong>${formatoImporte(resumen.cobrado)}€</strong> cobrados</div>` : ''}
+  </div>` : ''}
+  <div class="mov-lista-caja">${cuerpo}</div>`;
 
-  document.getElementById('mp-volver').onclick = () => { S.vista = 'inicio'; renderMain(); };
-  document.querySelectorAll('[data-tab-prof]').forEach(b => b.onclick = () => { S.profMovimientos = b.dataset.tabProf; renderMovimientosProfesores(); });
-  document.querySelectorAll('[data-modo-mov]').forEach(b => b.onclick = () => { S.modoMovimientos = b.dataset.modoMov; renderMovimientosProfesores(); });
-  const mpMesAnt = document.getElementById('mp-mes-ant');
-  const mpMesSig = document.getElementById('mp-mes-sig');
-  if (mpMesAnt) mpMesAnt.onclick = () => { S.mesMovimientos = sumarMes(-1); renderMovimientosProfesores(); };
-  if (mpMesSig) mpMesSig.onclick = () => { S.mesMovimientos = sumarMes(1); renderMovimientosProfesores(); };
+  const repintar = () => pintarPanelMovimientos();
+  cont.querySelectorAll('[data-mov-alcance]').forEach(b => b.onclick = () => { M.alcance = b.dataset.movAlcance; M.prof = ''; M.cat = ''; repintar(); });
+  cont.querySelectorAll('[data-mov-modo]').forEach(b => b.onclick = () => { M.modo = b.dataset.movModo; repintar(); });
+  cont.querySelectorAll('[data-mov-prof]').forEach(b => b.onclick = () => { M.prof = b.dataset.movProf; repintar(); });
+  cont.querySelectorAll('[data-mov-cat]').forEach(b => b.onclick = () => { M.cat = M.cat === b.dataset.movCat ? '' : b.dataset.movCat; repintar(); });
+  cont.querySelectorAll('[data-mov-dia]').forEach(b => b.onclick = () => { M.ancla = b.dataset.movDia; M.modo = 'dia'; repintar(); });
+  const paso = esDia ? 1 : 7;
+  document.getElementById('mov-ant').onclick = () => { M.ancla = sumarDias(M.ancla, -paso); repintar(); };
+  document.getElementById('mov-sig').onclick = () => { M.ancla = sumarDias(M.ancla, paso); repintar(); };
+  const bHoy = document.getElementById('mov-hoy');
+  if (bHoy) bHoy.onclick = () => { M.ancla = hoy; repintar(); };
+}
+
+// ------------------------------------------------------------ mensajes
+//
+// Pestaña "Mensajes" (solo administradores): mensajes sueltos por WhatsApp con
+// plantillas de Meta — felicitaciones de Navidad, avisos de que un justificante
+// o un recibo llevaba un error (con el PDF correcto), etc. — a uno o a muchos
+// números. Las plantillas viven en la tabla `mensajes_plantillas`; NADA se puede
+// enviar hasta que cada una esté creada y aprobada en Meta y se marque como
+// activa EN LA BASE DE DATOS (a mano, `update mensajes_plantillas set activa =
+// true where tipo = ...`; la pantalla no tiene control para eso a propósito:
+// las crea y las activa el desarrollador). Lo comprueba la pantalla y, por si
+// acaso, también el servidor: supabase/functions/enviar-mensaje.
+
+const normalizarBusqueda = (s) => apellidosNormalizados(String(s || ''));
+
+// Estado de la pantalla (se conserva al cambiar de pestaña y volver).
+function msgEstado() {
+  if (!S.msg) S.msg = { tipo: '', filtro: '', seleccion: new Set(), manual: '', reciboId: '', busquedaRecibo: '', importe: '', incluirPrincipal: true, telPrincipal: '' };
+  return S.msg;
+}
+const plantillaDe = (tipo) => S.plantillasMensajes.find(p => p.tipo === tipo);
+const ICONOS_MENSAJE = {
+  felicitacion_navidad: '🎄', error_justificante_pago: '📤', recibo_importe_de_mas: '🔺', recibo_importe_de_menos: '🔻'
+};
+
+// "34612345678" -> "+34 612 345 678"
+function telefonoBonito(t) {
+  const s = String(t || '');
+  return /^34\d{9}$/.test(s) ? `+34 ${s.slice(2, 5)} ${s.slice(5, 8)} ${s.slice(8)}` : (s ? `+${s}` : '');
+}
+
+// Los datos que lleva cada plantilla, en el orden de sus {{1}}, {{2}}…
+function variablesDeMensaje(pl, { nombreContacto, recibo, importeTexto }) {
+  const nombre = primerNombre(nombreContacto);
+  let v;
+  if (recibo && pl.lleva_pdf) {
+    const alumnoMes = `${primerNombre(recibo.alumnos?.nombre || recibo.alumno_nombre, 'el alumno')}: ${conceptoSinProgenitor(recibo.concepto)}`;
+    v = pl.tipo === 'error_justificante_pago' ? [nombre, alumnoMes] : [nombre, alumnoMes, importeTexto];
+  } else {
+    v = [nombre];
+  }
+  const n = Array.isArray(pl.variables) ? pl.variables.length : v.length;
+  while (v.length < n) v.push('-');
+  return v.slice(0, n).map(limpiarVariable);
+}
+
+// A quién se va a mandar, con los datos de cada uno ya preparados, y lo que
+// falte o sobre para poder enviar.
+function destinatariosDeMensaje() {
+  const M = msgEstado();
+  const pl = plantillaDe(M.tipo);
+  const res = { pl, lista: [], invalidos: [], problema: '', recibo: null, importeTexto: '' };
+  if (!pl) return res;
+  const manuales = parsearDestinatarios(M.manual);
+  res.invalidos = manuales.filter(x => !x.valido).map(x => x.original);
+
+  if (pl.lleva_pdf) {
+    const r = S.recibos.find(x => x.id === M.reciboId);
+    res.recibo = r || null;
+    if (!r) { res.problema = 'Elige primero el recibo.'; return res; }
+    const importe = Number(String(M.importe).replace(',', '.'));
+    if (pl.tipo.startsWith('recibo_importe') && !(importe > 0)) res.problema = 'Escribe el importe correcto.';
+    res.importeTexto = importe > 0 ? `${formatoImporte(importe)}€` : '';
+    if (pl.tipo === 'error_justificante_pago' && r.estado !== 'pagado') {
+      res.problema = 'Este recibo no está cobrado, así que no hay justificante de pago que corregir.';
+    }
+    const base = { recibo: r, importeTexto: res.importeTexto };
+    if (M.incluirPrincipal) {
+      const tel = telefonoWa(M.telPrincipal);
+      if (tel) {
+        const nombre = destinatarioDeRecibo(r);
+        res.lista.push({ telefono: tel, nombre, variables: variablesDeMensaje(pl, { ...base, nombreContacto: nombre }), alumnoId: r.alumno_id, reciboId: r.id });
+      } else if (String(M.telPrincipal).trim()) res.invalidos.push(M.telPrincipal);
+    }
+    for (const m of manuales.filter(x => x.valido)) {
+      res.lista.push({ telefono: m.telefono, nombre: m.nombre, variables: variablesDeMensaje(pl, { ...base, nombreContacto: m.nombre }), alumnoId: r.alumno_id, reciboId: r.id });
+    }
+  } else {
+    const { familias } = familiasDeAlumnos(S.alumnos);
+    for (const f of familias.filter(x => M.seleccion.has(x.telefono))) {
+      res.lista.push({
+        telefono: f.telefono, nombre: f.contacto, variables: variablesDeMensaje(pl, { nombreContacto: f.contacto }),
+        alumnoId: f.alumnoIds.length === 1 ? f.alumnoIds[0] : null, reciboId: null
+      });
+    }
+    for (const m of manuales.filter(x => x.valido)) {
+      res.lista.push({ telefono: m.telefono, nombre: m.nombre, variables: variablesDeMensaje(pl, { nombreContacto: m.nombre }), alumnoId: null, reciboId: null });
+    }
+  }
+  res.lista = sinTelefonosRepetidos(res.lista);
+  if (!res.problema && !res.lista.length) res.problema = pl.lleva_pdf ? 'No hay ningún número al que enviar.' : 'Elige al menos una familia o escribe un número.';
+  return res;
+}
+
+// ------- pintado
+function renderMensajes() {
+  if (!S.profesor?.es_admin) { S.vista = 'inicio'; renderInicio(); return; }
+  const M = msgEstado();
+  const algunaActiva = S.plantillasMensajes.some(p => p.activa);
+  document.getElementById('contenido').innerHTML = `
+  <div class="msg-pagina">
+    <div class="msg-titulo">
+      <h2>💬 Mensajes por WhatsApp</h2>
+      <p class="ayuda">Felicitaciones y avisos sueltos a una o a muchas familias por WhatsApp.</p>
+    </div>
+    ${algunaActiva ? '' : `<div class="msg-aviso">
+      <strong>⏳ Todavía no se puede enviar nada.</strong>
+      Los mensajes se irán activando uno a uno cuando estén listos en WhatsApp.
+      Mientras tanto puedes prepararlo todo y ver cómo quedaría.
+    </div>`}
+
+    <h3 class="msg-paso"><span>1</span> ¿Qué quieres enviar?</h3>
+    <div class="msg-tipos">
+      ${S.plantillasMensajes.map(p => `
+      <button class="msg-tipo ${M.tipo === p.tipo ? 'activo' : ''} ${p.activa ? '' : 'inactiva'}" data-msg-tipo="${e(p.tipo)}">
+        <span class="msg-tipo-icono">${ICONOS_MENSAJE[p.tipo] || '💬'}</span>
+        <strong>${e(p.titulo)}</strong>
+        <span class="msg-tipo-desc">${e(p.descripcion)}</span>
+        <span class="msg-tipo-pie">
+          <span class="chip ${p.activa ? 'activo' : 'envio-no'}">${p.activa ? '✅ Disponible' : '⏳ Aún no disponible'}</span>
+          ${p.lleva_pdf ? '<span class="chip baja">📎 lleva PDF</span>' : '<span class="chip baja">📣 varios números</span>'}
+        </span>
+      </button>`).join('') || '<div class="vacio">No hay tipos de mensaje configurados.</div>'}
+    </div>
+
+    <div id="msg-formulario">${M.tipo && plantillaDe(M.tipo) ? '' : '<p class="ayuda msg-elige">👆 Elige un tipo de mensaje para empezar.</p>'}</div>
+
+    <details class="msg-desplegable" id="msg-det-historial">
+      <summary>🕘 Mensajes enviados <small>(${S.mensajesEnviados.length})</small></summary>
+      <div id="msg-historial"></div>
+    </details>
+  </div>`;
+
+  document.querySelectorAll('[data-msg-tipo]').forEach(b => b.onclick = () => {
+    M.tipo = b.dataset.msgTipo; M.seleccion = new Set(); M.manual = ''; M.reciboId = ''; M.busquedaRecibo = '';
+    M.importe = ''; M.incluirPrincipal = true; M.telPrincipal = '';
+    renderMensajes();
+  });
+  pintarFormularioMensaje();
+  pintarHistorialMensajes();
+}
+
+function pintarFormularioMensaje() {
+  const cont = document.getElementById('msg-formulario');
+  const M = msgEstado();
+  const pl = plantillaDe(M.tipo);
+  if (!cont || !pl) return;
+
+  const cuerpoPaso2 = pl.lleva_pdf ? `
+    <label class="msg-etq">Busca el recibo
+      <input id="msg-busca-recibo" type="search" placeholder="Nombre del alumno, número de recibo o mes…" value="${e(M.busquedaRecibo)}">
+    </label>
+    <div id="msg-recibos"></div>
+    <div id="msg-recibo-elegido"></div>` : `
+    <div class="msg-fila-cab">
+      <input id="msg-filtro" type="search" placeholder="Buscar familia o alumno…" value="${e(M.filtro)}">
+      <button class="btn chico" id="msg-todas">Todas</button>
+      <button class="btn chico liso" id="msg-ninguna">Ninguna</button>
+      <span class="flex1"></span>
+      <span class="msg-contador" id="msg-contador-sel"></span>
+    </div>
+    <div class="msg-familias" id="msg-lista"></div>
+    <p class="ayuda" id="msg-sin-tel"></p>`;
+
+  cont.innerHTML = `
+    <h3 class="msg-paso"><span>2</span> ¿A quién?</h3>
+    <div class="msg-caja">
+      ${cuerpoPaso2}
+      <label class="msg-etq">${pl.lleva_pdf ? 'Enviarlo también a otros números' : 'Otros números'} <small>(opcional · uno por línea, con el nombre detrás si quieres: 612 34 56 78 María)</small>
+        <textarea id="msg-manual" rows="3" placeholder="612 34 56 78 María&#10;623 45 67 89">${e(M.manual)}</textarea>
+      </label>
+      <p class="ayuda" id="msg-invalidos"></p>
+    </div>
+    <h3 class="msg-paso"><span>3</span> Revisa y envía</h3>
+    <div class="msg-caja" id="msg-resumen"></div>`;
+
+  const refrescar = () => { pintarListaMensaje(); pintarResumenMensaje(); };
+  const manual = document.getElementById('msg-manual');
+  manual.oninput = () => { M.manual = manual.value; pintarResumenMensaje(); };
+
+  if (pl.lleva_pdf) {
+    const busca = document.getElementById('msg-busca-recibo');
+    busca.oninput = () => { M.busquedaRecibo = busca.value; pintarListaMensaje(); };
+  } else {
+    const filtro = document.getElementById('msg-filtro');
+    filtro.oninput = () => { M.filtro = filtro.value; pintarListaMensaje(); };
+    document.getElementById('msg-todas').onclick = () => {
+      familiasDeAlumnos(S.alumnos).familias.forEach(f => M.seleccion.add(f.telefono)); refrescar();
+    };
+    document.getElementById('msg-ninguna').onclick = () => { M.seleccion = new Set(); refrescar(); };
+  }
+  refrescar();
+}
+
+// La lista del paso 2: familias con casilla (mensajes a muchos) o recibos
+// para elegir uno (mensajes con PDF).
+function pintarListaMensaje() {
+  const M = msgEstado();
+  const pl = plantillaDe(M.tipo);
+  if (!pl) return;
+  if (pl.lleva_pdf) {
+    const caja = document.getElementById('msg-recibos');
+    if (!caja) return;
+    const q = normalizarBusqueda(M.busquedaRecibo);
+    const lista = S.recibos
+      .filter(r => !q || normalizarBusqueda(`${r.alumnos?.nombre || r.alumno_nombre || ''} R-${String(r.referencia).padStart(5, '0')} ${r.concepto}`).includes(q))
+      .slice().sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+      .slice(0, 8);
+    caja.innerHTML = lista.length ? `<div class="msg-recibos">${lista.map(r => `
+      <button class="msg-recibo ${M.reciboId === r.id ? 'activo' : ''}" data-msg-recibo="${r.id}">
+        <strong>${e(r.alumnos?.nombre || r.alumno_nombre || '')}</strong>
+        <span>R-${String(r.referencia).padStart(5, '0')} · ${e(r.concepto)} · ${formatoImporte(r.importe)}€</span>
+        <span class="chip ${r.estado === 'pagado' ? 'pagado' : 'pendiente'}">${r.estado === 'pagado' ? 'cobrado' : 'pendiente'}</span>
+      </button>`).join('')}</div>` : '<p class="ayuda">No hay ningún recibo que coincida.</p>';
+    caja.querySelectorAll('[data-msg-recibo]').forEach(b => b.onclick = () => {
+      const r = S.recibos.find(x => x.id === b.dataset.msgRecibo);
+      M.reciboId = r.id;
+      M.importe = String(r.importe).replace('.', ',');
+      M.telPrincipal = telefonoDeRecibo(r) || '';
+      M.incluirPrincipal = true;
+      pintarListaMensaje();
+      pintarResumenMensaje();
+    });
+    pintarReciboElegido();
+  } else {
+    const lista = document.getElementById('msg-lista');
+    if (!lista) return;
+    const { familias, sinTelefono } = familiasDeAlumnos(S.alumnos);
+    const q = normalizarBusqueda(M.filtro);
+    const visibles = familias.filter(f => !q || normalizarBusqueda(`${f.etiqueta} ${f.contacto}`).includes(q))
+      .sort((a, b) => a.etiqueta.localeCompare(b.etiqueta));
+    lista.innerHTML = visibles.length ? visibles.map(f => `
+      <label class="msg-familia">
+        <input type="checkbox" data-msg-fam="${f.telefono}" ${M.seleccion.has(f.telefono) ? 'checked' : ''}>
+        <span class="msg-familia-nombre">${e(f.etiqueta)}</span>
+        <small>${f.contacto ? `${e(f.contacto)} · ` : ''}${e(telefonoBonito(f.telefono))}</small>
+      </label>`).join('') : '<p class="ayuda">Ninguna familia coincide.</p>';
+    lista.querySelectorAll('[data-msg-fam]').forEach(c => c.onchange = () => {
+      if (c.checked) M.seleccion.add(c.dataset.msgFam); else M.seleccion.delete(c.dataset.msgFam);
+      pintarResumenMensaje();
+    });
+    const cont = document.getElementById('msg-contador-sel');
+    if (cont) cont.textContent = `${M.seleccion.size} de ${familias.length} familias`;
+    const sin = document.getElementById('msg-sin-tel');
+    if (sin) sin.textContent = sinTelefono.length
+      ? `⚠ Sin teléfono válido (no se les puede escribir): ${unirNombres(sinTelefono)}.` : '';
+  }
+}
+
+// El recibo elegido: a quién va, con qué teléfono y el importe correcto.
+function pintarReciboElegido() {
+  const M = msgEstado();
+  const pl = plantillaDe(M.tipo);
+  const caja = document.getElementById('msg-recibo-elegido');
+  if (!caja || !pl?.lleva_pdf) return;
+  const r = S.recibos.find(x => x.id === M.reciboId);
+  if (!r) { caja.innerHTML = ''; return; }
+  const pideImporte = pl.tipo.startsWith('recibo_importe');
+  caja.innerHTML = `
+  <div class="msg-elegido">
+    <div class="msg-elegido-cab">📎 Recibo <strong>R-${String(r.referencia).padStart(5, '0')}</strong> de <strong>${e(r.alumnos?.nombre || r.alumno_nombre || '')}</strong>
+      · se adjunta el PDF ${r.estado === 'pagado' ? 'con el sello PAGADO' : 'del recibo'}.</div>
+    <div class="grid2">
+      <label class="msg-etq">Teléfono de ${e(primerNombre(destinatarioDeRecibo(r), 'la familia'))}
+        <input id="msg-tel-principal" value="${e(M.telPrincipal)}" placeholder="612 34 56 78">
+      </label>
+      ${pideImporte ? `<label class="msg-etq">Importe correcto (€)
+        <input id="msg-importe" inputmode="decimal" value="${e(M.importe)}" placeholder="60">
+      </label>` : '<div></div>'}
+    </div>
+    <label class="msg-check"><input type="checkbox" id="msg-incluir-principal" ${M.incluirPrincipal ? 'checked' : ''}> Enviárselo a este número</label>
+  </div>`;
+  document.getElementById('msg-tel-principal').oninput = (ev) => { M.telPrincipal = ev.target.value; pintarResumenMensaje(); };
+  document.getElementById('msg-incluir-principal').onchange = (ev) => { M.incluirPrincipal = ev.target.checked; pintarResumenMensaje(); };
+  const imp = document.getElementById('msg-importe');
+  if (imp) imp.oninput = () => { M.importe = imp.value; pintarResumenMensaje(); };
+}
+
+// El paso 3: vista previa del mensaje, cuántos van y el botón.
+function pintarResumenMensaje() {
+  const caja = document.getElementById('msg-resumen');
+  if (!caja) return;
+  const M = msgEstado();
+  const d = destinatariosDeMensaje();
+  const pl = d.pl;
+  if (!pl) return;
+  const ejemplo = d.lista[0]?.variables || (pl.ejemplos || []);
+  const n = d.lista.length;
+  const bloqueado = !pl.activa || Boolean(d.problema) || !n;
+  const inv = document.getElementById('msg-invalidos');
+  if (inv) inv.textContent = d.invalidos.length ? `⚠ Estos números no valen y se saltan: ${d.invalidos.join(', ')}.` : '';
+  caja.innerHTML = `
+    <div class="msg-previa-cab">Así lo verá ${n ? (n === 1 ? 'quien lo reciba' : 'cada familia') : 'quien lo reciba'}${d.lista[0] ? '' : ' <small>(con datos de ejemplo)</small>'}:</div>
+    <div class="msg-burbuja">
+      ${pl.lleva_pdf ? `<div class="msg-pdf">📄 ${d.recibo ? `Recibo_${e((d.recibo.alumnos?.nombre || d.recibo.alumno_nombre || '').replace(/\s+/g, '_'))}.pdf` : 'recibo.pdf'}</div>` : ''}
+      <div class="msg-texto">${e(rellenarPlantilla(pl.cuerpo, ejemplo))}</div>
+    </div>
+    <div class="msg-enviar">
+      <div>
+        <strong>${n} número${n === 1 ? '' : 's'}</strong>
+        ${d.problema ? `<div class="msg-problema">${e(d.problema)}</div>` : ''}
+        ${!pl.activa ? `<div class="msg-problema">⏳ Este mensaje aún no está disponible: se activará cuando esté listo.</div>` : ''}
+      </div>
+      <button class="btn primario" id="msg-enviar" ${bloqueado ? 'disabled' : ''}>${pl.activa ? 'Enviar ahora' : 'Aún no disponible'}</button>
+    </div>`;
+  const b = document.getElementById('msg-enviar');
+  if (b) b.onclick = () => enviarLoteMensajes();
+}
+
+function pintarHistorialMensajes() {
+  const cont = document.getElementById('msg-historial');
+  if (!cont) return;
+  if (!S.mensajesEnviados.length) { cont.innerHTML = '<p class="ayuda">Todavía no se ha enviado ningún mensaje desde aquí.</p>'; return; }
+  cont.innerHTML = `<div class="tabla-wrap"><table>
+    <thead><tr><th>Cuándo</th><th>Mensaje</th><th>Para</th><th>Estado</th><th>Quién</th></tr></thead>
+    <tbody>${S.mensajesEnviados.map(m => {
+      const pl = plantillaDe(m.tipo);
+      const f = new Date(m.fecha);
+      const quien = S.profesores.find(p => p.id === m.profesor_id)?.nombre || '';
+      return `<tr>
+        <td>${f.toLocaleDateString('es-ES')} ${horaLocal(m.fecha)}</td>
+        <td>${e(pl?.titulo || m.tipo)}</td>
+        <td>${e(m.nombre || '')} <small>${e(telefonoBonito(m.telefono))}</small></td>
+        <td>${m.estado === 'enviado' ? '<span class="chip pagado">enviado</span>' : `<span class="chip pendiente" title="${e(m.error || '')}">error</span>`}</td>
+        <td>${e(quien)}</td></tr>`;
+    }).join('')}</tbody></table></div>`;
+}
+
+// ------- envío
+// PDF del recibo (o del justificante, con el sello PAGADO) tal como está AHORA
+// — con el importe actual, que es justo lo que se ha corregido.
+async function pdfDeReciboParaMensaje(r, pagado) {
+  const bytes = await generarReciboPdf({
+    fechaEmision: fmtFecha(r.fecha_emision),
+    recibiDe: nombreParaReciboPdf(r),
+    cantidadLetras: importeALetras(r.importe),
+    concepto: r.concepto,
+    desglose: desgloseDeRecibo(r.concepto, r.importe, r.importe_matricula) || undefined,
+    totalCifra: formatoImporte(r.importe),
+    referencia: 'R-' + String(r.referencia).padStart(5, '0'),
+    logoPngBase64: S.logoBase64,
+    pagado,
+    fechaPago: pagado ? fmtFecha((r.fecha_pago || new Date().toISOString()).slice(0, 10)) : null
+  });
+  return { base64: bytesABase64(bytes), nombreArchivo: nombreArchivoRecibo(r.alumnos?.nombre || r.alumno_nombre || 'alumno', r.concepto, pagado) };
+}
+
+// Mensaje de error de una función de Supabase que respondió con error.
+async function textoErrorFuncion(error) {
+  try {
+    const j = await error.context.json();
+    if (j?.error) return { texto: j.error, inactiva: Boolean(j.inactiva) };
+  } catch { /* sin cuerpo legible */ }
+  return { texto: error.message || 'el servidor rechazó el envío', inactiva: false };
+}
+
+async function enviarLoteMensajes() {
+  const d = destinatariosDeMensaje();
+  const pl = d.pl;
+  if (!pl || !pl.activa || d.problema || !d.lista.length) return;
+  const n = d.lista.length;
+  const aviso = pl.categoria === 'marketing'
+    ? ' Es un mensaje de felicitación/promoción: envíalo solo a familias que han aceptado recibir mensajes de la academia.' : '';
+  if (!(await confirmarAccion(`Vas a enviar «${pl.titulo}» a ${n} número${n === 1 ? '' : 's'}.${aviso} No se puede deshacer.`))) return;
+
+  let pdf = null;
+  if (pl.lleva_pdf) {
+    try { pdf = await pdfDeReciboParaMensaje(d.recibo, d.recibo.estado === 'pagado'); }
+    catch (err) { return avisar('No se pudo preparar el PDF: ' + err.message, true); }
+  }
+
+  let cancelado = false;
+  abrirModal(`
+    <h2>Enviando «${e(pl.titulo)}»…</h2>
+    <p class="ayuda" id="msg-prog-texto">Preparando…</p>
+    <div class="msg-barra"><i id="msg-prog-barra" style="width:0%"></i></div>
+    <div class="pie-modal"><button class="btn liso" id="msg-prog-cancelar">Parar</button></div>`);
+  document.getElementById('msg-prog-cancelar').onclick = () => { cancelado = true; };
+
+  const resultados = [];
+  for (let i = 0; i < d.lista.length && !cancelado; i++) {
+    const dst = d.lista[i];
+    document.getElementById('msg-prog-texto').textContent = `Enviando ${i + 1} de ${n}…`;
+    document.getElementById('msg-prog-barra').style.width = `${Math.round((i / n) * 100)}%`;
+    let res;
+    try {
+      const { data, error } = await S.sb.functions.invoke('enviar-mensaje', {
+        body: { tipo: pl.tipo, telefono: dst.telefono, variables: dst.variables, ...(pdf ? { pdfBase64: pdf.base64, nombreArchivo: pdf.nombreArchivo } : {}) }
+      });
+      if (error) { const t = await textoErrorFuncion(error); res = { ok: false, error: t.texto, inactiva: t.inactiva }; }
+      else if (data?.ok) res = { ok: true, mensajeId: data.mensajeId || null };
+      else res = { ok: false, error: data?.error || 'error desconocido', inactiva: Boolean(data?.inactiva) };
+    } catch (err) {
+      res = { ok: false, error: err.message };
+    }
+    resultados.push({ dst, res });
+    if (res.inactiva) break; // la plantilla no está activa: no tiene sentido seguir
+    await new Promise(r => setTimeout(r, 250)); // sin atropellar a la API de WhatsApp
+  }
+
+  // Todo queda anotado, también lo que falló.
+  if (resultados.length) {
+    const { error } = await S.sb.from('mensajes_whatsapp').insert(resultados.map(({ dst, res }) => ({
+      tipo: pl.tipo, telefono: dst.telefono, nombre: dst.nombre || null, alumno_id: dst.alumnoId, recibo_id: dst.reciboId,
+      variables: dst.variables, estado: res.ok ? 'enviado' : 'error', error: res.ok ? null : String(res.error).slice(0, 500),
+      whatsapp_message_id: res.mensajeId || null
+    })));
+    if (error) console.warn('No se pudo guardar el historial de mensajes:', error.message);
+  }
+  const ok = resultados.filter(x => x.res.ok).length;
+  const fallos = resultados.filter(x => !x.res.ok);
+  if (ok) {
+    registrarActividad('mensaje', {
+      detalle: `${pl.titulo} · ${ok} enviado${ok === 1 ? '' : 's'}${fallos.length ? `, ${fallos.length} con error` : ''}`, importe: null
+    });
+  }
+  await cargarMensajes();
+
+  const sinEnviar = n - resultados.length;
+  abrirModal(`
+    <h2>${fallos.length ? 'Terminado, con errores' : 'Enviado ✓'}</h2>
+    <p><strong>${ok}</strong> enviado${ok === 1 ? '' : 's'}${fallos.length ? ` · <strong>${fallos.length}</strong> con error` : ''}${sinEnviar ? ` · ${sinEnviar} sin enviar (parado)` : ''}.</p>
+    ${fallos.length ? `<ul class="detalle-alumnos" style="columns:1">${fallos.map(f => `<li>${e(f.dst.nombre || telefonoBonito(f.dst.telefono))} <small>${e(telefonoBonito(f.dst.telefono))}</small><br><small>${e(f.res.error)}</small></li>`).join('')}</ul>` : ''}
+    <p class="ayuda">«Enviado» significa que WhatsApp ha aceptado el mensaje; si el número no tiene WhatsApp no llegará aunque salga aquí.</p>
+    <div class="pie-modal"><button class="btn primario" id="msg-fin">Cerrar</button></div>`);
+  document.getElementById('msg-fin').onclick = () => { cerrarModal(); if (S.vista === 'mensajes') renderMensajes(); };
 }
 
 function separarNombreApellidos(a) {
@@ -2575,6 +3152,10 @@ function modalAlumno(alumno) {
     // Si reactiva un profesor (no la admin), se avisa a la admin para que lo revise.
     if (estadoNuevo === 'activo' && !esAdmin) {
       await S.sb.from('reactivaciones_alumno').insert({ alumno_id: alumnoId, profesor_id: S.profesor.id });
+    } else if (estadoNuevo === 'activo') {
+      registrarActividad('reactivacion', { alumnoId }); // la de un profesor ya queda en reactivaciones_alumno
+    } else if (alumno) {
+      registrarActividad('ficha_editada', { alumnoId, detalle: 'Ficha del alumno guardada' });
     }
     cerrarModal();
     await Promise.all([cargarAlumnos(), cargarReactivaciones()]);
@@ -2593,6 +3174,7 @@ async function confirmarBajaCompleta(alumno) {
   if (!(await confirmarAccion(`Vas a dar de baja a ${alumno.nombre} de TODO: todas las asignaturas y todas las clases. La ficha se conserva en el filtro "Bajas" por si vuelve. ¿Continuar?`))) return;
   const { error } = await S.sb.rpc('dar_baja_alumno', { p_alumno: alumno.id });
   if (error) return avisar('Error: ' + error.message, true);
+  registrarActividad('baja_alumno', { alumnoId: alumno.id, detalle: 'De todas las asignaturas' });
   cerrarModal();
   await Promise.all([cargarAlumnos(), cargarClases()]);
   renderAlumnos();
@@ -2615,6 +3197,10 @@ async function confirmarBajaAsignatura(alumno, asignaturaId, nombreAsignatura) {
     await S.sb.from('bajas_asignatura').insert({
       alumno_id: alumno.id, asignatura_id: asignaturaId, profesor_id: S.profesor.id
     });
+  } else {
+    // La de un profesor ya queda en bajas_asignatura (de ahí la lee el panel
+    // de movimientos); la de un admin no tenía dónde, se apunta aquí.
+    registrarActividad('baja_asignatura', { alumnoId: alumno.id, detalle: nombreAsignatura });
   }
   cerrarModal();
   await Promise.all([cargarAlumnos(), cargarClases(), cargarBajasAsignatura()]);
@@ -3170,6 +3756,13 @@ const COLORES_CLASE = ['#F28C28', '#3D7DC8', '#2E9E5B', '#8E5BBF', '#C8506A',
   '#2C6E8C', '#8E6BC8', '#3E9E7A', '#B87333', '#5C6BC0',
   '#9E3E6B', '#4A9E9E', '#8A9E2E', '#9E6B2E', '#6E4E9E'];
 
+// Cuántos alumnos van a la sesión con más gente de la clase: el aforo es por
+// sesión, y quien solo va algunos días no ocupa plaza los demás.
+function maxAlumnosPorDia(clase) {
+  const dias = diasDeClase(clase?.clase_horarios);
+  return dias.length ? Math.max(...dias.map(d => apuntadosEnDia(clase, d).length)) : (clase?.clase_alumnos || []).length;
+}
+
 // Una clase puede tener varias asignaturas (ej. un alumno suelto entre medio
 // de dos niveles: "Inglés B2" + "Inglés B1" en el mismo grupo).
 function idsAsignaturasClase(clase) {
@@ -3205,13 +3798,14 @@ function renderClases() {
     ${lista.map(c => {
       const n = (c.clase_alumnos || []).length;
       const cap = c.capacidad || 6;
+      const maxDia = maxAlumnosPorDia(c);
       const col = colorClase(c);
       return `<div class="clase-tile" data-abrir-clase="${c.id}"
         style="background:${col.fondo}; border-top-color:${col.borde}">
         <div class="tile-nombre">${e(c.nombre)}</div>
         <div class="tile-asig">${e(nombresAsignaturasClase(c))}</div>
         <div class="tile-horario">${e(textoHorarios(c))}</div>
-        <div class="tile-pie">${n}/${cap} alumnos${n >= cap ? ' · lleno' : ''}${esAdmin ? ' · ' + e(c.profesores?.nombre || '') : ''}</div>
+        <div class="tile-pie">${maxDia < n ? `${n} apuntados · máx. ${maxDia}/${cap} por día` : `${n}/${cap} alumnos`}${maxDia >= cap ? ' · lleno' : ''}${esAdmin ? ' · ' + e(c.profesores?.nombre || '') : ''}</div>
       </div>`;
     }).join('')}
   </div>`}`;
@@ -3267,8 +3861,11 @@ function modalDetalleClase(clase, fechaCtx) {
       ${fmtFecha(x.fecha)} · ${horaCorta(x.hora)}${x.nombre ? ' · ' + e(x.nombre) : ''}
       <button class="quitar-exc" data-quitar-exc="${x.id}" title="Eliminar la clase alternativa">✕</button></span>`).join('')}
   </div>` : ''}
-  <h3 class="seccion">Alumnos (${alumnos.length}/${clase.capacidad || 6})${alumnos.length >= (clase.capacidad || 6) ? ' — grupo lleno' : ''}</h3>
+  <h3 class="seccion" id="dc-titulo-alumnos">Alumnos (${alumnos.length}/${clase.capacidad || 6})${maxAlumnosPorDia(clase) >= (clase.capacidad || 6) ? ' — grupo lleno' : ''}</h3>
   ${alumnos.length === 0 ? '<p class="ayuda">Todavía no hay alumnos apuntados.</p>' : `
+  ${diasDeClase(clase.clase_horarios).length > 1 ? `<p class="ayuda dias-ayuda">📅 <strong>Días que va cada alumno:</strong>
+    <span class="dia-pill va">✓ Lun</span> los que va · <span class="dia-pill no-va">✕ Mié</span> el que <strong>NO</strong> va.
+    Toca un día para marcar que ese alumno <strong>no va</strong> ese día; tócalo otra vez para deshacerlo.</p>` : ''}
   <p class="ayuda">Elige el día de esa clase y marca a quien haya faltado — se guarda al momento en "Faltas alumnos" de Inicio.</p>
   <div class="asistencia-barra">
     <label>Día<input type="date" id="dc-fecha" value="${e(fechaCtx || hoyIso)}"></label>
@@ -3320,18 +3917,57 @@ function pintarPaseDeLista(clase, alumnos, hs) {
     if ($sel) $sel.onchange = () => { horaSel = $sel.value; pintarLista(); };
   };
 
+  const diasClase = diasDeClase(hs);
+  const caDe = (id) => (clase.clase_alumnos || []).find(ca => ca.alumno_id === id);
+
   const pintarLista = () => {
     const fecha = $fecha.value;
+    // Si ese día de la semana no tiene clase (una recuperación suelta) vienen todos;
+    // si lo tiene, no vienen los que tienen ese día tachado.
+    const dia = diaSemanaDeFecha(fecha);
+    const hayClaseEseDia = hs.some(h => h.dia_semana === dia);
     $lista.innerHTML = alumnos.map(a => {
+      const ca = caDe(a.id);
+      const viene = !hayClaseEseDia || asisteEnDia(ca, dia);
       const falta = S.faltas.find(f => f.alumno_id === a.id && f.clase_id === clase.id
         && f.fecha === fecha && horaCorta(f.hora) === horaSel);
-      return `<li class="fila-pago" data-alumno="${a.id}">
-        <span class="flex1">${e(a.nombre)}${a.telefono ? ` · <small>${e(a.telefono)}</small>` : ''}</span>
-        ${falta
-          ? `<span class="chip falta-si">❌ Faltó</span><button class="btn chico liso" data-quitar-falta="${falta.id}">Deshacer</button>`
-          : `<button class="btn chico liso falta-marcar" data-marcar-falta="${a.id}">Falta de asistencia</button>`}
+      const pastillas = diasClase.length > 1 ? `<span class="dias-va">${diasClase.map(d => {
+        const va = asisteEnDia(ca, d);
+        const nombreDia = DIAS[d - 1].toLowerCase();
+        return `<button type="button" class="dia-pill ${va ? 'va' : 'no-va'}" data-dia-alumno="${a.id}|${d}"
+          title="${va ? `Va el ${nombreDia}. Toca para marcar que NO va ese día.` : `NO va el ${nombreDia}. Toca para volver a apuntarlo.`}">${va ? '✓' : '✕'} ${DIAS_CORTO[d - 1]}</button>`;
+      }).join('')}</span>` : '';
+      return `<li class="fila-pago ${viene ? '' : 'no-viene'}" data-alumno="${a.id}">
+        <span class="flex1 nombre-alumno">${e(a.nombre)}${a.telefono ? ` · <small>${e(a.telefono)}</small>` : ''}</span>
+        ${pastillas}
+        ${!viene
+          ? '<span class="chip baja">No viene este día</span>'
+          : falta
+            ? `<span class="chip falta-si">❌ Faltó</span><button class="btn chico liso" data-quitar-falta="${falta.id}">Deshacer</button>`
+            : `<button class="btn chico liso falta-marcar" data-marcar-falta="${a.id}">Falta de asistencia</button>`}
       </li>`;
     }).join('');
+    document.querySelectorAll('[data-dia-alumno]').forEach(b => b.onclick = async () => {
+      const [alumnoId, diaTxt] = b.dataset.diaAlumno.split('|');
+      const ca = caDe(alumnoId);
+      const r = alternarDia(ca?.dias_semana, diasClase, Number(diaTxt));
+      if (r.error) return avisar('Tiene que ir al menos a un día. Si ya no viene a ninguno, quítalo de la clase (✏️).', true);
+      b.disabled = true;
+      const { error } = await S.sb.from('clase_alumnos').update({ dias_semana: r.dias })
+        .eq('clase_id', clase.id).eq('alumno_id', alumnoId);
+      if (error) {
+        b.disabled = false;
+        return avisar(error.message.startsWith('Conflicto de horario') ? '⚠ ' + error.message : 'Error: ' + error.message, true);
+      }
+      if (ca) ca.dias_semana = r.dias; // se ve al momento; abajo se recarga todo
+      pintarLista();
+      const cap = clase.capacidad || 6;
+      const titulo = document.getElementById('dc-titulo-alumnos');
+      if (titulo) titulo.textContent = `Alumnos (${alumnos.length}/${cap})${maxAlumnosPorDia(clase) >= cap ? ' — grupo lleno' : ''}`;
+      await cargarClases();
+      if (S.vista === 'horario') renderHorario();
+      if (S.vista === 'clases') renderClases();
+    });
     document.querySelectorAll('[data-marcar-falta]').forEach(b => b.onclick = async () => {
       b.disabled = true;
       const { error } = await S.sb.from('faltas_alumnos').insert({
@@ -3517,6 +4153,12 @@ function modalClase(clase) {
   }));
   if (!hs.length) hs.push({ dia_semana: 1, hora: '17:00', duracion_min: 60 });
   const marcados = new Set((c.clase_alumnos || []).map(ca => ca.alumno_id));
+  // Los días a los que va cada alumno (solo algunos de los de la clase) se
+  // cambian desde la ficha de la clase, no aquí; pero al guardar aquí se
+  // reescriben todos los apuntados, así que se conservan tal cual estaban.
+  const diasPorAlumno = new Map((c.clase_alumnos || [])
+    .filter(ca => ca.dias_semana?.length).map(ca => [ca.alumno_id, new Set(ca.dias_semana)]));
+  const diasDeLaClase = () => diasDeClase(hs);
   // Normalmente una sola asignatura; puede haber varias si el grupo mezcla
   // niveles (ej. un alumno suelto que da Inglés B1 mientras el resto da B2).
   const asigs = idsAsignaturasClase(c).length
@@ -3683,6 +4325,7 @@ function modalClase(clase) {
   const selProf = document.getElementById('c-prof');
   if (selProf) selProf.onchange = () => {
     marcados.clear();
+    diasPorAlumno.clear();
     pintarAlumnos();
     asigs.length = 0;
     asigs.push(asignaturasDeProfesor(selProf.value)[0]?.id ?? null);
@@ -3757,7 +4400,10 @@ function modalClase(clase) {
     }
     await S.sb.from('clase_alumnos').delete().eq('clase_id', claseId);
     if (marcados.size) {
-      const { error: ea } = await S.sb.from('clase_alumnos').insert([...marcados].map(id => ({ clase_id: claseId, alumno_id: id })));
+      const diasClase = diasDeLaClase();
+      const { error: ea } = await S.sb.from('clase_alumnos').insert([...marcados].map(id => ({
+        clase_id: claseId, alumno_id: id, dias_semana: normalizarDias(diasPorAlumno.get(id), diasClase)
+      })));
       if (ea) return mostrarError(ea);
     }
     cerrarModal();
@@ -3981,7 +4627,7 @@ function htmlHuecos(profesorId, esAdmin) {
             html: `<div class="hueco-card">${minutosAHora(a)}–${minutosAHora(b)}<small>libre · ${duracionTexto(b - a)}</small></div>`
           })),
           ...enTramo.map(s => {
-            const n = (s.clase.clase_alumnos || []).length;
+            const n = apuntadosEnDia(s.clase, s.dia_semana).length;
             const cap = s.clase.capacidad || 6;
             const restantes = cap - n;
             return {
@@ -4039,7 +4685,7 @@ function htmlSemana(sesiones, esAdmin) {
       <div class="dia-titulo">${DIAS[d]} <span class="dia-num">${fechas[d].getDate()}</span></div>
       ${porDia[d].length === 0 ? '<div class="dia-libre">—</div>' : porDia[d].map(s => {
         const color = colorClase(s.clase);
-        const n = (s.clase.clase_alumnos || []).length;
+        const n = s.extra ? (s.clase.clase_alumnos || []).length : apuntadosEnDia(s.clase, s.dia_semana).length;
         const estaAnulada = !s.extra && anuladas.has(s.clase.id + '|' + fecha);
         return `
       <div class="clase-card ${estaAnulada ? 'anulada' : ''} ${s.extra ? 'alternativa' : ''}"
@@ -4485,6 +5131,13 @@ function bytesABase64(bytes) {
   return btoa(binario);
 }
 
+function apuntarEnvioDeRecibo(r) {
+  registrarActividad('recibo_enviado', {
+    alumnoId: r.alumno_id, importe: Number(r.importe),
+    detalle: `R-${String(r.referencia).padStart(5, '0')} · ${r.concepto} · por WhatsApp`
+  });
+}
+
 // Envía un recibo (o el justificante de pago) con el PDF ya adjunto.
 // Devuelve { ok, simulado, error } — nunca lanza, para poder usarlo en tandas.
 async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
@@ -4553,6 +5206,9 @@ async function enviarPorWhatsAppApi(recibo, tipo = 'recibo') {
     }
     const { error: errorUpdate } = await S.sb.from('recibos').update(actualizacion).eq('id', recibo.id);
     if (errorUpdate) return { ok: false, error: 'enviado, pero no se pudo guardar el estado: ' + errorUpdate.message };
+    // El justificante de pago ya deja su rastro (envio_pago_por); el envío del
+    // recibo normal no, así que se apunta aquí para "Movimientos".
+    if (!esPago && !data.simulado) apuntarEnvioDeRecibo(recibo);
     return { ok: true, simulado: Boolean(data.simulado), idsIncluidos: [recibo.id] };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -4764,6 +5420,7 @@ async function enviarPorWhatsAppApiConjunto(recibos, tipo = 'recibo') {
         .in('id', resto.map(r => r.id));
       if (errorResto) return { ok: false, error: 'enviado, pero no se pudo guardar el estado de todos: ' + errorResto.message };
     }
+    if (!esPago && !data.simulado) recibos.forEach(apuntarEnvioDeRecibo);
     return { ok: true, simulado: Boolean(data.simulado), idsIncluidos: recibos.map(r => r.id) };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -4879,14 +5536,16 @@ function idsHermanastrosDe(alumno) {
 
 // Recibos de esos alumnos que están en el MISMO paso de la cadena que `r`
 // (pendientes con pendientes, pagados con pagados — no tiene sentido juntar
-// un pendiente con uno ya cobrado) y del mismo mes de emisión. No se guarda
-// ningún enlace entre recibos: se calcula al vuelo cada vez, así que
-// funciona con 2 o con 3 y da igual quién ni cuándo generó cada uno.
+// un pendiente con uno ya cobrado) y del MISMO MES FACTURADO (sus periodos,
+// no el día en que se generaron: si no, un recibo de octubre generado el 18
+// de noviembre se juntaba con el de noviembre del hermano y, al cobrar uno,
+// se daba por cobrado el otro). No se guarda ningún enlace entre recibos: se
+// calcula al vuelo cada vez, así que funciona con 2 o con 3 y da igual quién
+// ni cuándo generó cada uno.
 function recibosDeAlumnosEnMismoPaso(r, ids) {
   if (!ids.size) return [];
-  const mesR = claveMes(r.fecha_emision);
   return S.recibos.filter(r2 => r2.id !== r.id && ids.has(r2.alumno_id)
-    && claveMes(r2.fecha_emision) === mesR && r2.estado === r.estado);
+    && mismosMesesDeRecibo(r2, r) && r2.estado === r.estado);
 }
 function recibosHermanosPorApellidoDe(r) {
   return recibosDeAlumnosEnMismoPaso(r, idsHermanosPorApellido(S.alumnos.find(a => a.id === r.alumno_id)));
@@ -5086,9 +5745,7 @@ function claveMes(fechaIso) {
 // pero no cuando se genera con unos días de margen (septiembre es manual) o
 // de antelación ("empieza el próximo mes"). Sin periodos (recibos muy
 // antiguos), se usa la fecha de emisión como mejor estimación disponible.
-function mesesDeRecibo(r) {
-  return (r.periodos && r.periodos.length) ? r.periodos : [claveMes(r.fecha_emision)];
-}
+// (mesesDeRecibo vive en lib/util.js para poder probarse con `npm test`)
 function reciboEsDelMes(r, mes) {
   return mesesDeRecibo(r).includes(mes);
 }
@@ -5873,6 +6530,12 @@ function renderRecibos() {
     const { error } = await S.sb.from('recibos').update({ estado: 'pendiente', fecha_pago: null, fecha_envio_whatsapp_pago: null, envio_pago_por: null, justificante_papel: false, cuenta: null, cobro_rapido: false, cobrado_por: null, importe_parcial: null, pdf_path: null })
       .in('id', ids);
     if (error) return avisar('Error: ' + error.message, true);
+    for (const x of [r, ...hermanos]) {
+      registrarActividad('recibo_pendiente', {
+        alumnoId: x.alumno_id, importe: Number(x.importe),
+        detalle: `R-${String(x.referencia).padStart(5, '0')} · ${x.concepto}`
+      });
+    }
     await Promise.all([cargarRecibos(), cargarFinanzas()]);
     renderRecibos();
     avisar('Recibo devuelto a pendientes.');
@@ -5882,6 +6545,10 @@ function renderRecibos() {
     if (!(await confirmarAccion(`¿Eliminar el recibo R-${String(r.referencia).padStart(5, '0')} de ${r.alumnos?.nombre || ''} (${formatoImporte(r.importe)}€, ${r.concepto})? Esta acción no se puede deshacer.`))) return;
     const { error } = await S.sb.from('recibos').delete().eq('id', r.id);
     if (error) return avisar('Error al eliminar: ' + error.message, true);
+    registrarActividad('recibo_eliminado', {
+      alumnoId: r.alumno_id, importe: Number(r.importe),
+      detalle: `R-${String(r.referencia).padStart(5, '0')} · ${r.concepto}${r.estado === 'pagado' ? ' · estaba cobrado' : ''}`
+    });
     await cargarRecibos();
     renderRecibos();
     avisar('Recibo eliminado.');
